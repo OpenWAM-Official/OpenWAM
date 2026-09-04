@@ -82,10 +82,10 @@ class VLABenchDataset(LeRobotV3Reader):
     PROMPT_SOURCE = "task_index"
     PROMPT_FILE_REQUIRED = True
     # Sim data is clean (no outliers), so plain min-max matches the RoboTwin /
-    # LIBERO deploy convention; eef_stats.json carries all six stat fields so a
+    # LIBERO deploy convention; the stats payload carries all six stat fields so a
     # config can still opt into quantile / z-score.
     DEFAULT_NORMALIZE_MODE = "min-max"
-    STATS_FILENAME = "eef_stats.json"
+    STATS_FILENAME = "vlabench_normalization_stats.npy"
     STATS_DIM = EEF10_DIM
     STATS_STRICT_MINMAX = True
     # Serve the unified action but stay deployable: the deploy server gathers
@@ -197,13 +197,50 @@ class VLABenchDataset(LeRobotV3Reader):
         eps["data/file_index"] = files
         eps["_data_row_offset"] = row_offset
 
+    def _build_stats_rank0(self, path) -> None:
+        """Auto-build the pooled stats file: rank 0 scans, other ranks wait."""
+        import os
+        import time
+
+        try:
+            import torch.distributed as dist
+
+            dist_ready = dist.is_available() and dist.is_initialized()
+        except Exception:
+            dist_ready = False
+        if dist_ready:
+            rank = dist.get_rank()
+        else:
+            # torchrun sets RANK before init_process_group; honor it so
+            # pre-init constructions still elect a single builder.
+            rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
+        if rank == 0:
+            from openwam.dataloader.utils.stats_computation.vlabench_stats_computation import (
+                build_and_save_vlabench_stats,
+            )
+
+            build_and_save_vlabench_stats(self._dataset_dir, output=path)
+        else:
+            deadline = time.monotonic() + float(os.environ.get("OPENWAM_STATS_WAIT_TIMEOUT_S", 12 * 60 * 60))
+            poll_interval_s = float(os.environ.get("OPENWAM_STATS_POLL_INTERVAL_S", 10))
+            while not path.is_file():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out waiting for rank 0 to build VLABench stats: {path}")
+                time.sleep(poll_interval_s)
+
     def _load_stats(self, info: dict):
-        """Load ``meta/eef_stats.json`` and emit the deploy denormalizer artifact.
+        """Load ``meta/vlabench_normalization_stats.npy`` (auto-built on first
+        use — rank 0 scans, other ranks wait) and emit the deploy denormalizer
+        artifact.
 
         The base implementation only materializes the in-reader stats; without
         also writing ``meta/normalization_stats.npy`` the trained checkpoint
         would have no denormalizer and deploy would return normalized actions.
         """
+        if self._normalize_mode and self._normalize_mode not in ("none", "null"):
+            stats_path = self._dataset_dir / "meta" / self.STATS_FILENAME
+            if not stats_path.is_file():
+                self._build_stats_rank0(stats_path)
         stats = super()._load_stats(info)
         if stats is not None:
             self._write_deploy_normalizer_stats(stats, STAT_KEYS)

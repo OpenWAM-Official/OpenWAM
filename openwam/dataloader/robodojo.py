@@ -20,11 +20,11 @@ float noise around ``-3e-17`` is clipped to ``0``.
 from __future__ import annotations
 
 import bisect
-import fcntl
 import hashlib
 import io
 import json
-import random
+import os
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -62,7 +62,7 @@ from openwam.dataloader.transforms.normalize import (
     YAML_TO_NORM_MODE,
     Normalizer,
 )
-from openwam.dataloader.transforms.video import VideoColorJitter
+from openwam.dataloader.transforms.video import VideoColorJitter, color_jitter_enabled
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, STAT_KEYS
 from openwam.dataloader.utils.poses import (
     arms_to_eef20,
@@ -174,21 +174,21 @@ def _sanitize_gripper(
     value: Any,
     *,
     source: str,
-    dataset_variant: str = ROBODOJO_SIM_VARIANT,
+    variant: str = ROBODOJO_SIM_VARIANT,
 ) -> np.ndarray:
     gripper = np.asarray(value)
     if gripper.dtype.kind not in "fiu" or not np.all(np.isfinite(gripper)):
         raise ValueError(f"{source} must contain only finite gripper values")
-    validate_dataset_variant(dataset_variant)
+    validate_dataset_variant(variant)
     atol = (
         ROBODOJO_REAL_GRIPPER_SENSOR_ATOL
-        if dataset_variant == ROBODOJO_REAL_VARIANT
+        if variant == ROBODOJO_REAL_VARIANT
         else _GRIPPER_ATOL
     )
     if np.any((gripper < -atol) | (gripper > 1.0 + atol)):
         raise ValueError(
             f"{source} gripper values must be within [0, 1] up to the "
-            f"{dataset_variant} sensor tolerance {atol:g}"
+            f"{variant} sensor tolerance {atol:g}"
         )
     return np.clip(gripper, 0.0, 1.0)
 
@@ -199,7 +199,7 @@ def read_calibrated_eef20(
     start: int | None = None,
     end: int | None = None,
     *,
-    dataset_variant: str = ROBODOJO_SIM_VARIANT,
+    variant: str = ROBODOJO_SIM_VARIANT,
     embodiment: str = ROBODOJO_EMBODIMENT,
 ) -> np.ndarray:
     """Read achieved states through the selected release's EEF20 path.
@@ -208,7 +208,7 @@ def read_calibrated_eef20(
     reader/stats conversion parity without a second frame or rotation
     implementation.
     """
-    validate_embodiment(embodiment, dataset_variant=dataset_variant)
+    validate_embodiment(embodiment, variant=variant)
     if isinstance(episode, (str, Path)):
         with h5py.File(episode, "r") as handle:
             return read_calibrated_eef20(
@@ -216,7 +216,7 @@ def read_calibrated_eef20(
                 calibration,
                 start,
                 end,
-                dataset_variant=dataset_variant,
+                variant=variant,
                 embodiment=embodiment,
             )
 
@@ -226,14 +226,14 @@ def read_calibrated_eef20(
     left_gripper = _sanitize_gripper(
         episode[_GRIPPER_KEYS[0]][selection],
         source=_GRIPPER_KEYS[0],
-        dataset_variant=dataset_variant,
+        variant=variant,
     )
     right_gripper = _sanitize_gripper(
         episode[_GRIPPER_KEYS[1]][selection],
         source=_GRIPPER_KEYS[1],
-        dataset_variant=dataset_variant,
+        variant=variant,
     )
-    if dataset_variant == ROBODOJO_REAL_VARIANT:
+    if variant == ROBODOJO_REAL_VARIANT:
         if calibration is not None:
             raise ValueError(
                 "RoboDojo_real uses native per-arm base poses; calibration "
@@ -275,10 +275,10 @@ def _decode_instruction(value: Any, *, source: str) -> str:
 def validate_robodojo_episode(
     path: str | Path,
     *,
-    dataset_variant: str = ROBODOJO_SIM_VARIANT,
+    variant: str = ROBODOJO_SIM_VARIANT,
 ) -> dict[str, Any]:
     """Validate every binding HDF5 field and return index-time metadata."""
-    validate_dataset_variant(dataset_variant)
+    validate_dataset_variant(variant)
     episode_path = Path(path)
     with h5py.File(episode_path, "r") as handle:
         for key in _REQUIRED_DATASETS:
@@ -365,7 +365,7 @@ def validate_robodojo_episode(
             _sanitize_gripper(
                 handle[key][()],
                 source=f"{episode_path}:{key}",
-                dataset_variant=dataset_variant,
+                variant=variant,
             )
 
         instruction_dataset = handle["instruction"]
@@ -414,10 +414,10 @@ def discover_robodojo_tasks(
     dataset_dir: str | Path,
     *,
     embodiment: str = ROBODOJO_EMBODIMENT,
-    dataset_variant: str = ROBODOJO_SIM_VARIANT,
+    variant: str = ROBODOJO_SIM_VARIANT,
 ) -> list[str]:
     """Discover sorted task directories under the formal RoboDojo root."""
-    validate_embodiment(embodiment, dataset_variant=dataset_variant)
+    validate_embodiment(embodiment, variant=variant)
     root = Path(dataset_dir)
     flat_data = root / embodiment / "data"
     if flat_data.is_dir() and any(flat_data.glob("episode_*.hdf5")):
@@ -448,13 +448,13 @@ def resolve_robodojo_tasks(
     *,
     tasks: Sequence[str] | None = None,
     embodiment: str = ROBODOJO_EMBODIMENT,
-    dataset_variant: str = ROBODOJO_SIM_VARIANT,
+    variant: str = ROBODOJO_SIM_VARIANT,
 ) -> list[str]:
     """Discover all formal tasks, optionally restricting an internal scan."""
     available = discover_robodojo_tasks(
         dataset_dir,
         embodiment=embodiment,
-        dataset_variant=dataset_variant,
+        variant=variant,
     )
     if not available:
         raise FileNotFoundError(
@@ -472,92 +472,95 @@ def resolve_robodojo_tasks(
 def default_robodojo_stats_path(
     dataset_dir: str | Path,
     *,
-    dataset_variant: str,
+    variant: str,
     embodiment: str,
-    tasks: Sequence[str],
 ) -> Path:
-    """Return the deterministic in-dataset stats path for a task selection."""
-    validate_embodiment(embodiment, dataset_variant=dataset_variant)
-    selected = sorted(set(str(task) for task in tasks))
-    if not selected:
-        raise ValueError("RoboDojo normalization stats require at least one task")
-    available = discover_robodojo_tasks(
-        dataset_dir,
-        embodiment=embodiment,
-        dataset_variant=dataset_variant,
-    )
-    if selected == available:
-        selection_suffix = ""
+    """Return the canonical in-dataset stats path.
+
+    Stats are always pooled over EVERY task the corpus holds for the variant
+    (task selections share the same file). The real corpus mixes embodiments
+    under one root, so its filename keeps the embodiment; sim is arx_x5-only.
+    """
+    validate_embodiment(embodiment, variant=variant)
+    if variant == ROBODOJO_REAL_VARIANT:
+        filename = f"robodojo_real_{embodiment}_normalization_stats.npy"
     else:
-        selection_fingerprint = hashlib.sha256(
-            json.dumps(
-                selected,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()[:12]
-        selection_suffix = f"_tasks-{selection_fingerprint}"
-    filename = (
-        f"robodojo_{dataset_variant}_{embodiment}"
-        f"{selection_suffix}_eef20_stats.npy"
-    )
+        filename = "robodojo_normalization_stats.npy"
     return Path(dataset_dir) / "meta" / filename
 
 
 def ensure_robodojo_stats(
     dataset_dir: str | Path,
     *,
-    dataset_variant: str,
+    variant: str,
     embodiment: str,
-    tasks: Sequence[str],
 ) -> Path:
-    """Find or atomically generate release/embodiment-matched stats.
+    """Find or auto-build release/embodiment-matched pooled stats.
 
-    A separate advisory lock prevents every torchrun rank from scanning the
-    corpus simultaneously. The stats writer itself uses atomic replacement,
-    so readers never observe a partially written NumPy payload.
+    Always computed over every task in the corpus, regardless of the training
+    task selection. Rank 0 scans the corpus and writes atomically (tmp +
+    rename), so readers never observe a partially written NumPy payload;
+    other torchrun ranks poll until the file appears.
     """
     stats_path = default_robodojo_stats_path(
         dataset_dir,
-        dataset_variant=dataset_variant,
+        variant=variant,
         embodiment=embodiment,
-        tasks=tasks,
     )
     if stats_path.is_file():
         return stats_path
 
-    stats_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = stats_path.with_suffix(f"{stats_path.suffix}.lock")
-    with lock_path.open("a+b") as lock_handle:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        try:
-            if stats_path.is_file():
-                return stats_path
-            print(
-                "[RoboDojo] normalization stats not found; computing "
-                f"{stats_path}",
-                flush=True,
-            )
-            # Imported lazily to avoid a module cycle: the stats implementation
-            # deliberately imports this reader's canonical conversion function.
-            from openwam.dataloader.utils.stats_computation.robodojo_stats_computation import (
-                build_and_save_robodojo_stats,
-            )
+    try:
+        import torch.distributed as dist
 
-            build_and_save_robodojo_stats(
-                dataset_dir=dataset_dir,
-                output=stats_path,
-                tasks=sorted(set(str(task) for task in tasks)),
+        dist_ready = dist.is_available() and dist.is_initialized()
+    except Exception:
+        dist_ready = False
+    if dist_ready:
+        rank = dist.get_rank()
+    else:
+        # torchrun sets RANK before init_process_group; honor it so
+        # pre-init constructions still elect a single builder.
+        rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
+    if rank == 0:
+        print(
+            "[RoboDojo] normalization stats not found; computing "
+            f"{stats_path}",
+            flush=True,
+        )
+        # Imported lazily to avoid a module cycle: the stats implementation
+        # deliberately imports this reader's canonical conversion function.
+        from openwam.dataloader.utils.stats_computation.robodojo_stats_computation import (
+            build_and_save_robodojo_stats,
+        )
+
+        build_and_save_robodojo_stats(
+            dataset_dir=dataset_dir,
+            output=stats_path,
+            tasks=discover_robodojo_tasks(
+                dataset_dir,
                 embodiment=embodiment,
-                dataset_variant=dataset_variant,
-                action_mode=DEPLOY_ACTION_MODE,
-            )
-            print(
-                f"[RoboDojo] wrote normalization stats to {stats_path}",
-                flush=True,
-            )
-        finally:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                variant=variant,
+            ),
+            embodiment=embodiment,
+            variant=variant,
+            action_mode=DEPLOY_ACTION_MODE,
+        )
+        print(
+            f"[RoboDojo] wrote normalization stats to {stats_path}",
+            flush=True,
+        )
+    else:
+        deadline = time.monotonic() + float(
+            os.environ.get("OPENWAM_STATS_WAIT_TIMEOUT_S", 12 * 60 * 60)
+        )
+        poll_interval_s = float(os.environ.get("OPENWAM_STATS_POLL_INTERVAL_S", 10))
+        while not stats_path.is_file():
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"timed out waiting for rank 0 to build RoboDojo stats: {stats_path}"
+                )
+            time.sleep(poll_interval_s)
     return stats_path
 
 
@@ -565,7 +568,7 @@ def _load_validated_stats(
     path: str | Path,
     calibration: Mapping[str, Any] | None,
     *,
-    dataset_variant: str,
+    variant: str,
     embodiment: str,
     expected_tasks: Sequence[str] | None = None,
 ) -> dict[str, np.ndarray]:
@@ -636,7 +639,7 @@ def _load_validated_stats(
     metadata = payload.get("metadata", {})
     if not isinstance(metadata, Mapping):
         raise ValueError(f"{stats_path}:metadata must be a mapping")
-    if dataset_variant == ROBODOJO_REAL_VARIANT:
+    if variant == ROBODOJO_REAL_VARIANT:
         fingerprint_key = "frame_contract_fingerprint"
         fingerprint_label = "frame contract fingerprint"
         expected_fingerprint = real_frame_contract_fingerprint(embodiment)
@@ -663,11 +666,11 @@ def _load_validated_stats(
             f"RoboDojo normalization stats {fingerprint_label} mismatch: "
             f"stats={saved_fingerprint}, expected={expected_fingerprint}"
         )
-    recorded_variant = metadata.get("dataset_variant", ROBODOJO_SIM_VARIANT)
-    if recorded_variant != dataset_variant:
+    recorded_variant = metadata.get("variant", ROBODOJO_SIM_VARIANT)
+    if recorded_variant != variant:
         raise ValueError(
-            f"{stats_path}: metadata.dataset_variant must be "
-            f"{dataset_variant!r}, got {recorded_variant!r}"
+            f"{stats_path}: metadata.variant must be "
+            f"{variant!r}, got {recorded_variant!r}"
         )
     if metadata.get("embodiment") != embodiment:
         raise ValueError(
@@ -727,12 +730,9 @@ class RoboDojoDataset(BaseDataset):
         height: int = 384,
         width: int = 320,
         split: str = "train",
-        val_ratio: float = 0.0,
-        repeat: int = 1,
-        seed: int = 42,
         action_mode: str = DEPLOY_ACTION_MODE,
         embodiment: str = ROBODOJO_EMBODIMENT,
-        dataset_variant: str = ROBODOJO_SIM_VARIANT,
+        variant: str = ROBODOJO_SIM_VARIANT,
         robot: str | None = None,
         normalization_stats_path: str | Path | None = None,
         normalization_stats_tasks: Sequence[str] | None = None,
@@ -744,6 +744,7 @@ class RoboDojoDataset(BaseDataset):
         target_camera: str = "cam_head",
         unify_action: bool = True,
         unify_action_map: Any = None,
+        unify_state_map: Any = None,
         color_jitter: Any = None,
     ):
         super().__init__()
@@ -755,15 +756,13 @@ class RoboDojoDataset(BaseDataset):
             raise ValueError(
                 f"RoboDojo robot and embodiment disagree: {robot!r} != {embodiment!r}"
             )
-        validate_embodiment(embodiment, dataset_variant=dataset_variant)
+        validate_embodiment(embodiment, variant=variant)
         if num_frames < 2:
             raise ValueError(f"num_frames must be >= 2, got {num_frames}")
         if int(window_stride) < 1:
             raise ValueError(f"window_stride must be >= 1, got {window_stride}")
         if int(video_stride) < 1:
             raise ValueError(f"video_stride must be >= 1, got {video_stride}")
-        if int(repeat) < 1:
-            raise ValueError(f"repeat must be >= 1, got {repeat}")
         if split not in {"train", "val"}:
             raise ValueError(f"split must be 'train' or 'val', got {split!r}")
         if height <= 0 or width <= 0:
@@ -771,13 +770,12 @@ class RoboDojoDataset(BaseDataset):
 
         self.action_mode = DEPLOY_ACTION_MODE
         self.embodiment = embodiment
-        self.dataset_variant = dataset_variant
+        self.variant = variant
         self.num_frames = int(num_frames)
         self.num_action_steps = self.num_frames - 1
         self.height = int(height)
         self.width = int(width)
         self.split = split
-        self.repeat = int(repeat)
         self.window_stride = int(window_stride)
         self.video_stride = int(video_stride)
         self._video_sample_indices = list(
@@ -791,7 +789,7 @@ class RoboDojoDataset(BaseDataset):
         # transform is intentionally train-only so validation/deployment input
         # remains unchanged.
         self._color_jitter = None
-        if color_jitter and split == "train":
+        if color_jitter_enabled(color_jitter) and split == "train":
             jitter_get = (
                 color_jitter.get
                 if hasattr(color_jitter, "get")
@@ -825,7 +823,7 @@ class RoboDojoDataset(BaseDataset):
             )
 
         _reject_calibration_path(calibration_path)
-        if dataset_variant == ROBODOJO_REAL_VARIANT:
+        if variant == ROBODOJO_REAL_VARIANT:
             if calibration is not None:
                 raise ValueError(
                     "RoboDojo_real uses native per-arm base poses; calibration "
@@ -876,7 +874,7 @@ class RoboDojoDataset(BaseDataset):
                 formal_dataset_root,
                 self.task_name,
                 embodiment=embodiment,
-                dataset_variant=dataset_variant,
+                variant=variant,
             )
             self.data_root = str(supplied_root)
         else:
@@ -898,43 +896,19 @@ class RoboDojoDataset(BaseDataset):
                 formal_dataset_root,
                 self.task_name,
                 embodiment=embodiment,
-                dataset_variant=dataset_variant,
+                variant=variant,
             )
             self.data_root = str(episode_paths[0].parent)
         self.dataset_root = str(formal_dataset_root)
 
         # Validate the complete discovered corpus before split/index selection.
         all_metadata = [
-            validate_robodojo_episode(path, dataset_variant=dataset_variant)
+            validate_robodojo_episode(path, variant=variant)
             for path in episode_paths
         ]
         selected_indices = list(range(len(episode_paths)))
-        ratio = float(val_ratio)
-        if ratio < 0.0 or ratio > 1.0:
-            raise ValueError(f"val_ratio must be in [0, 1], got {val_ratio}")
-        if ratio > 0.0:
-            rng = random.Random(seed)
-            shuffled = selected_indices.copy()
-            rng.shuffle(shuffled)
-            n_val = (
-                len(shuffled)
-                if ratio >= 1.0
-                else max(1, int(len(shuffled) * ratio))
-            )
-            val_indices = set(shuffled[:n_val])
-            if split == "val":
-                selected_indices = [
-                    index for index in selected_indices if index in val_indices
-                ]
-            else:
-                selected_indices = [
-                    index for index in selected_indices if index not in val_indices
-                ]
         if not selected_indices:
-            raise ValueError(
-                f"no RoboDojo episodes selected for split={split!r}, "
-                f"val_ratio={val_ratio}"
-            )
+            raise ValueError(f"no RoboDojo episodes selected for split={split!r}")
 
         self._episode_files = [str(episode_paths[index]) for index in selected_indices]
         self._episode_lengths = [
@@ -952,8 +926,6 @@ class RoboDojoDataset(BaseDataset):
                 self.window_stride,
             ):
                 self._window_index.append((episode_index, start))
-        if self.repeat > 1:
-            self._window_index *= self.repeat
         if not self._window_index:
             raise ValueError(
                 "no RoboDojo windows contain a real next-state action target"
@@ -961,6 +933,11 @@ class RoboDojoDataset(BaseDataset):
 
         self._raw_action_dim_value = EEF20_DIM
         self._unify_action = bool(unify_action)
+        if unify_state_map is not None and list(unify_state_map) != ['0-9', '34-43']:
+            raise ValueError(
+                'unify_state_map must be null or the canonical ["0-9", "34-43"]: '
+                "RoboDojo state shares the action's raw EEF20 layout"
+            )
         self._unify_dst_index: np.ndarray | None = None
         if self._unify_action:
             if unify_action_map is None:
@@ -995,12 +972,10 @@ class RoboDojoDataset(BaseDataset):
         self.normalization_stats_path: str | None = None
         if self.normalize_mode is not None:
             if normalization_stats_path is None:
-                normalization_stats_tasks = [self.task_name]
                 stats_path = ensure_robodojo_stats(
                     self.dataset_root,
-                    dataset_variant=self.dataset_variant,
+                    variant=self.variant,
                     embodiment=self.embodiment,
-                    tasks=[self.task_name],
                 )
             else:
                 stats_path = Path(normalization_stats_path)
@@ -1011,7 +986,7 @@ class RoboDojoDataset(BaseDataset):
             self._mode_stats = _load_validated_stats(
                 stats_path,
                 self.calibration,
-                dataset_variant=self.dataset_variant,
+                variant=self.variant,
                 embodiment=self.embodiment,
                 expected_tasks=normalization_stats_tasks,
             )
@@ -1096,7 +1071,7 @@ class RoboDojoDataset(BaseDataset):
                 self.calibration,
                 start,
                 start + actual_length,
-                dataset_variant=self.dataset_variant,
+                variant=self.variant,
                 embodiment=self.embodiment,
             )
             sampled_video = []
@@ -1180,7 +1155,7 @@ class RoboDojoDataset(BaseDataset):
             "end_frame": min(start + self.num_frames, episode_length),
             "episode_length": episode_length,
             "task_name": self.task_name,
-            "dataset_variant": self.dataset_variant,
+            "variant": self.variant,
             "embodiment": self.embodiment,
             "source_frame": self.source_frame,
             "active_arm": "both",
@@ -1213,9 +1188,9 @@ class MultiTaskRoboDojoDataset(BaseDataset):
             ),
             split=split,
             embodiment=_config_get(config, "embodiment", ROBODOJO_EMBODIMENT),
-            dataset_variant=_config_get(
+            variant=_config_get(
                 config,
-                "dataset_variant",
+                "variant",
                 ROBODOJO_SIM_VARIANT,
             ),
             robot=_config_get(config, "robot", None),
@@ -1229,9 +1204,6 @@ class MultiTaskRoboDojoDataset(BaseDataset):
             num_frames=int(_config_get(config, "num_frames", 33)),
             height=int(_config_get(config, "height", 384)),
             width=int(_config_get(config, "width", 320)),
-            val_ratio=float(_config_get(config, "val_ratio", 0.0)),
-            repeat=int(_config_get(config, "repeat", 1)),
-            seed=int(_config_get(config, "seed", 42)),
             window_stride=int(_config_get(config, "window_stride", 1)),
             video_stride=int(_config_get(config, "video_stride", 4)),
             multiview=bool(_config_get(config, "multiview", True)),
@@ -1239,6 +1211,7 @@ class MultiTaskRoboDojoDataset(BaseDataset):
             target_camera=_config_get(config, "target_camera", "cam_head"),
             unify_action=bool(_config_get(config, "unify_action", True)),
             unify_action_map=_config_get(config, "unify_action_map", None),
+            unify_state_map=_config_get(config, "unify_state_map", None),
             color_jitter=_config_get(config, "color_jitter", None),
         )
 
@@ -1249,7 +1222,7 @@ class MultiTaskRoboDojoDataset(BaseDataset):
         calibration: Mapping[str, Any] | None = None,
         split: str = "train",
         embodiment: str = ROBODOJO_EMBODIMENT,
-        dataset_variant: str = ROBODOJO_SIM_VARIANT,
+        variant: str = ROBODOJO_SIM_VARIANT,
         normalization_stats_path: str | Path | None = None,
         action_mode: str = DEPLOY_ACTION_MODE,
         robot: str | None = None,
@@ -1261,8 +1234,8 @@ class MultiTaskRoboDojoDataset(BaseDataset):
         if "calibration_path" in dataset_kwargs:
             _reject_calibration_path(dataset_kwargs.pop("calibration_path"))
 
-        validate_embodiment(embodiment, dataset_variant=dataset_variant)
-        if dataset_variant == ROBODOJO_REAL_VARIANT and calibration is not None:
+        validate_embodiment(embodiment, variant=variant)
+        if variant == ROBODOJO_REAL_VARIANT and calibration is not None:
             raise ValueError(
                 "RoboDojo_real uses native per-arm base poses; calibration must be None"
             )
@@ -1270,15 +1243,15 @@ class MultiTaskRoboDojoDataset(BaseDataset):
         selected_tasks = resolve_robodojo_tasks(
             dataset_dir,
             embodiment=embodiment,
-            dataset_variant=dataset_variant,
+            variant=variant,
         )
         self.dataset_dir = str(Path(dataset_dir))
         self.tasks = selected_tasks
         self.split = split
         self.action_mode = action_mode
         self.embodiment = embodiment
-        self.dataset_variant = dataset_variant
-        if dataset_variant == ROBODOJO_REAL_VARIANT:
+        self.variant = variant
+        if variant == ROBODOJO_REAL_VARIANT:
             self.calibration = None
             self.frame_contract = robodojo_real_frame_contract(embodiment)
             self.frame_contract_fingerprint = real_frame_contract_fingerprint(
@@ -1300,12 +1273,10 @@ class MultiTaskRoboDojoDataset(BaseDataset):
             requested_normalize_mode is not None
             and normalization_stats_path is None
         ):
-            normalization_stats_tasks = selected_tasks
             normalization_stats_path = ensure_robodojo_stats(
                 dataset_dir,
-                dataset_variant=dataset_variant,
+                variant=variant,
                 embodiment=embodiment,
-                tasks=selected_tasks,
             )
         self.normalization_stats_path = (
             str(Path(normalization_stats_path))
@@ -1321,7 +1292,7 @@ class MultiTaskRoboDojoDataset(BaseDataset):
                 dataset_dir,
                 task,
                 embodiment=embodiment,
-                dataset_variant=dataset_variant,
+                variant=variant,
             )
             dataset = RoboDojoDataset(
                 data_root=episodes[0].parent,
@@ -1330,7 +1301,7 @@ class MultiTaskRoboDojoDataset(BaseDataset):
                 task_name=task,
                 split=split,
                 embodiment=embodiment,
-                dataset_variant=dataset_variant,
+                variant=variant,
                 robot=robot,
                 action_mode=action_mode,
                 normalization_stats_path=normalization_stats_path,

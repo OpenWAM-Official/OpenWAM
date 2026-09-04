@@ -219,6 +219,15 @@ def compute_multitask_stats(roots: list, **_unused) -> dict:
     return _compute(items(), f"multitask/{len(roots)}")
 
 
+def build_and_save_robocasa365_stats(data_roots, output) -> str:
+    """Pooled stats over one or more compact repos, written atomically."""
+    roots = [data_roots] if isinstance(data_roots, (str, Path)) else list(data_roots)
+    payload = compute_multitask_stats([(None, str(root)) for root in roots])
+    os.makedirs(os.path.dirname(str(output)) or ".", exist_ok=True)
+    atomic_save_stats_npy(str(output), payload)
+    return str(output)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data_root", nargs="+", help="one or more compact RoboCasa365 v3 repositories")
@@ -227,14 +236,18 @@ def main() -> int:
     args = parser.parse_args()
     if args.task is not None and len(args.data_root) != 1:
         parser.error("--task can only be used with one data_root")
-    if len(args.data_root) == 1:
-        output = args.output or os.path.join(args.data_root[0], f"{args.task or 'robocasa365'}_compact_stats.npy")
+    if args.task is not None:
+        # Single-task debugging aid: no canonical location for task-level stats.
+        if args.output is None:
+            parser.error("--output is required with --task (single-task stats have no canonical location)")
+        output = args.output
         payload = compute_normalization_stats(args.data_root[0], args.task)
     else:
-        if args.output is None:
-            parser.error("--output is required when scanning multiple data roots")
-        output = args.output
+        output = args.output or os.path.join(
+            args.data_root[0], "meta", "robocasa365_normalization_stats.npy"
+        )
         payload = compute_multitask_stats([(None, root) for root in args.data_root])
+    os.makedirs(os.path.dirname(str(output)) or ".", exist_ok=True)
     if ACTION_STATS_KEY not in payload or STATE_STATS_KEY not in payload:
         raise AssertionError("internal compact stats schema error")
     atomic_save_stats_npy(output, payload)

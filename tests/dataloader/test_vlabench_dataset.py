@@ -136,7 +136,7 @@ def _write_bucket(bucket: Path) -> None:
 
 
 def _write_stats(bucket: Path) -> None:
-    """``meta/eef_stats.json`` in the flat schema the real release ships.
+    """``meta/vlabench_normalization_stats.npy`` in the flat stats schema.
 
     rot6d dims are pinned to identity, matching what
     ``vlabench_stats_computation`` writes (and the real release: dims 3:9 are
@@ -154,7 +154,7 @@ def _write_stats(bucket: Path) -> None:
     pin_rot6d_identity(arrays, ROT6D_DIMS_ARM10)
     stats = {"n_samples": int(sum(SHARD_ROWS)) * 2}
     stats.update({k: v.tolist() for k, v in arrays.items()})
-    (bucket / "meta" / "eef_stats.json").write_text(json.dumps(stats), encoding="utf-8")
+    np.save(bucket / "meta" / "vlabench_normalization_stats.npy", stats, allow_pickle=True)
 
 
 @contextmanager
@@ -190,7 +190,7 @@ def bucket(tmp_path: Path) -> Path:
 
 
 def _stats_for(bucket: Path) -> dict:
-    raw = json.loads((bucket / "meta" / "eef_stats.json").read_text())
+    raw = np.load(bucket / "meta" / "vlabench_normalization_stats.npy", allow_pickle=True).item()
     return materialize_eef_stats(raw, "min-max", dim=EEF10_DIM, strict_minmax=True)
 
 

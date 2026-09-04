@@ -140,9 +140,9 @@ def main(argv: list[str] | None = None) -> int:
         import yaml
 
         config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        if str(config.get("action_mode", "")).strip().lower() != "libero":
+        if str(config.get("action_mode", "")).strip().lower() != "eef":
             raise ValueError(
-                f"{config_path} is not a canonical LIBERO config; expected action_mode: libero"
+                f"{config_path} is not a canonical LIBERO config; expected action_mode: eef"
             )
     return scheduler.main(args)
 

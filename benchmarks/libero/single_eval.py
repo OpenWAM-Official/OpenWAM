@@ -121,8 +121,8 @@ def _make_env_with_randomization_retries(task, cfg: dict, max_attempts: int = 5)
 
 
 def run_eval(cfg: dict) -> int:
-    if str(cfg.get("action_mode", "")).strip().lower() != "libero":
-        raise ValueError("LIBERO runner requires action_mode: libero")
+    if str(cfg.get("action_mode", "")).strip().lower() != "eef":
+        raise ValueError("LIBERO runner requires action_mode: eef")
     if cfg.get("rng_mode", "environment") != "environment":
         raise ValueError("LIBERO runner requires rng_mode: environment")
     _write_libero_config()
@@ -208,7 +208,7 @@ def run_eval(cfg: dict) -> int:
         output = Path(result_dir).expanduser().resolve()
         output.mkdir(parents=True, exist_ok=True)
         result = {
-            "action_mode": "libero",
+            "action_mode": "eef",
             "suite": suite_name,
             "task_id": task_id,
             "task": task.name,

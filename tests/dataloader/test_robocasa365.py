@@ -54,7 +54,7 @@ def _make_repo(root: Path, tasks=("OpenDrawer",), episodes_per_task: int = 2) ->
         },
     }
     (root / "meta" / "info.json").write_text(json.dumps(info), encoding="utf-8")
-    with (root / "meta" / "normalization_stats.npy").open("wb") as handle:
+    with (root / "meta" / "robocasa365_normalization_stats.npy").open("wb") as handle:
         np.save(handle, {rc.ACTION_STATS_KEY: _stats(ACTION_DIM), rc.STATE_STATS_KEY: _stats(STATE_DIM)})
 
     state_rows, action_rows, episode_rows = [], [], []

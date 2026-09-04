@@ -52,7 +52,7 @@ Alignment notes (family = robocoin/behavior stats modules):
 Output: the reader's own cache schema
 ``{<action_mode>: {mean,std,min,max,q01,q99}, num_timesteps,
 raw_action_dim_mask, fingerprint}`` written atomically to ``--output``
-(default ``<dataset_dir>/meta/ebench_stats.npy``, the ebench.yaml
+(default ``<dataset_dir>/meta/ebench_normalization_stats.npy``, the ebench.yaml
 convention). The reader accepts the file unchanged for every mode, and the
 same file doubles as the deploy denormalization artifact (the trainer copies
 it into the checkpoint as ``normalization_stats.npy``).
@@ -75,9 +75,7 @@ import pyarrow.parquet as pq
 # drift: same column keys, same raw-23 projection, same episode-path
 # resolution, same cache fingerprint/payload/atomic writer.
 from openwam.dataloader.ebench import (
-    EBENCH_ACTION_DELTA_BASE_KEYS,
     EBENCH_ACTION_KEYS,
-    EBENCH_BASE_SOURCES,
     EBENCH_FINGER_GAP_TOLERANCE,
     EBENCH_GRIPPER_CMD_RANGE,
     EBENCH_RAW_ACTION_DIM,
@@ -98,14 +96,6 @@ from openwam.dataloader.ebench import (
 from openwam.dataloader.utils.eef import assert_unit_quaternion
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, pin_rot6d_identity
 from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
-
-
-def _action_keys_for(base_action_source: str) -> Tuple[str, ...]:
-    if base_action_source == "delta":
-        return EBENCH_ACTION_DELTA_BASE_KEYS
-    if base_action_source == "cumulative":
-        return EBENCH_ACTION_KEYS
-    raise ValueError(f"base_action_source must be one of {EBENCH_BASE_SOURCES}, got {base_action_source!r}")
 
 
 def _validated_raw23(frame: pd.DataFrame, action_keys: Sequence[str], ctx: str) -> np.ndarray:
@@ -234,9 +224,6 @@ def build_and_save_ebench_stats(
     dataset_dir: str,
     *,
     output: Optional[str] = None,
-    groups: Optional[Sequence[str]] = None,
-    buckets: Optional[Sequence[str]] = None,
-    base_action_source: str = "delta",
     action_mode: str = "ebench",
     rot6d_identity: bool = True,
 ) -> Tuple[Path, dict]:
@@ -244,8 +231,8 @@ def build_and_save_ebench_stats(
 
     Returns ``(output_path, stats)``.
     """
-    action_keys = _action_keys_for(base_action_source)
-    bucket_paths = discover_ebench_buckets(dataset_dir, groups=groups, buckets=buckets)
+    action_keys = EBENCH_ACTION_KEYS
+    bucket_paths = discover_ebench_buckets(dataset_dir)
     stats, num_timesteps, n_files = compute_ebench_stats(bucket_paths, action_keys, rot6d_identity=rot6d_identity)
 
     # Guardrail: the summary merge and the row scan must agree on
@@ -264,7 +251,7 @@ def build_and_save_ebench_stats(
                 "the summaries may be stale relative to the parquet data."
             )
 
-    out_path = Path(output) if output else Path(dataset_dir) / "meta" / "ebench_stats.npy"
+    out_path = Path(output) if output else Path(dataset_dir) / "meta" / "ebench_normalization_stats.npy"
     fingerprint = _stats_fingerprint(bucket_paths, action_keys, action_mode, dataset_dir)
     payload = _stats_cache_payload(stats, num_timesteps, fingerprint, action_mode)
     payload["pool"] = "action"
@@ -279,19 +266,12 @@ def main():
     parser.add_argument(
         "--dataset_dir", required=True, help="EBench root (contains long_horizon/ simple_pnp/ teleop_tasks/)"
     )
-    parser.add_argument("--groups", nargs="*", default=None, help="task groups to scan (default: the reader's trio)")
-    parser.add_argument(
-        "--buckets",
-        nargs="*",
-        default=None,
-        help="explicit bucket paths relative to --dataset_dir (overrides --groups)",
-    )
-    parser.add_argument("--base_action_source", choices=list(EBENCH_BASE_SOURCES), default="delta")
-    parser.add_argument("--action_mode", default="ebench", help="payload key; must match dataloader.action_mode")
+
+    parser.add_argument("--action_mode", default="eef", help="payload key; must match dataloader.action_mode")
     parser.add_argument(
         "--output",
         default=None,
-        help=".npy path (default <dataset_dir>/meta/ebench_stats.npy — the ebench.yaml convention). "
+        help=".npy path (default <dataset_dir>/meta/ebench_normalization_stats.npy — the ebench.yaml convention). "
         "Use a run-specific path for --groups/--buckets subsets: the cache fingerprint records the "
         "bucket set, and a training run over a different set hard-fails on it.",
     )
@@ -306,9 +286,6 @@ def main():
     out_path, stats = build_and_save_ebench_stats(
         args.dataset_dir,
         output=args.output,
-        groups=args.groups,
-        buckets=args.buckets,
-        base_action_source=args.base_action_source,
         action_mode=args.action_mode,
         rot6d_identity=not args.no_rot6d_identity,
     )

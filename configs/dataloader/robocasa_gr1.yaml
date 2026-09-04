@@ -1,69 +1,61 @@
 type: robocasa_gr1
 
 # Input must already contain simulator-backed EEF33 columns (the public NVIDIA
-# joint44 files do not; use the converted EEF33 LeRobot v3 release).
-dataset_dir: /path/to/robocasa-gr1-eef33-lerobot-v3
+# joint44 files do not; use the converted EEF33 LeRobot v3 release). Prompts
+# resolve task_index through the converted meta/tasks.parquet; missing/blank
+# prompt metadata is an error.
+dataset_dir: /path/to/robocasa_gr1_data
 
+# ── Action space ─────────────────────────────────────────────────────────────
 # Only EEF is supported. Raw EEF33:
-# [L xyz3+rot6d6+hand6, R xyz3+rot6d6+hand6, waist3].
-action_mode: eef
-eef_action_column: eef_action
-eef_state_column: observation.eef_state
-
-# Native annotation.human.coarse_action is an integer class ID, not text.
-# Resolve task_index through converted meta/tasks.parquet. Missing/blank prompt
-# metadata is an error.
-prompt_columns: []
-
-# Camera key resolution by info.json features priority. Missing wrist views are
-# rendered as black slots in multiview mode.
-head_camera_priority:
-  - observation.images.ego_view
-  - observation.images.ego_view_rgb
-  - observation.images.ego_rgb
-  - observation.images.head_rgb
-  - observation.images.cam_head_rgb
-  - observation.images.cam_high_rgb
-left_wrist_camera_priority:
-  - observation.images.left_wrist
-  - observation.images.left_wrist_rgb
-  - observation.images.cam_left_wrist_rgb
-right_wrist_camera_priority:
-  - observation.images.right_wrist
-  - observation.images.right_wrist_rgb
-  - observation.images.cam_right_wrist_rgb
-
-num_frames: 33
-video_stride: 4
-window_stride: 1
-height: 384
-width: 320
-multiview: true
-split: train
-enable_action_supervision: true
-
-# min-max / z-score / quantile, or null to disable in-reader normalization.
-# The stats file location is fixed at <dataset_dir>/meta/normalization_stats.npy
-# and is auto-computed there on first use when missing (rank 0 scans the whole
-# root, other ranks wait) — every task bucket shares that one pooled file.
-# Delete it to force a rebuild; to build it up front:
-#   python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation \
-#     --config configs/dataloader/robocasa_gr1.yaml
-normalize_mode: min-max
-# Pose and waist dims pool action/state because they share physical units.
-# Fourier-hand actions are discrete commands while hand state is continuous
-# joint angle, so those 12 dims use directional `eef` / `eef_state` blocks.
-# Legacy action/state-pooled hand stats are rejected and rebuilt.
-
+#   [L xyz3+rot6d6+hand6, R xyz3+rot6d6+hand6, waist3].
 # Normalize EEF33 first, then scatter arm poses, Fourier hands, and waist into
 # the shared EEF/dex-hand/reserved slots. Gripper slots 9/43 stay unmapped.
 # All 33 raw dims are simulator-backed and always valid, so no per-dim
-# state_mask/action_mask is needed; the unified mask marks unmapped slots false.
+# state/action mask is needed; the unified mask marks unmapped slots false.
+action_mode: eef
 unify_action: true
 unify_action_map: ["0-8", "10-15", "34-42", "44-49", "68-70"]
+unify_state_map: null  # null = state reuses unify_action_map
 
-# Load-time, temporally consistent augmentation (train split only).
+# ── Frame sampling ───────────────────────────────────────────────────────────
+# num_frames = state/action window length; action horizon = num_frames - 1.
+# video_stride subsamples video only; state/action stay at the raw rate.
+# window_stride = sliding window step (1 = every frame starts a window).
+num_frames: 33
+video_stride: 4
+window_stride: 1
+split: train
+
+# ── Rendering (3-slot L-shape canvas) ────────────────────────────────────────
+# camera_layout = [head, left/bottom-left, right/bottom-right]; null slots are
+# rendered as black tiles. At 384x320: top 256Hx320W, bottom halves 128Hx160W,
+# each tile BILINEAR-stretched to its slot. target_camera drives single-view
+# mode and is ignored when multiview=true.
+height: 384
+width: 320
+multiview: true
+camera_layout: [observation.images.ego_view, null, null]
+target_camera: observation.images.ego_view
+
+# ── Normalization ────────────────────────────────────────────────────────────
+# min-max / z-score / quantile, or null to disable in-reader normalization.
+# The pooled stats file is fixed at
+# <dataset_dir>/meta/robocasa_gr1_normalization_stats.npy and auto-built there
+# on first use (rank 0 scans the whole root, other ranks wait) — every task
+# bucket shares that one file. Pose and waist dims pool action/state because
+# they share physical units; Fourier-hand actions are discrete commands while
+# hand state is continuous joint angle, so those 12 dims use directional
+# `eef` / `eef_state` blocks. Delete the file to force a rebuild, or build it
+# up front with robocasa_gr1_stats_computation.
+normalize_mode: min-max
+
+# ── Video augmentation (optional) ────────────────────────────────────────────
+# Load-time color jitter applied by the reader to each clip with the SAME
+# random factors across all frames (temporal consistency), TRAIN split only.
+# enabled: false keeps video byte-identical while preserving the knobs.
 color_jitter:
+  enabled: true
   brightness: 0.2
   contrast: 0.2
   saturation: 0.2

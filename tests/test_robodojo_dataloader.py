@@ -295,7 +295,7 @@ def test_real_reader_preserves_native_pose_and_clips_only_gripper_sensor_noise(
     dataset = build_single(
         tmp_path,
         num_frames=4,
-        dataset_variant="real",
+        variant="real",
         embodiment=embodiment,
     )
 
@@ -306,12 +306,12 @@ def test_real_reader_preserves_native_pose_and_clips_only_gripper_sensor_noise(
         raw = read_calibrated_eef20(
             handle,
             None,
-            dataset_variant="real",
+            variant="real",
             embodiment=embodiment,
         )
 
     assert dataset.calibration is None
-    assert dataset.dataset_variant == "real"
+    assert dataset.variant == "real"
     assert dataset.source_frame == (
         "per_arm_robot_base_position_and_orientation_wxyz"
     )
@@ -319,7 +319,7 @@ def test_real_reader_preserves_native_pose_and_clips_only_gripper_sensor_noise(
     sample = dataset[0]
     np.testing.assert_array_equal(sample["proprio"].numpy(), expected[0:1])
     np.testing.assert_array_equal(sample["action"].numpy(), expected[1:])
-    assert sample["dataset_variant"] == "real"
+    assert sample["variant"] == "real"
     assert sample["embodiment"] == embodiment
 
 
@@ -548,11 +548,10 @@ def test_normalization_auto_generates_or_validates_explicit_stats(
     }
     automatic = RoboDojoDataset(**common)
     expected_automatic = (
-        tmp_path / "meta" / "robodojo_sim_arx_x5_eef20_stats.npy"
+        tmp_path / "meta" / "robodojo_normalization_stats.npy"
     )
     assert automatic.normalization_stats_path == str(expected_automatic)
     assert expected_automatic.is_file()
-    assert expected_automatic.with_suffix(".npy.lock").is_file()
     # A second construction discovers the complete file instead of recomputing.
     assert RoboDojoDataset(**common).normalization_stats_path == str(
         expected_automatic
@@ -872,7 +871,7 @@ def test_multitask_auto_stats_use_meta_and_cover_the_discovered_corpus(
         video_stride=1,
         unify_action=False,
     )
-    expected = tmp_path / "meta" / "robodojo_sim_arx_x5_eef20_stats.npy"
+    expected = tmp_path / "meta" / "robodojo_normalization_stats.npy"
     assert dataset.normalization_stats_path == str(expected)
     assert all(
         sub_dataset.normalization_stats_path == str(expected)

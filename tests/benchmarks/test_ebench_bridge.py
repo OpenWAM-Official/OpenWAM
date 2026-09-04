@@ -20,7 +20,6 @@ import pytest
 from benchmarks.ebench.openwam2ebench_interface import EBenchOpenWAMDriver
 from benchmarks.ebench.prompt_template import format_prompt_for_inference as bridge_prompt
 from benchmarks.utils.action_conversion import (
-    EBENCH_GRIPPER_OPEN,
     ebench_obs_to_raw23,
     ebench_quat_wxyz_to_rot6d,
     ebench_render_state_base,
@@ -64,17 +63,14 @@ def test_render_state_base_mirror():
     for _ in range(200):
         cur = rng.normal(scale=3.0, size=3)
         prev = rng.normal(scale=3.0, size=3)
-        for mode in ("delta", "cumulative"):
-            np.testing.assert_array_equal(
-                ebench_render_state_base(cur, prev, mode),
-                render_ebench_state_base(cur, prev, mode),
-            )
         np.testing.assert_array_equal(
-            ebench_render_state_base(cur, None, "delta"),
-            render_ebench_state_base(cur, None, "delta"),
+            ebench_render_state_base(cur, prev),
+            render_ebench_state_base(cur, prev),
         )
-    with pytest.raises(ValueError):
-        ebench_render_state_base(np.zeros(3), None, "velocity")
+        np.testing.assert_array_equal(
+            ebench_render_state_base(cur, None),
+            render_ebench_state_base(cur, None),
+        )
 
 
 def test_quat_to_rot6d_mirror():
@@ -116,7 +112,7 @@ def test_action_round_trip_delta():
     raw[9], raw[19] = 0.03, 0.01  # in-range grippers
     raw[3:9] = ebench_quat_wxyz_to_rot6d(_rand_unit_quat_wxyz(rng)[0])
     raw[13:19] = ebench_quat_wxyz_to_rot6d(_rand_unit_quat_wxyz(rng)[0])
-    out = raw23_to_ebench_action(raw, "delta")
+    out = raw23_to_ebench_action(raw)
 
     assert out["control_type"] == "ee_pose" and out["is_rel"] is False
     assert out["base_is_rel"] is True
@@ -133,35 +129,12 @@ def test_action_round_trip_delta():
         np.testing.assert_allclose(back, _rot6d_normalize(raw[sl_rot]), atol=1e-5)
 
 
-def test_action_round_trip_cumulative_and_gripper_clip():
-    raw = np.zeros(23)
-    raw[3:9] = [1, 0, 0, 0, 1, 0]
-    raw[13:19] = [1, 0, 0, 0, 1, 0]
-    raw[9], raw[19] = 0.09, -0.02  # out of physical range -> clipped
-    raw[20:23] = [1.5, -0.5, 90.0]
-    out = raw23_to_ebench_action(raw, "cumulative")
-    assert out["base_is_rel"] is False
-    np.testing.assert_allclose(out["base_motion"], [1.5, -0.5, 90.0])
-    assert out["action"][0][2] == pytest.approx([EBENCH_GRIPPER_OPEN] * 2)
-    assert out["action"][1][2] == pytest.approx([0.0, 0.0])
-
-
-def test_action_rejects_wrong_width_and_mode():
-    with pytest.raises(ValueError, match="23-D"):
-        raw23_to_ebench_action(np.zeros(20), "delta")
-    with pytest.raises(ValueError, match="base_action_source"):
-        raw23_to_ebench_action(np.zeros(23), "velocity")
-
-
-# ------------------------------------------------------------------ wire contract
-
-
 def test_wire_types_survive_genmanip_consumption():
     """Emulate parse_embodiment_action's exact consumption of the dict."""
     raw = np.zeros(23)
     raw[3:9] = [1, 0, 0, 0, 1, 0]
     raw[13:19] = [1, 0, 0, 0, 1, 0]
-    out = raw23_to_ebench_action(raw, "delta")
+    out = raw23_to_ebench_action(raw)
     for position, orientation, gripper_width in out["action"]:
         combined = position + orientation  # list concat — ndarray would broadcast
         assert isinstance(combined, list) and len(combined) == 7
@@ -216,7 +189,7 @@ def _obs(t, reset=False, base=None, instruction="pick the apple"):
 
 def test_driver_episode_flow_and_prev_base_differencing():
     south = _FakeSouth()
-    driver = EBenchOpenWAMDriver(south, base_mode="delta")
+    driver = EBenchOpenWAMDriver(south)
 
     a0 = driver.act(_obs(0, reset=True, base=[0.0, 0.0, 0.0]))
     assert south.resets == 1
@@ -241,7 +214,7 @@ def test_driver_episode_flow_and_prev_base_differencing():
 
 
 def test_driver_missing_instruction_fails_fast():
-    driver = EBenchOpenWAMDriver(_FakeSouth(), base_mode="delta")
+    driver = EBenchOpenWAMDriver(_FakeSouth())
     with pytest.raises(ValueError, match="instruction"):
         driver.act(_obs(0, reset=True, instruction=""))
 
@@ -251,14 +224,14 @@ def test_driver_rejects_wrong_action_width():
         def predict(self, payload):
             return {"action": [0.0] * 27}
 
-    driver = EBenchOpenWAMDriver(_BadSouth(), base_mode="delta")
+    driver = EBenchOpenWAMDriver(_BadSouth())
     with pytest.raises(ValueError, match="27-D"):
         driver.act(_obs(0, reset=True))
 
 
 def test_driver_no_send_state():
     south = _FakeSouth()
-    driver = EBenchOpenWAMDriver(south, base_mode="delta", send_state=False)
+    driver = EBenchOpenWAMDriver(south, send_state=False)
     driver.act(_obs(0, reset=True))
     assert "state" not in south.payloads[0]
 
@@ -272,7 +245,7 @@ def test_driver_rejects_nonfinite_and_degenerate_actions():
             action[0] = float("nan")
             return {"action": action}
 
-    driver = EBenchOpenWAMDriver(_NaNSouth(), base_mode="delta")
+    driver = EBenchOpenWAMDriver(_NaNSouth())
     with pytest.raises(ValueError, match="non-finite"):
         driver.act(_obs(0, reset=True))
 
@@ -280,14 +253,14 @@ def test_driver_rejects_nonfinite_and_degenerate_actions():
         def predict(self, payload):
             return {"action": [0.0] * 23}  # all-zero rot6d -> non-unit quat
 
-    driver = EBenchOpenWAMDriver(_ZeroRotSouth(), base_mode="delta")
+    driver = EBenchOpenWAMDriver(_ZeroRotSouth())
     with pytest.raises(ValueError, match="non-unit quaternion"):
         driver.act(_obs(0, reset=True))
 
 
 def test_driver_rejects_bad_image_dtype():
     south = _FakeSouth()
-    driver = EBenchOpenWAMDriver(south, base_mode="delta")
+    driver = EBenchOpenWAMDriver(south)
     obs = _obs(0, reset=True)
     obs["video.overlook_camera_view"] = np.zeros((8, 8, 3), dtype=np.float32)
     with pytest.raises(ValueError, match="uint8"):

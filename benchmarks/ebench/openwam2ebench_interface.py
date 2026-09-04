@@ -21,7 +21,6 @@ one obs per popped action.
 
 Conversions live in ``benchmarks/utils/action_conversion.py`` and mirror the
 trainer's rendering byte-for-byte (pinned by tests/benchmarks/test_ebench_bridge.py).
-``--base-mode`` must match the checkpoint's ``dataloader.base_action_source``
 (default ``delta``).
 
 Env: the GenManip client env (``pip install -e genmanip-client``) plus
@@ -52,7 +51,6 @@ from benchmarks.utils import (  # noqa: E402
     resize_for_lshape_slot,
 )
 from benchmarks.utils.action_conversion import (  # noqa: E402
-    EBENCH_BASE_SOURCES,
     EBENCH_RAW_DIM,
     ebench_obs_to_raw23,
     ebench_render_state_base,
@@ -94,13 +92,9 @@ class EBenchOpenWAMDriver:
         self,
         south: WSPolicyClient,
         *,
-        base_mode: str = "delta",
         send_state: bool = True,
     ):
-        if base_mode not in EBENCH_BASE_SOURCES:
-            raise ValueError(f"base_mode must be one of {EBENCH_BASE_SOURCES}, got {base_mode!r}")
         self._south = south
-        self._base_mode = base_mode
         self._send_state = send_state
         self._prev_base: Optional[np.ndarray] = None
         self._episode_active = False
@@ -153,7 +147,7 @@ class EBenchOpenWAMDriver:
         cur_base = None
         if self._send_state:
             cur_base = np.asarray(inner_obs[STATE_BASE_KEY], dtype=np.float64).reshape(3)
-            rendered = ebench_render_state_base(cur_base, self._prev_base, self._base_mode)
+            rendered = ebench_render_state_base(cur_base, self._prev_base)
             raw23 = ebench_obs_to_raw23(inner_obs[STATE_EE_KEY], inner_obs[STATE_GRIPPER_KEY], rendered)
             state_list = [float(v) for v in raw23]
 
@@ -177,7 +171,7 @@ class EBenchOpenWAMDriver:
         if action.shape[0] != EBENCH_RAW_DIM:
             raise ValueError(
                 f"OpenWAM server returned {action.shape[0]}-D action; expected raw "
-                f"{EBENCH_RAW_DIM}-D — is the checkpoint an EBench (action_mode=ebench, "
+                f"{EBENCH_RAW_DIM}-D — is the checkpoint an EBench (action_mode=eef, "
                 "unify_action=true) checkpoint?"
             )
         if not np.isfinite(action).all():
@@ -186,7 +180,7 @@ class EBenchOpenWAMDriver:
             # stop it here, before the sim consumes a NaN pose target.
             raise ValueError(f"OpenWAM server returned non-finite action: {action.tolist()}")
 
-        out = raw23_to_ebench_action(action, self._base_mode)
+        out = raw23_to_ebench_action(action)
         for i, (_pos, quat, _grip) in enumerate(out["action"]):
             norm = float(np.linalg.norm(quat))
             if not abs(norm - 1.0) <= 0.05:
@@ -212,7 +206,7 @@ def run_worker(args) -> None:
 
     south = WSPolicyClient(f"ws://{args.south_host}:{args.south_port}", timeout=float(args.request_timeout))
     wait_until_healthy(south)
-    driver = EBenchOpenWAMDriver(south, base_mode=args.base_mode, send_state=not args.no_send_state)
+    driver = EBenchOpenWAMDriver(south, send_state=not args.no_send_state)
 
     def make_client():
         return EvalClient(
@@ -318,12 +312,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--south-port", type=int, default=8848)
     p.add_argument("--request-timeout", type=float, default=300.0)
     p.add_argument(
-        "--base-mode",
-        default="delta",
-        choices=list(EBENCH_BASE_SOURCES),
-        help="must match the checkpoint's dataloader.base_action_source (verified when --ckpt-config is given)",
-    )
-    p.add_argument(
         "--ckpt-config",
         default=None,
         help="path to the served checkpoint's config.yaml — when the ckpt dir is reachable from this "
@@ -362,9 +350,8 @@ def verify_ckpt_config(args) -> None:
     """Hard-verify the bridge's action settings against the checkpoint config."""
     if not args.ckpt_config:
         logger.warning(
-            "--ckpt-config not given: base-mode=%s is UNVERIFIED against the checkpoint. "
-            "A mismatch scores garbage silently — pass the ckpt's config.yaml when reachable.",
-            args.base_mode,
+            "--ckpt-config not given: the bridge contract is UNVERIFIED against the checkpoint. "
+            "A mismatch scores garbage silently — pass the ckpt's config.yaml when reachable."
         )
         return
     import yaml
@@ -373,16 +360,13 @@ def verify_ckpt_config(args) -> None:
         cfg = yaml.safe_load(f)
     dl = cfg.get("dataloader", {}) or {}
     problems = []
-    if dl.get("type") != "ebench" or dl.get("action_mode") != "ebench":
-        problems.append(f"dataloader type/action_mode is {dl.get('type')}/{dl.get('action_mode')}, not ebench")
+    if dl.get("type") != "ebench" or dl.get("action_mode") != "eef":
+        problems.append(f"dataloader type/action_mode is {dl.get('type')}/{dl.get('action_mode')}, not ebench/eef")
     if not dl.get("unify_action", False):
         problems.append("checkpoint was not trained with unify_action=true")
-    ckpt_base = dl.get("base_action_source", "delta")
-    if ckpt_base != args.base_mode:
-        problems.append(f"checkpoint base_action_source={ckpt_base!r} but bridge --base-mode={args.base_mode!r}")
     if problems:
         raise ValueError("checkpoint/bridge contract mismatch: " + "; ".join(problems))
-    logger.info("ckpt-config verified: action_mode=ebench, base_action_source=%s", args.base_mode)
+    logger.info("ckpt-config verified: action_mode=eef, unify_action=true")
 
 
 def main() -> None:

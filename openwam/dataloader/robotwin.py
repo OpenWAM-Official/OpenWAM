@@ -35,7 +35,7 @@ from openwam.dataloader.transforms.normalize import (
     load_mode_stats,
 )
 from openwam.dataloader.transforms.rotation import quat_xyzw_to_rotation_6d
-from openwam.dataloader.transforms.video import VideoColorJitter
+from openwam.dataloader.transforms.video import VideoColorJitter, color_jitter_enabled
 from openwam.dataloader.utils.unify_action import (
     UNIFY_DIM,
     map_to_unify,
@@ -125,7 +125,7 @@ JOINT_GRIPPER_INDICES = [6, 13]  # gripper positions in 14D joint vector
 
 def discover_robotwin_roots(
     dataset_dir: str,
-    robot: str,
+    embodiment: str,
     variant: str = "clean_50",
     tasks: Optional[list] = None,
 ) -> list:
@@ -133,10 +133,10 @@ def discover_robotwin_roots(
 
     Args:
         dataset_dir: Top-level directory (e.g. ``/path/to/robotwin_2_0/dataset``).
-        robot: Robot name (e.g. ``"aloha-agilex"``).
+        embodiment: Robot embodiment name (e.g. ``"aloha-agilex"``).
         variant: ``"clean_50"`` or ``"randomized_500"``.
         tasks: Optional internal task restriction.  When omitted, every task
-            directory containing the requested robot/variant is discovered.
+            directory containing the requested embodiment/variant is discovered.
 
     Returns:
         List of ``(task_name, data_root)`` tuples for tasks that exist on disk.
@@ -151,7 +151,7 @@ def discover_robotwin_roots(
                 os.path.join(
                     dataset_dir,
                     entry,
-                    f"{robot}_{variant}",
+                    f"{embodiment}_{variant}",
                     "data",
                 )
             )
@@ -159,7 +159,7 @@ def discover_robotwin_roots(
 
     roots = []
     for task in tasks:
-        data_root = os.path.join(dataset_dir, task, f"{robot}_{variant}", "data")
+        data_root = os.path.join(dataset_dir, task, f"{embodiment}_{variant}", "data")
         if os.path.isdir(data_root):
             roots.append((task, data_root))
     return roots
@@ -291,8 +291,7 @@ class RoboTwinDataset(BaseDataset):
     Epoch strategy:
         Training enumerates all valid ``(episode, start_frame)`` windows
         exhaustively with configurable stride (``window_stride``), so one
-        epoch = one pass through every window.  ``repeat`` multiplies the
-        window list for additional passes.
+        epoch = one pass through every window.
     """
 
     def __init__(
@@ -302,24 +301,21 @@ class RoboTwinDataset(BaseDataset):
         height: int = 384,
         width: int = 320,
         split: str = "train",
-        val_ratio: float = 0.1,
-        repeat: int = 1,
         task_name: Optional[str] = None,
-        seed: int = 42,
         normalization_stats_path: Optional[str] = None,
         normalize_mode: Optional[str] = "min-max",
-        num_val_samples: int = 4,
         target_camera: str = "head_camera",
         window_stride: int = 1,
         video_stride: int = 4,
         multiview: bool = False,
         camera_layout: Optional[list] = None,
-        robot: Optional[str] = None,
+        embodiment: Optional[str] = None,
         variant: str = "clean_50",
         backbone: Optional[str] = None,
         action_mode: str = "joint",
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
+        unify_state_map: Optional[Any] = None,
         # Optional load-time video color jitter, applied consistently across a
         # clip's frames and ONLY on the train split. None / False / {} → disabled
         # (default; byte-identical to before). Truthy → enabled; a dict overrides
@@ -327,11 +323,18 @@ class RoboTwinDataset(BaseDataset):
         color_jitter: Optional[Any] = None,
     ):
         super().__init__()
-        self.robot = robot
+        self.embodiment = embodiment
         self.variant = variant
         self.action_mode = action_mode
         self._unify_action = bool(unify_action)
         self._unify_action_map = unify_action_map
+        if unify_state_map is not None and list(unify_state_map) != list(
+            self._unify_action_map or ()
+        ):
+            raise ValueError(
+                "unify_state_map must be null or equal to unify_action_map here: "
+                "this reader's state shares the action's raw layout"
+            )
         self.normalize_mode = normalize_mode if normalize_mode not in ("", "none", "null") else None
 
         # ── load-time video augmentation ──────────────────────────────────
@@ -339,7 +342,7 @@ class RoboTwinDataset(BaseDataset):
         # random factors across all frames, via VideoColorJitter). Built only
         # for the train split; val / disabled keeps video byte-identical.
         self._color_jitter = None
-        if color_jitter and split == "train":
+        if color_jitter_enabled(color_jitter) and split == "train":
             cj_get = color_jitter.get if hasattr(color_jitter, "get") else (lambda k, d: d)
             self._color_jitter = VideoColorJitter(
                 brightness=float(cj_get("brightness", 0.2)),
@@ -371,7 +374,6 @@ class RoboTwinDataset(BaseDataset):
         self.num_action_steps = self.num_frames - 1
         self.height = height
         self.width = width
-        self.repeat = repeat
         self.split = split
         self.task_name = task_name or "manipulation"
         self.target_camera = target_camera
@@ -407,27 +409,7 @@ class RoboTwinDataset(BaseDataset):
         if not all_files:
             raise FileNotFoundError(f"No episode*.hdf5 files found in {data_root}")
 
-        # Train/val split (deterministic)
-        rng = random.Random(seed)
-        indices = list(range(len(all_files)))
-        rng.shuffle(indices)
-        if val_ratio <= 0.0:
-            n_val = 0  # All episodes for training
-        elif val_ratio >= 1.0:
-            n_val = len(all_files)  # All episodes for validation
-        else:
-            n_val = max(1, int(len(all_files) * val_ratio))
-        if split == "val":
-            selected = sorted(indices[:n_val])
-        else:
-            selected = sorted(indices[n_val:])
-
-        self._episode_files = [all_files[i] for i in selected]
-        if not self._episode_files:
-            raise ValueError(
-                f"No episodes selected for split='{split}' with val_ratio={val_ratio} "
-                f"({len(all_files)} total episodes in {data_root})"
-            )
+        self._episode_files = list(all_files)
         print(f"RoboTwinDataset: {len(self._episode_files)} episodes ({split}, action_mode={action_mode})")
 
         # Probe episodes for length and action dim
@@ -502,16 +484,14 @@ class RoboTwinDataset(BaseDataset):
                 max_start = max(0, ep_len - 2)
             for start in range(0, max_start + 1, self.window_stride):
                 self._window_index.append((ep_idx, start))
-        if repeat > 1:
-            self._window_index = self._window_index * repeat
         if not self._window_index:
             raise ValueError(
                 "No valid RoboTwin windows with at least one action label were selected "
-                f"for split='{split}'. Check episode lengths and val_ratio."
+                f"for split='{split}'. Check episode lengths."
             )
         print(
             f"  Exhaustive windows: {len(self._window_index)} "
-            f"(window_stride={self.window_stride}, repeat={repeat}, "
+            f"(window_stride={self.window_stride}, "
             f"raw_window_len={self._raw_window_len}, video_stride={self.video_stride}, "
             f"→ {self.num_video_frames} video frames, "
             f"{self.num_action_steps} action steps + 1 proprio)"
@@ -580,58 +560,17 @@ class RoboTwinDataset(BaseDataset):
                     )
                     stats_path = None
             else:
-                robot_tag = self.robot or "robot"
-                variant_tag = self.variant or "variant"
-                stats_name = f"{self.task_name}_{robot_tag}_{variant_tag}_stats.npy"
-                stats_path = os.path.join(data_root, stats_name)
-                if os.path.exists(stats_path):
-                    print(
-                        f"  [normalizer] Found pre-computed single-task stats file: {stats_path} (exists ✓, will load)"
-                    )
-                else:
-                    from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import (
-                        atomic_save_stats_npy,
-                        compute_normalization_stats,
-                    )
-
-                    # Rank-0 owns the computation; other ranks poll for the
-                    # atomically-renamed file (the multi-task path's poll-based
-                    # sync — dist.barrier() would trip NCCL's collective
-                    # timeout on a long compute).
-                    try:
-                        import torch.distributed as dist
-
-                        dist_ready = dist.is_available() and dist.is_initialized()
-                    except Exception:
-                        dist_ready = False
-                    if dist_ready:
-                        rank = dist.get_rank()
-                    else:
-                        # torchrun sets RANK before init_process_group; honor
-                        # it so pre-init constructions still elect one builder.
-                        rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
-
-                    if rank == 0:
-                        print(
-                            f"  [normalizer] No pre-computed stats at default location: {stats_path}\n"
-                            f"  [normalizer]   → computing now from {data_root} "
-                            f"and will save to: {stats_path}"
-                        )
-                        stats = compute_normalization_stats(data_root)
-                        atomic_save_stats_npy(stats_path, stats)
-                        print(f"  [normalizer] Saved newly-computed single-task stats → {stats_path}")
-                    else:
-                        print(
-                            f"  [normalizer] Rank {rank} waiting for rank 0 to finish single-task stats at {stats_path}"
-                        )
-                        deadline = time.monotonic() + float(os.environ.get("OPENWAM_STATS_WAIT_TIMEOUT_S", 12 * 60 * 60))
-                        poll_interval_s = float(os.environ.get("OPENWAM_STATS_POLL_INTERVAL_S", 10))
-                        while not os.path.exists(stats_path):
-                            if time.monotonic() >= deadline:
-                                raise TimeoutError(
-                                    f"Timed out while waiting for rank 0 to produce single-task stats: {stats_path}"
-                                )
-                            time.sleep(poll_interval_s)
+                # Stats resolution is owned by the multi-task reader, which
+                # auto-builds <dataset_dir>/meta/robotwin_<variant>_normalization_stats.npy
+                # (rank 0 computes, other ranks wait) and forwards the path to
+                # every sub-dataset. A directly-constructed single-task reader
+                # must receive normalization_stats_path explicitly.
+                stats_path = None
+                print(
+                    "  [normalizer] No explicit normalization_stats_path for a single-task reader; "
+                    "normalization DISABLED. Construct via the multi-task reader for auto-built "
+                    "variant-level stats, or pass normalization_stats_path."
+                )
 
             if stats_path is not None:
                 mode_stats = load_mode_stats(stats_path, self.action_mode)
@@ -678,25 +617,6 @@ class RoboTwinDataset(BaseDataset):
             if self._instructions:
                 print(f"  Loaded {len(self._instructions)} instruction files")
 
-        # ---- Validation mode ----
-        self._val_samples = None
-        if split == "val" and num_val_samples > 0:
-            val_rng = random.Random(seed + 1)
-            self._val_samples = []
-            eligible_ep_indices = [i for i, ep_len in enumerate(self._episode_lengths) if ep_len >= 2]
-            if not eligible_ep_indices:
-                raise ValueError(
-                    "No validation episodes have at least two frames, so no sample can contain a valid action label."
-                )
-            for _ in range(num_val_samples):
-                ep_idx = eligible_ep_indices[val_rng.randint(0, len(eligible_ep_indices) - 1)]
-                ep_len = self._episode_lengths[ep_idx]
-                max_start = max(0, ep_len - self._raw_window_len)
-                start_idx = val_rng.randint(0, max_start)
-                self._val_samples.append((ep_idx, start_idx))
-            print(f"  Val: {len(self._val_samples)} fixed samples")
-        elif split == "val":
-            print(f"  Val: exhaustive windows ({len(self._window_index)} samples)")
 
     @property
     def action_dim(self) -> int:
@@ -726,8 +646,6 @@ class RoboTwinDataset(BaseDataset):
         return self._normalizer.unnormalize(arr)
 
     def __len__(self):
-        if self._val_samples is not None:
-            return len(self._val_samples)
         return len(self._window_index)
 
     def _decode_jpeg(self, jpeg_bytes) -> Image.Image:
@@ -968,10 +886,7 @@ class RoboTwinDataset(BaseDataset):
         }
 
     def __getitem__(self, idx):
-        if self._val_samples is not None:
-            ep_idx, start = self._val_samples[idx]
-        else:
-            ep_idx, start = self._window_index[idx]
+        ep_idx, start = self._window_index[idx]
 
         sample = self._build_sample(ep_idx, start)
         if self._color_jitter is not None:
@@ -993,7 +908,7 @@ class MultiTaskRoboTwinDataset(BaseDataset):
 
     Args:
         dataset_dir: Top-level RoboTwin dataset directory.
-        robot: Target robot name (e.g. ``"aloha-agilex"``).
+        embodiment: Robot embodiment name (e.g. ``"aloha-agilex"``).
         variant: ``"clean_50"``, ``"randomized_500"``, or ``"both"``
             (merges clean_50 + randomized_500 into a single dataset).
         tasks: Optional internal task restriction. Defaults to every task
@@ -1001,8 +916,7 @@ class MultiTaskRoboTwinDataset(BaseDataset):
         normalization_stats_path: Path to shared action stats (.npy).
         action_mode: ``"joint"`` (14D) or ``"eef"`` (20D).
         **kwargs: Forwarded to each ``RoboTwinDataset`` (num_frames, height,
-            width, split, val_ratio, repeat, seed, target_camera,
-            window_stride, num_val_samples, backbone, ...).
+            width, split, target_camera, window_stride, backbone, ...).
     """
 
     _BOTH_VARIANTS = ["clean_50", "randomized_500"]
@@ -1032,7 +946,7 @@ class MultiTaskRoboTwinDataset(BaseDataset):
 
         return cls(
             dataset_dir=_get("dataset_dir"),
-            robot=_get("robot", "aloha-agilex"),
+            embodiment=_get("embodiment", "aloha-agilex"),
             variant=_get("variant", "both"),
             normalization_stats_path=_get("normalization_stats_path", None),
             normalize_mode=_norm_mode,
@@ -1041,8 +955,6 @@ class MultiTaskRoboTwinDataset(BaseDataset):
             height=int(_get("height", 384)),
             width=int(_get("width", 320)),
             split=split,
-            val_ratio=float(_get("val_ratio", 0.0)),
-            repeat=int(_get("repeat", 1)),
             target_camera=_get("target_camera", "head_camera"),
             window_stride=int(_get("window_stride", 1)),
             video_stride=int(_get("video_stride", 4)),
@@ -1051,13 +963,14 @@ class MultiTaskRoboTwinDataset(BaseDataset):
             backbone=_get("backbone", None),
             unify_action=bool(_get("unify_action", False)),
             unify_action_map=_get("unify_action_map", None),
+            unify_state_map=_get("unify_state_map", None),
             color_jitter=_get("color_jitter", None),
         )
 
     def __init__(
         self,
         dataset_dir: str,
-        robot: str,
+        embodiment: str,
         variant: str = "clean_50",
         tasks: Optional[list] = None,
         normalization_stats_path: Optional[str] = None,
@@ -1076,20 +989,20 @@ class MultiTaskRoboTwinDataset(BaseDataset):
         # ---- Discover per-task roots ----
         all_roots = []  # list of (display_name, data_root, variant_name)
         for v in variant_list:
-            roots = discover_robotwin_roots(dataset_dir, robot, v, tasks)
+            roots = discover_robotwin_roots(dataset_dir, embodiment, v, tasks)
             for _t, data_root in roots:
                 display = f"{_t}/{v}" if len(variant_list) > 1 else _t
                 all_roots.append((display, data_root, v))
 
         if not all_roots:
             raise FileNotFoundError(
-                f"No task data found in {dataset_dir} for robot={robot}, "
+                f"No task data found in {dataset_dir} for embodiment={embodiment}, "
                 f"variant={variant}."
             )
 
         print(
             f"MultiTaskRoboTwinDataset: {len(all_roots)} task-variant pairs, "
-            f"robot={robot}, variant={variant}, action_mode={action_mode}"
+            f"embodiment={embodiment}, variant={variant}, action_mode={action_mode}"
         )
 
         # ---- Resolve shared action-stats path (auto-compute if missing) ----
@@ -1097,7 +1010,7 @@ class MultiTaskRoboTwinDataset(BaseDataset):
         if isinstance(_norm_mode_kw, str) and _norm_mode_kw.lower() in ("none", "null", ""):
             _norm_mode_kw = None
 
-        _default_stats_name = f"{robot}_{variant}_stats.npy"
+        _default_stats_name = f"robotwin_{variant}_normalization_stats.npy"
         _scope_label = "multi-task"
 
         if _norm_mode_kw is None:
@@ -1109,7 +1022,7 @@ class MultiTaskRoboTwinDataset(BaseDataset):
             print(
                 f"[normalizer] Resolving {_scope_label} shared stats "
                 f"(normalize_mode={_norm_mode_kw}, action_mode={action_mode}, "
-                f"robot={robot}, variant={variant})"
+                f"embodiment={embodiment}, variant={variant})"
             )
             if normalization_stats_path is not None:
                 if os.path.exists(normalization_stats_path):
@@ -1124,7 +1037,7 @@ class MultiTaskRoboTwinDataset(BaseDataset):
                         f"[normalizer]          sub-datasets will fall back to their own auto-resolution."
                     )
             else:
-                normalization_stats_path = os.path.join(dataset_dir, _default_stats_name)
+                normalization_stats_path = os.path.join(dataset_dir, "meta", _default_stats_name)
                 if os.path.exists(normalization_stats_path):
                     print(
                         f"[normalizer] Found pre-computed {_scope_label} stats file: {normalization_stats_path} "
@@ -1185,9 +1098,10 @@ class MultiTaskRoboTwinDataset(BaseDataset):
                         f"[normalizer]   (this may take a while for large datasets)"
                     )
                     if is_rank0:
+                        os.makedirs(os.path.dirname(normalization_stats_path), exist_ok=True)
                         stats = compute_multitask_robotwin_stats(
                             dataset_dir=dataset_dir,
-                            robot=robot,
+                            embodiment=embodiment,
                             variant=variant,
                             tasks=tasks,
                             checkpoint_path=normalization_stats_path,
@@ -1244,7 +1158,7 @@ class MultiTaskRoboTwinDataset(BaseDataset):
                     data_root=data_root,
                     task_name=display_name.split("/")[0].replace("_", " "),
                     normalization_stats_path=normalization_stats_path,
-                    robot=robot,
+                    embodiment=embodiment,
                     variant=v,
                     action_mode=action_mode,
                     **kwargs,

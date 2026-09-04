@@ -245,7 +245,7 @@ def test_registry_and_training_yaml_select_muka_franka(tmp_path: Path):
     assert isinstance(dataset, MukaFrankaDataset)
     assert "muka_franka" in list_registered_datasets()
 
-    config = OmegaConf.load("configs/dataloader/muka_franka.yaml")
+    config = OmegaConf.load("configs/dataloader/pretrain_data/muka_franka.yaml")
     assert config.type == "muka_franka"
     assert config.dataset_dir == "/path/to/muka_franka_lerobot_v3"
     assert config.gripper_convention == GRIPPER_CONVENTION

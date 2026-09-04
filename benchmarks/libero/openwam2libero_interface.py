@@ -28,7 +28,7 @@ from benchmarks.utils import (
 )
 from benchmarks.utils.action_conversion import rot6d_to_axis_angle
 
-LIBERO_ACTION_MODE = "libero"
+LIBERO_ACTION_MODE = "eef"
 LIBERO_EEF10_DIM = 10
 LIBERO_ACTION7_DIM = 7
 PROPRIO_OBS_KEYS = ("robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos")

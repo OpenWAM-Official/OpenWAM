@@ -1,85 +1,73 @@
 # VLABench primitive finetune dataset (LeRobot v3, Franka Panda single-arm).
-# Reader: openwam/dataloader/vlabench.py (type "vlabench").
-#
-# The official VLABench standard finetune release: 10 primitive tasks x 500
-# episodes = 5000 episodes / 575k frames / 128 task variants at 10 fps.
+# The official standard finetune release: 10 primitive tasks x 500 episodes =
+# 5000 episodes / 575k frames / 128 task variants at 10 fps.
 #   https://huggingface.co/datasets/VLABench/vlabench_primitive_ft_lerobot_video
-# (NOT vlabench_primitive_ft_dataset — that redirects to VLABench/raw_primitive_datasets,
-#  the pre-conversion tarballs, which this reader cannot consume.)
+# (NOT vlabench_primitive_ft_dataset — that redirects to the pre-conversion
+#  tarballs, which this reader cannot consume.)
 type: vlabench
 
-# ── Dataset root ────────────────────────────────────────────────────────────
 # state = actions = [x,y,z,roll,pitch,yaw,gripper], absolute EE pose in the
-# ROBOT BASE frame (VLABench's converter subtracts the base position), turned
-# into raw EEF10 [xyz3, rot6d6, grip1] by the reader.
+# ROBOT BASE frame, turned into raw EEF10 [xyz3, rot6d6, grip1] by the reader.
 #
 # NOTE the two gripper columns use OPPOSITE polarity (state 1 = closed, action
 # 1 = open) because of an acknowledged upstream Franka bug. Both are passed
 # through verbatim so training and rollout stay on the same convention — see
 # the reader docstring before "fixing" either side.
 #
-# WARNING: this dataset's meta/episodes is CORRUPT upstream — it writes
-# dataset_from_index = length * episode_index, and mis-assigns
-# data/chunk_index / data/file_index in step with it (3952 of 5000 episodes
-# point at the wrong shard). Any loader that trusts those columns trains on
-# video paired with a DIFFERENT episode's actions and prompt. The reader
-# rebuilds the mapping from real parquet row counts; see
-# openwam/dataloader/vlabench.py::_add_data_offsets.
-# Placeholder — machine-specific dataset mounts must not land in shared
-# configs. Point it at your local copy with a
-# Hydra override: dataloader.dataset_dir=/path/to/vlabench_primitive_ft_lerobot_video
-dataset_dir: /TODO/vlabench_primitive_ft_lerobot_video
+# WARNING: this dataset's meta/episodes is CORRUPT upstream — it mis-assigns
+# shard indices for 3952 of 5000 episodes. The reader rebuilds the mapping
+# from real parquet row counts; see vlabench.py::_add_data_offsets.
+#
+# Placeholder path — machine-specific mounts must not land in shared configs;
+# override with dataloader.dataset_dir=/path/to/vlabench_data
+dataset_dir: /path/to/vlabench_data
 
-# ── Action mode ─────────────────────────────────────────────────────────────
-# VLABench is EEF-only. This key is not consumed by the reader — it is the
-# DEPLOY side of the contract: the policy server reads
-# `dataloader.action_mode` from the checkpoint's saved config to pick which key
-# to load out of normalization_stats.npy, and defaults to "joint" when absent.
-# It MUST match VLABenchDataset.DEPLOY_ACTION_MODE, which is the key the reader
-# WRITES into that file; a mismatch fails the deploy with a missing-stats
-# KeyError. tests/dataloader/test_vlabench_offsets.py pins the two together.
+# ── Action space ─────────────────────────────────────────────────────────────
+# VLABench is single-arm EEF-only, so its raw EEF10 maps 1:1 onto the shared
+# 80-D layout's left-arm slots 0-9 (see configs/dataloader/robotwin.yaml for
+# the full table). Normalization runs FIRST (in the reader), then the scatter;
+# the deploy denormalizer inverts in that same order. action_mode is also the
+# DEPLOY contract key: the policy server reads it from the checkpoint's saved
+# config to pick the stats entry, and it must match the reader's
+# DEPLOY_ACTION_MODE (pinned by tests/dataloader/test_vlabench_offsets.py).
 action_mode: eef
-
-# ── Unified 80-D action space (cross-robot shared head) ─────────────────────
-# The 80-D semantic layout (see configs/dataloader/robotwin.yaml for the full
-# table) starts with the left arm:
-#   [ 0: 3) left eef xyz   [ 3: 9) left eef rot6d   [ 9] left gripper
-# VLABench is single-arm, so its raw EEF10 maps 1:1 onto slots 0-9 — the same
-# pretrained semantic dims the OpenWAM pretrain mixture used for its left arm.
-# Normalization runs FIRST (in the reader), then the scatter; the deploy
-# denormalizer inverts in that same order.
 unify_action: true
 unify_action_map: ["0-9"]
+unify_state_map: null  # null = state reuses unify_action_map
 
-# ── Window / stride ─────────────────────────────────────────────────────────
+# ── Frame sampling ───────────────────────────────────────────────────────────
+# num_frames = state/action window length; action horizon = num_frames - 1.
+# video_stride subsamples video only; state/action stay at the raw rate.
+# window_stride = sliding window step (1 = every frame starts a window).
 num_frames: 33
 video_stride: 4
 window_stride: 1
+split: train
 
-# ── Image size ──────────────────────────────────────────────────────────────
-# multiview=true → L-shape canvas (384H x 320W):
-#   top    256H x 320W → image (head / front camera)
-#   bot-L  128H x 160W → wrist_image
-#   bot-R  128H x 160W → second_image (second external view)
+# ── Rendering (3-slot L-shape canvas) ────────────────────────────────────────
+# camera_layout = [head, left/bottom-left, right/bottom-right]; null slots are
+# rendered as black tiles. At 384x320: top 256Hx320W, bottom halves 128Hx160W,
+# each tile BILINEAR-stretched to its slot. target_camera drives single-view
+# mode and is ignored when multiview=true.
+# top: image (head / front camera); bottom-left: wrist_image; bottom-right:
+# second_image (second external view).
 height: 384
 width: 320
 multiview: true
 
-# ── Train / val split ───────────────────────────────────────────────────────
-split: train
-
-# ── Action / proprio normalization ──────────────────────────────────────────
-# Reads {dataset_dir}/meta/eef_stats.json (state + action pooled, 10-D) and
-# writes {dataset_dir}/meta/normalization_stats.npy for the deploy server.
-# Regenerate the source stats with:
-#   python -m openwam.dataloader.utils.stats_computation.vlabench_stats_computation \
-#       --dataset-dir {dataset_dir}
+# ── Normalization ────────────────────────────────────────────────────────────
+# Pooled EEF10 stats live at <dataset_dir>/meta/vlabench_normalization_stats.npy
+# and are auto-built on first use (rank 0 scans, other ranks wait); build up
+# front with vlabench_stats_computation. The reader also writes the deploy
+# denormalizer artifact meta/normalization_stats.npy.
 normalize_mode: min-max
 
-enable_action_supervision: true
-
-# Load-time, temporally consistent augmentation (train split only).
+# ── Video augmentation (optional) ────────────────────────────────────────────
+# Load-time color jitter applied by the reader to each clip with the SAME
+# random factors across all frames (temporal consistency), TRAIN split only.
+# enabled: false keeps video byte-identical while preserving the knobs.
 color_jitter:
+  enabled: true
   brightness: 0.2
   contrast: 0.2
   saturation: 0.2

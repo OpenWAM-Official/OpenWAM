@@ -69,45 +69,45 @@ _ARM_CALIBRATION_KEYS = {
 _QUATERNION_ATOL = 1e-6
 
 
-def validate_dataset_variant(dataset_variant: str) -> None:
+def validate_dataset_variant(variant: str) -> None:
     """Validate the explicit simulation/real dataset release selector."""
-    if dataset_variant not in ROBODOJO_DATASET_VARIANTS:
+    if variant not in ROBODOJO_DATASET_VARIANTS:
         raise ValueError(
-            "RoboDojo dataset_variant must be one of "
-            f"{list(ROBODOJO_DATASET_VARIANTS)}, got {dataset_variant!r}"
+            "RoboDojo variant must be one of "
+            f"{list(ROBODOJO_DATASET_VARIANTS)}, got {variant!r}"
         )
 
 
 def validate_embodiment(
     embodiment: str,
     *,
-    dataset_variant: str = ROBODOJO_SIM_VARIANT,
+    variant: str = ROBODOJO_SIM_VARIANT,
 ) -> None:
     """Validate an embodiment against the selected RoboDojo release."""
-    validate_dataset_variant(dataset_variant)
+    validate_dataset_variant(variant)
     supported = (
         (ROBODOJO_EMBODIMENT,)
-        if dataset_variant == ROBODOJO_SIM_VARIANT
+        if variant == ROBODOJO_SIM_VARIANT
         else ROBODOJO_REAL_EMBODIMENTS
     )
     if embodiment not in supported:
-        if dataset_variant == ROBODOJO_SIM_VARIANT:
+        if variant == ROBODOJO_SIM_VARIANT:
             raise ValueError(
                 "RoboDojo sim's only supported OpenWAM embodiment is "
                 f"'{ROBODOJO_EMBODIMENT}', got {embodiment!r}"
             )
         raise ValueError(
-            f"RoboDojo {dataset_variant}'s supported OpenWAM embodiments are "
+            f"RoboDojo {variant}'s supported OpenWAM embodiments are "
             f"{list(supported)}, got {embodiment!r}"
         )
 
 
 def robodojo_real_frame_contract(embodiment: str) -> dict[str, Any]:
     """Return the native, identity-pose contract for one real embodiment."""
-    validate_embodiment(embodiment, dataset_variant=ROBODOJO_REAL_VARIANT)
+    validate_embodiment(embodiment, variant=ROBODOJO_REAL_VARIANT)
     return {
         "schema_version": REAL_FRAME_SCHEMA_VERSION,
-        "dataset_variant": ROBODOJO_REAL_VARIANT,
+        "variant": ROBODOJO_REAL_VARIANT,
         "embodiment": embodiment,
         "source_frame": ROBODOJO_REAL_SOURCE_FRAME,
         "target_frame": ROBODOJO_TARGET_FRAME,
@@ -138,14 +138,14 @@ def discover_episodes(
     task: str,
     *,
     embodiment: str = ROBODOJO_EMBODIMENT,
-    dataset_variant: str = ROBODOJO_SIM_VARIANT,
+    variant: str = ROBODOJO_SIM_VARIANT,
 ) -> list[Path]:
     """Discover only the formal ``<root>/<task>/<embodiment>/data`` layout.
 
     The historical flat demo layout at ``<root>/arx_x5/data`` is deliberately
     rejected rather than used as a fallback.
     """
-    validate_embodiment(embodiment, dataset_variant=dataset_variant)
+    validate_embodiment(embodiment, variant=variant)
     _validate_task_name(task)
     root = Path(dataset_root)
     data_dir = root / task / embodiment / "data"

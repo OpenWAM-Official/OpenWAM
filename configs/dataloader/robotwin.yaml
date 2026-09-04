@@ -1,72 +1,60 @@
 type: robotwin
-dataset_dir: /path/to/RoboTwin2.0/dataset    # top-level dataset dir (e.g. /path/to/RoboTwin2.0/dataset)
-
-robot: aloha-agilex              # robot embodiment name, maps to directory {robot}_{variant}
+dataset_dir: /path/to/robotwin_data
+embodiment: aloha-agilex          # robot embodiment name, maps to directory {embodiment}_{variant}
 variant: both                     # "clean_50", "randomized_500", or "both"
-action_mode: eef                  # "eef" (20D xyz+rot6d+grip, default) or "joint" (14D qpos)
 
-# ── Unified 80-D action space (cross-robot shared head) ──────────────────────
-# unify_action=true scatters this reader's raw action/proprio into a shared
+# ── Action space ─────────────────────────────────────────────────────────────
+# action_mode "eef" (20D xyz+rot6d+grip) or "joint" (14D qpos).
+# unify_action=true scatters this reader's raw action/proprio into the shared
 # 80-D vector so heterogeneous robots train one action head; the per-dim mask
-# keeps unmapped dims out of the loss. unify_action=false (default) is
-# byte-identical to the pre-unify reader. The 80-D semantic layout is:
+# keeps unmapped dims out of the loss. The 80-D semantic layout is:
 #   [ 0: 3) left  eef xyz     [ 3: 9) left  eef rot6d   [ 9]    left  gripper
 #   [10:34) left  hand (24)   [34:37) right eef xyz     [37:43) right eef rot6d
 #   [43]    right gripper     [44:68) right hand (24)   [68:80) reserved (12)
-# The map below is for action_mode: eef (20-D EEF), whose raw layout is
+# The map below is for action_mode: eef, whose raw layout is
 #   raw [0:3) L xyz · [3:9) L rot6d · [9] L grip · [10:13) R xyz · [13:19) R rot6d · [19] R grip
 # → raw left-arm 0-9 to unified 0-9, raw right-arm 10-19 to unified 34-43.
 # NOTE: for action_mode: joint (14-D qpos) this map does NOT apply — joints have
 # no eef-xyz/rot6d slots in the 80-D layout; set a joint-appropriate map first.
-# Single-list form (source dims implied 0..19 in token order):
+action_mode: eef
 unify_action: true
 unify_action_map: ["0-9", "34-43"]
+unify_state_map: null  # null = state reuses unify_action_map
 
-# --- Frame sampling ---
-# num_frames   = state/action window length in raw HDF5 frames.
-# video_stride = stride applied to video only; state and action stay at raw rate.
-# action horizon = num_frames - 1
-# video length   = (num_frames - 1) // video_stride + 1  (must divide evenly)
-# proprio        = raw_actions[0:1], shape (1, action_dim) — single frame, time dim kept.
+# ── Frame sampling ───────────────────────────────────────────────────────────
+# num_frames = state/action window length; action horizon = num_frames - 1.
+# video_stride subsamples video only; state/action stay at the raw rate.
+# window_stride = sliding window step (1 = every frame starts a window).
 num_frames: 33
-video_stride: 4                   # video-only stride; with num_frames=33 → 9 video frames
-height: 384                       # output video height in pixels (FastWAM multi-view: 256 top + 128 bottom)
-width: 320                        # output video width in pixels (FastWAM multi-view: 320 top, 160+160 bottom)
+video_stride: 4
+window_stride: 1
 split: train                      # "train" or "val"
-val_ratio: 0.0                    # fraction of episodes reserved for validation
-repeat: 1                         # repeat the window list N times per epoch
-window_stride: 1                  # sliding window step size (1 = every frame is a start point)
 
-# --- Multi-view composition (3-cam L-shape, FastWAM-compatible) ---
-# At height=384, width=320 this reproduces FastWAM's exact layout:
-#   +---------------------------+   <- head_camera (top), 256H × 320W
-#   |       camera_layout[0]    |      full width, 2/3 of height
-#   +-------------+-------------+
-#   |   cam[1]    |   cam[2]    |   <- wrist cameras (bottom), 128H × 160W each
-#   +-------------+-------------+      exact halves, 1/3 of height
-# Each tile is BILINEAR-stretched to its slot (no aspect-ratio preservation,
-# matching FastWAM's per-camera resize + concat).  Output canvas size is
-# controlled by height/width above.
+# ── Rendering (3-slot L-shape canvas) ────────────────────────────────────────
+# camera_layout = [head, left/bottom-left, right/bottom-right]; null slots are
+# rendered as black tiles. At 384x320: top 256Hx320W, bottom halves 128Hx160W,
+# each tile BILINEAR-stretched to its slot. target_camera drives single-view
+# mode and is ignored when multiview=true.
+height: 384
+width: 320
 multiview: true
 camera_layout: [head_camera, left_camera, right_camera]
-target_camera: head_camera        # camera used in single-view mode (ignored when multiview=true)
+target_camera: head_camera
 
-# --- Action normalization ---
-# Applied to BOTH joint and eef at dataset load time so downstream sees a
-# consistent numerical scale. The stats file is auto-resolved and, if absent,
-# auto-computed on first load. Conventional locations:
-#   - multi-task: <dataset_dir>/<robot>_<variant>_stats.npy
-#   "min-max" → rescale each dim into [-1, 1] using {min, max}
-#   "z-score" → (x - mean) / std, zero-mean unit-variance
-#   null      → disable, keep raw physical units
+# ── Normalization ────────────────────────────────────────────────────────────
+# Applied to BOTH joint and eef at load time. The stats file is auto-resolved
+# and, if absent, auto-built on first load (rank 0 computes, other ranks wait):
+#   <dataset_dir>/meta/robotwin_<variant>_normalization_stats.npy
+# "min-max" → rescale into [-1, 1]; "z-score" → zero-mean unit-variance;
+# null → disable, keep raw physical units.
 normalize_mode: min-max
 
-# ── Video augmentation (optional) ─────────────────────────────────────────────
-# color_jitter: load-time color jitter applied by the reader to each clip, with
-# the SAME random factors across all frames (temporal consistency), TRAIN split
-# only. Omit / null / false → disabled (default; video byte-identical). Provide
-# a dict to enable + set per-channel strengths (hue is a no-op in PIL mode).
+# ── Video augmentation (optional) ────────────────────────────────────────────
+# Load-time color jitter applied by the reader to each clip with the SAME
+# random factors across all frames (temporal consistency), TRAIN split only.
+# enabled: false keeps video byte-identical while preserving the knobs.
 color_jitter:
+  enabled: false
   brightness: 0.2
   contrast: 0.2
   saturation: 0.2

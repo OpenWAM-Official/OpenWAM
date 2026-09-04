@@ -17,21 +17,11 @@ EBench stores bimanual control in LeRobot-style per-episode parquet files:
   * matching ``state.*`` keys for proprio. ``state.base`` is the measured
     dummy-base joint qpos ``[x_m, y_m, yaw_RAD]`` — note the radian yaw.
 
-``base_action_source`` picks the base action field:
-
-  * ``delta`` (default): supervises ``action.base_delta``. The per-step
-    displacement command is the closest analogue of the instantaneous base
-    command BEHAVIOR keeps in the shared 80-D slots ``[68:71)`` (BEHAVIOR
-    stores local-frame velocity; EBench deltas are spawn/odom-frame
-    displacements with degree yaw — same role, different frame and unit,
-    documented here so mixture training doesn't silently pool them).
-    Proprio renders the *measured* per-step displacement
-    ``state.base[t] - state.base[t-1]`` (yaw wrapped, rad→deg) so proprio
-    and action share one raw-23 stats set in the same space — mirroring
-    BEHAVIOR's measured-state-into-command-space rendering.
-  * ``cumulative``: supervises ``action.base`` (episode-cumulative commanded
-    pose, degree yaw). Proprio renders ``state.base`` with yaw rad→deg so
-    dim 22 shares the action's degree unit.
+The base slot supervises ``action.base_delta`` — the per-step displacement
+command ``[dx_m, dy_m, dyaw_deg]`` in the spawn/odom axes. Proprio renders the
+*measured* per-step displacement ``state.base[t] - state.base[t-1]`` (yaw
+wrapped, rad→deg) so proprio and action share one raw-23 stats set in the
+same space.
 
 The raw EBench action/proprio vector is 23-D:
 
@@ -85,7 +75,7 @@ from PIL import Image
 
 from openwam.dataloader.bases import BaseDataset
 from openwam.dataloader.transforms.multiview import assemble_multiview_layout, format_prompt_for_inference
-from openwam.dataloader.transforms.video import VideoColorJitter
+from openwam.dataloader.transforms.video import VideoColorJitter, color_jitter_enabled
 from openwam.dataloader.utils.eef import assert_unit_quaternion, quat_xyzw_to_rot6d
 from openwam.dataloader.utils.normalization import apply_normalization
 from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse_unify_spec
@@ -96,13 +86,11 @@ logger = logging.getLogger(__name__)
 EBENCH_UNIFY_DIM = int(UNIFY_DIM)
 EBENCH_RAW_ACTION_DIM = 23
 
-EBENCH_ACTION_KEYS = ("action.ee_pose", "action.gripper", "action.base")
-EBENCH_ACTION_DELTA_BASE_KEYS = ("action.ee_pose", "action.gripper", "action.base_delta")
+EBENCH_ACTION_KEYS = ("action.ee_pose", "action.gripper", "action.base_delta")
 EBENCH_STATE_KEYS = ("state.ee_pose", "state.gripper", "state.base")
 EBENCH_DEFAULT_UNIFY_ACTION_MAP = ("0-9", "34-43", "68-70")
-EBENCH_BASE_SOURCES = ("delta", "cumulative")
 # All modes load from the offline-scan cache at <dataset_dir>/meta/
-# ebench_stats.npy, auto-built on first use (rank 0 scans, other ranks wait;
+# ebench_normalization_stats.npy, auto-built on first use (rank 0 scans, other ranks wait;
 # see _load_or_build_stats). The scan's true q01/q99 make "quantile" work out
 # of the box; a legacy summary-built cache without them is still rejected
 # rather than silently aliased to min/max.
@@ -138,38 +126,26 @@ def wrap_angle_rad(angle: np.ndarray) -> np.ndarray:
     return (np.asarray(angle, dtype=np.float64) + np.pi) % (2.0 * np.pi) - np.pi
 
 
-def render_ebench_state_base(
-    cur_base: np.ndarray, prev_base: Optional[np.ndarray], base_action_source: str
-) -> np.ndarray:
-    """Render measured ``state.base`` ``[x_m, y_m, yaw_RAD]`` into the action
-    command space selected by ``base_action_source``.
-
-    * ``delta``: measured per-step displacement ``cur - prev`` with the yaw
-      difference wrapped to [-pi, pi) then converted to DEGREES — the space of
-      ``action.base_delta``. ``prev_base=None`` (episode start) yields zeros:
-      there is no previous measurement to difference. (Note this is a
-      state-side rendering choice; GenManip's ``action.base_delta[0]`` keeps
-      the raw first command and may be non-zero — it is ``action.base`` that
-      the converter pins to 0 at t=0, an exclusive prefix sum.)
-    * ``cumulative``: ``cur`` with yaw converted rad→deg (unwrapped — the
-      cumulative command's degree yaw is unbounded too) — the space of
-      ``action.base``.
+def render_ebench_state_base(cur_base: np.ndarray, prev_base: Optional[np.ndarray]) -> np.ndarray:
+    """Render measured ``state.base`` ``[x_m, y_m, yaw_RAD]`` into the
+    ``action.base_delta`` command space: the measured per-step displacement
+    ``cur - prev`` with the yaw difference wrapped to [-pi, pi) then converted
+    to DEGREES. ``prev_base=None`` (episode start) yields zeros: there is no
+    previous measurement to difference. (Note this is a state-side rendering
+    choice; GenManip's ``action.base_delta[0]`` keeps the raw first command
+    and may be non-zero.)
 
     The eval bridge (``benchmarks/utils/action_conversion.py``) keeps a
     byte-identical mirror of this function; a regression test pins the two
     together. Change them in lockstep.
     """
     cur = np.asarray(cur_base, dtype=np.float64).reshape(3)
-    if base_action_source == "delta":
-        if prev_base is None:
-            return np.zeros(3, dtype=np.float32)
-        prev = np.asarray(prev_base, dtype=np.float64).reshape(3)
-        delta = cur - prev
-        dyaw = float(wrap_angle_rad(delta[2]))
-        return np.array([delta[0], delta[1], np.degrees(dyaw)], dtype=np.float32)
-    if base_action_source == "cumulative":
-        return np.array([cur[0], cur[1], np.degrees(cur[2])], dtype=np.float32)
-    raise ValueError(f"EBench base_action_source must be one of {EBENCH_BASE_SOURCES}, got {base_action_source!r}")
+    if prev_base is None:
+        return np.zeros(3, dtype=np.float32)
+    prev = np.asarray(prev_base, dtype=np.float64).reshape(3)
+    delta = cur - prev
+    dyaw = float(wrap_angle_rad(delta[2]))
+    return np.array([delta[0], delta[1], np.degrees(dyaw)], dtype=np.float32)
 
 
 def _cfg_get(cfg, key: str, default=None):
@@ -576,9 +552,6 @@ def _build_stats_cache_rank0(
     path: Path,
     dataset_dir: str,
     *,
-    groups: Optional[Sequence[str]],
-    buckets: Optional[Sequence[str]],
-    base_action_source: str,
     action_mode: str,
 ) -> None:
     """Build the offline-scan stats cache at ``path``, coordinated across ranks.
@@ -610,9 +583,6 @@ def _build_stats_cache_rank0(
         build_and_save_ebench_stats(
             dataset_dir,
             output=str(path),
-            groups=groups,
-            buckets=buckets,
-            base_action_source=base_action_source,
             action_mode=action_mode,
         )
         return
@@ -632,25 +602,19 @@ def _load_or_build_stats(
     action_mode: str,
     dataset_dir: str,
     normalize_mode: Optional[str] = None,
-    groups: Optional[Sequence[str]] = None,
-    buckets_cfg: Optional[Sequence[str]] = None,
-    base_action_source: str = "delta",
 ) -> Tuple[dict, str]:
-    """Load raw-23 action stats from ``<dataset_dir>/meta/ebench_stats.npy``.
+    """Load raw-23 action stats from ``<dataset_dir>/meta/ebench_normalization_stats.npy``.
 
     The cache location is fixed (the ebench_stats_computation default); when
     the file is missing it is built in place by the offline parquet scan via
     ``_build_stats_cache_rank0``. The scan carries true q01/q99, so every
     normalize mode — including "quantile" — works without manual pre-steps.
     """
-    path = Path(dataset_dir) / "meta" / "ebench_stats.npy"
+    path = Path(dataset_dir) / "meta" / "ebench_normalization_stats.npy"
     if not path.exists():
         _build_stats_cache_rank0(
             path,
             dataset_dir,
-            groups=groups,
-            buckets=buckets_cfg,
-            base_action_source=base_action_source,
             action_mode=action_mode,
         )
     raw = np.load(path, allow_pickle=True).item()
@@ -671,42 +635,17 @@ def _load_or_build_stats(
     return stats, str(path)
 
 
-def discover_ebench_buckets(
-    dataset_dir: str,
-    *,
-    groups: Optional[Sequence[str]] = None,
-    buckets: Optional[Sequence[str]] = None,
-) -> list[Path]:
-    """Discover EBench task buckets containing ``meta/info.json``."""
+def discover_ebench_buckets(dataset_dir: str) -> list[Path]:
+    """Discover every EBench task bucket (``<group>/<task>/meta/info.json``)."""
     root = Path(dataset_dir)
-    if buckets:
-        resolved = [root / b for b in buckets]
-        # An explicitly configured bucket list is a contract: a typo'd name
-        # must not silently shrink the training set of an ablation run.
-        missing = [str(p) for p in resolved if not (p / "meta" / "info.json").is_file()]
-        if missing:
-            raise FileNotFoundError(
-                f"Explicitly configured EBench buckets missing meta/info.json: {missing}. "
-                "Fix dataloader.buckets or download the missing buckets."
-            )
-    else:
-        groups = list(groups or ("long_horizon", "simple_pnp", "teleop_tasks"))
-        resolved = []
-        for group in groups:
-            group_dir = root / group
-            if not group_dir.is_dir():
-                continue
-            for child in sorted(group_dir.iterdir()):
-                if (child / "meta" / "info.json").is_file():
-                    resolved.append(child)
-    existing = [p for p in resolved if (p / "meta" / "info.json").is_file()]
-    if not existing:
-        raise FileNotFoundError(
-            f"No EBench buckets found under {root}. "
-            "Expected paths like long_horizon/<task>/meta/info.json, simple_pnp/task1/meta/info.json, "
-            "or teleop_tasks/peg_in_hole/meta/info.json."
-        )
-    return existing
+    resolved = sorted(
+        candidate.parent.parent
+        for candidate in root.glob("*/*/meta/info.json")
+        if candidate.is_file()
+    )
+    if not resolved:
+        raise FileNotFoundError(f"No EBench buckets with meta/info.json under {root}")
+    return resolved
 
 
 class EBenchDataset(BaseDataset):
@@ -732,8 +671,7 @@ class EBenchDataset(BaseDataset):
         action_stats: Optional[dict] = None,
         unify_action: bool = True,
         unify_action_map: Optional[Any] = None,
-        enable_action_supervision: bool = True,
-        base_action_source: str = "delta",
+        unify_state_map: Optional[Any] = None,
         dataset_id: Optional[str] = None,
         # Optional load-time video color jitter, applied consistently across a
         # clip's frames and ONLY on the train split. None / False / {} →
@@ -760,7 +698,7 @@ class EBenchDataset(BaseDataset):
         # random factors across all frames, via VideoColorJitter). Built only
         # for the train split; val / disabled keeps video byte-identical.
         self._color_jitter = None
-        if color_jitter and split == "train":
+        if color_jitter_enabled(color_jitter) and split == "train":
             cj_get = color_jitter.get if hasattr(color_jitter, "get") else (lambda k, d: d)
             self._color_jitter = VideoColorJitter(
                 brightness=float(cj_get("brightness", 0.2)),
@@ -783,21 +721,17 @@ class EBenchDataset(BaseDataset):
             )
         self._normalize_mode = normalize_mode
         self.normalization_stats_path = normalization_stats_path
-        self._enable_action_supervision = bool(enable_action_supervision)
-        if base_action_source == "delta":
-            self._action_keys = EBENCH_ACTION_DELTA_BASE_KEYS
-        elif base_action_source == "cumulative":
-            self._action_keys = EBENCH_ACTION_KEYS
-        else:
-            raise ValueError(
-                f"EBench base_action_source must be one of {EBENCH_BASE_SOURCES}, got {base_action_source!r}"
-            )
-        self._base_action_source = base_action_source
+        self._action_keys = EBENCH_ACTION_KEYS
         self._state_keys = EBENCH_STATE_KEYS
         self._data_columns = list(dict.fromkeys((*self._action_keys, *self._state_keys, "task_index")))
 
         self._unify_action = bool(unify_action)
         self._unify_action_map = tuple(unify_action_map or EBENCH_DEFAULT_UNIFY_ACTION_MAP)
+        if unify_state_map is not None and tuple(unify_state_map) != self._unify_action_map:
+            raise ValueError(
+                "unify_state_map must be null or equal to unify_action_map here: "
+                "EBench state shares the action's raw-23 layout"
+            )
         self._raw_action_dim = EBENCH_RAW_ACTION_DIM
         if self._unify_action:
             self._unify_dst_index = parse_unify_spec(self._unify_action_map, EBENCH_UNIFY_DIM)
@@ -1090,8 +1024,7 @@ class EBenchDataset(BaseDataset):
             raw = _raw23_from_frame(frame.iloc[:n_valid], self._action_keys)
             mapped = self._finalize_raw_vector(self._normalize(raw, self._action_stats))
             action[:n_valid] = mapped
-            if self._enable_action_supervision:
-                mask[:n_valid, self._dim_mask] = True
+            mask[:n_valid, self._dim_mask] = True
         return action, mask
 
     def _build_proprio(self, frame_ext: pd.DataFrame, lead: int) -> tuple[np.ndarray, np.ndarray]:
@@ -1107,12 +1040,11 @@ class EBenchDataset(BaseDataset):
         gripper = _column_matrix(cur_row, self._state_keys[1], 4)
         base_rows = _column_matrix(frame_ext.iloc[: lead + 1], self._state_keys[2], 3)
         prev_base = base_rows[lead - 1] if lead > 0 else None
-        base = render_ebench_state_base(base_rows[lead], prev_base, self._base_action_source)
+        base = render_ebench_state_base(base_rows[lead], prev_base)
         raw = _ee_pose_gripper_base_to_raw23(ee_pose, gripper, base[None, :])
         proprio = self._finalize_raw_vector(self._normalize(raw, self._action_stats))
         mask = np.zeros((1, self._action_dim), dtype=bool)
-        if self._enable_action_supervision:
-            mask[:, self._dim_mask] = True
+        mask[:, self._dim_mask] = True
         return proprio.astype(np.float32), mask
 
     def _finalize_raw_vector(self, raw: np.ndarray) -> np.ndarray:
@@ -1258,22 +1190,15 @@ class EBenchDataset(BaseDataset):
         if dataset_dir is None:
             raise ValueError("EBenchDataset: missing dataloader.dataset_dir")
 
-        groups = _as_plain_list(_cfg_get(config, "groups", ["long_horizon", "simple_pnp", "teleop_tasks"]))
-        buckets_cfg = _as_plain_list(_cfg_get(config, "buckets", None))
-        buckets = discover_ebench_buckets(dataset_dir, groups=groups, buckets=buckets_cfg)
+        buckets = discover_ebench_buckets(dataset_dir)
 
         normalize_mode = _cfg_get(config, "normalize_mode", "min-max")
         if normalize_mode not in EBENCH_SUPPORTED_NORMALIZE_MODES:
             raise ValueError(
                 f"EBench normalize_mode must be one of {EBENCH_SUPPORTED_NORMALIZE_MODES}, got {normalize_mode!r}"
             )
-        action_mode = _cfg_get(config, "action_mode", "ebench")
-        base_action_source = _cfg_get(config, "base_action_source", "delta")
-        if base_action_source not in EBENCH_BASE_SOURCES:
-            raise ValueError(
-                f"EBench base_action_source must be one of {EBENCH_BASE_SOURCES}, got {base_action_source!r}"
-            )
-        action_keys = EBENCH_ACTION_DELTA_BASE_KEYS if base_action_source == "delta" else EBENCH_ACTION_KEYS
+        action_mode = _cfg_get(config, "action_mode", "eef")
+        action_keys = EBENCH_ACTION_KEYS
 
         action_stats = None
         resolved_stats_path = None
@@ -1284,9 +1209,6 @@ class EBenchDataset(BaseDataset):
                 action_mode=action_mode,
                 dataset_dir=dataset_dir,
                 normalize_mode=normalize_mode,
-                groups=groups,
-                buckets_cfg=buckets_cfg,
-                base_action_source=base_action_source,
             )
 
         common = {
@@ -1310,8 +1232,7 @@ class EBenchDataset(BaseDataset):
             "action_stats": action_stats,
             "unify_action": bool(_cfg_get(config, "unify_action", True)),
             "unify_action_map": _as_plain_list(_cfg_get(config, "unify_action_map", EBENCH_DEFAULT_UNIFY_ACTION_MAP)),
-            "enable_action_supervision": bool(_cfg_get(config, "enable_action_supervision", True)),
-            "base_action_source": base_action_source,
+            "unify_state_map": _as_plain_list(_cfg_get(config, "unify_state_map", None)),
             "color_jitter": _cfg_get(config, "color_jitter", None),
         }
 
@@ -1381,7 +1302,6 @@ class MultiEBenchDataset(BaseDataset):
 
 __all__ = [
     "EBENCH80_DIM_MASK",
-    "EBENCH_BASE_SOURCES",
     "EBenchDataset",
     "MultiEBenchDataset",
     "discover_ebench_buckets",

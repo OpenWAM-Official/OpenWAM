@@ -71,7 +71,7 @@ import torch
 
 from openwam.dataloader.bases.dataset import BaseDataset
 from openwam.dataloader.transforms.multiview import assemble_multiview_layout
-from openwam.dataloader.transforms.video import VideoColorJitter
+from openwam.dataloader.transforms.video import VideoColorJitter, color_jitter_enabled
 from openwam.dataloader.utils.eef import (
     EEF_DIM,
     build_action_mask_2d,
@@ -184,7 +184,6 @@ class LeRobotV3Reader(BaseDataset):
         split: str = "train",
         multiview: bool = False,
         normalize_mode: Any = _NORMALIZE_MODE_UNSET,
-        enable_action_supervision: bool = True,
         dataset_id: Optional[str] = None,
         target_camera: Optional[str] = None,
         camera_layout: Optional[List[str]] = None,
@@ -202,6 +201,7 @@ class LeRobotV3Reader(BaseDataset):
         # UNIFY_DIM constant (not per-dataset configurable).
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
+        unify_state_map: Optional[Any] = None,
         # Optional load-time video color jitter, applied consistently across a
         # clip's frames and ONLY on the train split. None / False / {} → disabled
         # (default; byte-identical to before). Truthy → enabled; a dict overrides
@@ -225,7 +225,6 @@ class LeRobotV3Reader(BaseDataset):
         self._normalize_mode = (
             self.DEFAULT_NORMALIZE_MODE if normalize_mode is _NORMALIZE_MODE_UNSET else normalize_mode
         )
-        self._enable_action_supervision = bool(enable_action_supervision)
         self._target_camera = target_camera
         self._camera_layout_param = list(camera_layout) if camera_layout else None
         self._max_hours = max_hours
@@ -236,7 +235,7 @@ class LeRobotV3Reader(BaseDataset):
         # random factors across all frames, via VideoColorJitter). Built only
         # for the train split; val / disabled keeps video byte-identical.
         self._color_jitter = None
-        if color_jitter and split == "train":
+        if color_jitter_enabled(color_jitter) and split == "train":
             cj_get = color_jitter.get if hasattr(color_jitter, "get") else (lambda k, d: d)
             self._color_jitter = VideoColorJitter(
                 brightness=float(cj_get("brightness", 0.2)),
@@ -259,6 +258,7 @@ class LeRobotV3Reader(BaseDataset):
         self._unify = bool(unify_action)
         self._unify_dim = int(UNIFY_DIM)
         self._unify_dst_index: Optional[np.ndarray] = None
+        self._unify_state_dst_index: Optional[np.ndarray] = None
         if self._unify:
             if unify_action_map is None:
                 # No spec → identity map: raw dims 0..raw_dim-1 in order.
@@ -268,6 +268,14 @@ class LeRobotV3Reader(BaseDataset):
             else:
                 spec = unify_action_map
             self._unify_dst_index = parse_unify_spec(spec, self._unify_dim)
+            state_spec = unify_state_map if unify_state_map is not None else spec
+            self._unify_state_dst_index = parse_unify_spec(state_spec, self._unify_dim)
+            if self._unify_state_dst_index.shape[0] != self._raw_action_dim:
+                raise ValueError(
+                    f"{self.DATASET_NAME} unify_state_map maps "
+                    f"{self._unify_state_dst_index.shape[0]} source dims but this reader emits "
+                    f"{self._raw_action_dim}-D state"
+                )
             if self._unify_dst_index.shape[0] != self._raw_action_dim:
                 raise ValueError(
                     f"{self.DATASET_NAME}({self._dataset_id}): unify_action_map maps "
@@ -427,14 +435,14 @@ class LeRobotV3Reader(BaseDataset):
                 proprio_raw_mask = action_raw_mask
             self._unify_proprio_dim_mask = np.zeros(self._unify_dim, dtype=bool)
             if proprio_raw_mask is None:
-                self._unify_proprio_dim_mask[self._unify_dst_index] = True
+                self._unify_proprio_dim_mask[self._unify_state_dst_index] = True
             else:
-                self._unify_proprio_dim_mask[self._unify_dst_index] = np.asarray(
+                self._unify_proprio_dim_mask[self._unify_state_dst_index] = np.asarray(
                     proprio_raw_mask, dtype=bool
                 )
 
         logger.info(
-            "%s(%s, %s): %d eps, %d windows, fps=%.1f, multiview=%s, normalize=%s, supervision=%s",
+            "%s(%s, %s): %d eps, %d windows, fps=%.1f, multiview=%s, normalize=%s",
             self.DATASET_NAME,
             self._dataset_id,
             split,
@@ -443,7 +451,6 @@ class LeRobotV3Reader(BaseDataset):
             self._fps,
             self._multiview,
             self._normalize_mode,
-            self._enable_action_supervision,
         )
 
     def _select_episodes_by_hours(self, target_hours: float, seed: int) -> None:
@@ -682,10 +689,13 @@ class LeRobotV3Reader(BaseDataset):
                 f"normalize_mode={self._normalize_mode!r} but {stats_path} is missing. "
                 f"Run the matching compute_stats script for {self.DATASET_NAME}, or set normalize_mode=null."
             )
-        import json
+        if stats_path.suffix == ".npy":
+            raw = np.load(stats_path, allow_pickle=True).item()
+        else:
+            import json
 
-        with open(stats_path) as f:
-            raw = json.load(f)
+            with open(stats_path) as f:
+                raw = json.load(f)
         return materialize_eef_stats(
             raw,
             self._normalize_mode,
@@ -939,7 +949,7 @@ class LeRobotV3Reader(BaseDataset):
         action_mask = build_action_mask_2d(
             T_action=T_action,
             action_dim=self.ACTION_DIM,
-            n_valid_time=n_supervised if self._enable_action_supervision else 0,
+            n_valid_time=n_supervised,
             dim_mask=dim_mask,
         )
         return action, action_mask
@@ -973,7 +983,7 @@ class LeRobotV3Reader(BaseDataset):
         if self._unify:
             # Same scatter as action, but honor the proprio-specific mask when
             # the source's action/state field availability differs.
-            proprio, _ = map_to_unify(proprio, self._unify_dst_index, self._unify_dim)
+            proprio, _ = map_to_unify(proprio, self._unify_state_dst_index, self._unify_dim)
             dim_mask = self._unify_proprio_dim_mask
         else:
             dim_mask = self.PROPRIO_DIM_MASK
@@ -982,7 +992,7 @@ class LeRobotV3Reader(BaseDataset):
 
         mask = build_proprio_mask_2d(
             action_dim=self.ACTION_DIM,
-            enabled=self._enable_action_supervision,
+            enabled=True,
             dim_mask=dim_mask,
         )
         return proprio, mask
@@ -1140,12 +1150,12 @@ class LeRobotV3Reader(BaseDataset):
         "width",
         "multiview",
         "normalize_mode",
-        "enable_action_supervision",
         "target_camera",
         "camera_layout",
         "head_camera_choices",
         "unify_action",
         "unify_action_map",
+        "unify_state_map",
         "color_jitter",
     )
 

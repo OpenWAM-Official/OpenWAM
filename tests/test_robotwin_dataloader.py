@@ -111,7 +111,6 @@ def test_joint_mode_basic():
             height=32,
             width=32,
             action_mode="joint",
-            val_ratio=0.0,
             video_stride=1,
         )
         assert ds.action_dim == 14
@@ -151,7 +150,6 @@ def test_short_episode_pads_and_masks():
             height=32,
             width=32,
             action_mode="joint",
-            val_ratio=0.0,
             normalize_mode=None,
         )
 
@@ -195,7 +193,6 @@ def test_long_episode_tail_windows_are_included_and_padded():
             height=32,
             width=32,
             action_mode="joint",
-            val_ratio=0.0,
             normalize_mode=None,
         )
 
@@ -233,7 +230,6 @@ def test_tail_windows_always_have_at_least_one_valid_action():
             height=32,
             width=32,
             action_mode="joint",
-            val_ratio=0.0,
             normalize_mode=None,
         )
 
@@ -261,7 +257,6 @@ def test_single_frame_episode_has_no_valid_action_window():
                 height=32,
                 width=32,
                 action_mode="joint",
-                val_ratio=0.0,
                 normalize_mode=None,
             )
 
@@ -282,60 +277,11 @@ def test_build_sample_rejects_window_without_valid_action_label():
             height=32,
             width=32,
             action_mode="joint",
-            val_ratio=0.0,
             normalize_mode=None,
         )
 
         with pytest.raises(IndexError, match="no valid action label"):
             ds._build_sample(0, 19)
-
-
-def test_val_fixed_samples_use_full_window_start_range():
-    """Fixed val sampling keeps the historical full-window distribution."""
-    from openwam.dataloader.robotwin import RoboTwinDataset
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
-
-        ds = RoboTwinDataset(
-            data_root=tmpdir,
-            num_frames=17,
-            video_stride=4,
-            height=32,
-            width=32,
-            split="val",
-            val_ratio=1.0,
-            num_val_samples=100,
-            action_mode="joint",
-            normalize_mode=None,
-        )
-
-        starts = [start for _ep_idx, start in ds._val_samples]
-        assert starts
-        assert max(starts) <= 3
-
-
-def test_val_exhaustive_windows_use_full_window_start_range():
-    """Uncapped val sampling should match the fixed-sample val semantics."""
-    from openwam.dataloader.robotwin import RoboTwinDataset
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
-
-        ds = RoboTwinDataset(
-            data_root=tmpdir,
-            num_frames=17,
-            video_stride=4,
-            height=32,
-            width=32,
-            split="val",
-            val_ratio=1.0,
-            num_val_samples=0,
-            action_mode="joint",
-            normalize_mode=None,
-        )
-
-        assert ds._window_index == [(0, 0), (0, 1), (0, 2), (0, 3)]
 
 
 def test_tail_masks_flow_through_prepare_inputs_and_loss():
@@ -359,7 +305,6 @@ def test_tail_masks_flow_through_prepare_inputs_and_loss():
             height=32,
             width=32,
             action_mode="joint",
-            val_ratio=0.0,
             normalize_mode=None,
         )
         arch = _make_tiny_arch()
@@ -450,7 +395,6 @@ def test_video_stride_does_not_affect_action_length():
             height=32,
             width=32,
             action_mode="joint",
-            val_ratio=0.0,
             normalize_mode=None,
         )
 
@@ -481,7 +425,6 @@ def test_joint_mode_minmax_normalization():
             width=32,
             action_mode="joint",
             normalization_stats_path=stats_path,
-            val_ratio=0.0,
             video_stride=1,
         )
 
@@ -513,7 +456,6 @@ def test_joint_mode_gripper_continuous():
             width=32,
             action_mode="joint",
             normalization_stats_path=stats_path,
-            val_ratio=0.0,
             video_stride=1,  # num_video_frames=5 → (5-1)%4=0 ✓
         )
 
@@ -548,7 +490,6 @@ def test_joint_mode_denormalize_roundtrip():
             width=32,
             action_mode="joint",
             normalization_stats_path=stats_path,
-            val_ratio=0.0,
             video_stride=1,
         )
 
@@ -577,7 +518,6 @@ def test_eef_mode_basic():
             height=32,
             width=32,
             action_mode="eef",
-            val_ratio=0.0,
             video_stride=1,
             normalize_mode=None,  # raw values for this test
         )
@@ -608,7 +548,6 @@ def test_eef_mode_minmax_normalization():
             action_mode="eef",
             normalization_stats_path=stats_path,
             normalize_mode="min-max",
-            val_ratio=0.0,
             video_stride=1,
         )
         assert ds.normalization_stats is not None and "min" in ds.normalization_stats
@@ -647,7 +586,6 @@ def test_eef_mode_zscore_normalization():
             action_mode="eef",
             normalization_stats_path=stats_path,
             normalize_mode="z-score",
-            val_ratio=0.0,
             video_stride=1,
         )
         sample = ds[0]
@@ -680,7 +618,6 @@ def test_eef_roundtrip_denormalize():
                 action_mode="eef",
                 normalization_stats_path=stats_path,
                 normalize_mode=mode,
-                val_ratio=0.0,
                 video_stride=1,
             )
             raw = np.random.RandomState(0).uniform(-1, 1, size=(7, 20)).astype(np.float32)
@@ -706,7 +643,6 @@ def test_eef_gripper_raw_values():
             height=32,
             width=32,
             action_mode="eef",
-            val_ratio=0.0,
             video_stride=2,  # (9-1)%2==0 and (5-1)%4==0 for VAE ✓
             normalize_mode=None,  # keep raw gripper values for this assertion
         )
@@ -742,7 +678,6 @@ def test_eef_denormalize_passthrough():
             height=32,
             width=32,
             action_mode="eef",
-            val_ratio=0.0,
             video_stride=1,
             normalize_mode=None,
         )
@@ -772,14 +707,13 @@ def test_multi_variant_discovery():
 
         ds = MultiTaskRoboTwinDataset(
             dataset_dir=tmpdir,
-            robot="test-robot",
+            embodiment="test-robot",
             variant="both",
             tasks=["task_a", "task_b"],
             num_frames=5,
             height=32,
             width=32,
             action_mode="joint",
-            val_ratio=0.0,
             video_stride=1,
         )
 
@@ -800,14 +734,13 @@ def test_multi_variant_single_variant_compat():
 
         ds = MultiTaskRoboTwinDataset(
             dataset_dir=tmpdir,
-            robot="test-robot",
+            embodiment="test-robot",
             variant="clean_50",
             tasks=["task_a"],
             num_frames=5,
             height=32,
             width=32,
             action_mode="joint",
-            val_ratio=0.0,
             video_stride=1,
         )
 
@@ -883,12 +816,11 @@ def test_multitask_normalization_stats_nested_schema():
                 _create_mock_episode(
                     os.path.join(data_dir, "episode0.hdf5"),
                     T=10,
-                    seed=hash(task + variant) % 1000,
                 )
 
         stats = compute_multitask_robotwin_stats(
             dataset_dir=tmpdir,
-            robot="test-robot",
+            embodiment="test-robot",
             variant="both",
             tasks=["task_a", "task_b"],
         )
@@ -902,15 +834,14 @@ def test_multitask_normalization_stats_nested_schema():
 # ---------------------------------------------------------------------------
 
 
-def _make_multitask_layout(root, tasks, robot="test-robot", variant="clean_50", T=10):
+def _make_multitask_layout(root, tasks, embodiment="test-robot", variant="clean_50", T=10):
     """Lay down a minimal RoboTwin multi-task tree under ``root``."""
     for task in tasks:
-        data_dir = os.path.join(root, task, f"{robot}_{variant}", "data")
+        data_dir = os.path.join(root, task, f"{embodiment}_{variant}", "data")
         os.makedirs(data_dir, exist_ok=True)
         _create_mock_episode(
             os.path.join(data_dir, "episode0.hdf5"),
             T=T,
-            seed=hash(task) % 1000,
         )
 
 
@@ -924,7 +855,7 @@ def test_multitask_action_stats_can_resume_from_partial_checkpoint():
 
         partial_stats = compute_multitask_robotwin_stats(
             dataset_dir=tmpdir,
-            robot="test-robot",
+            embodiment="test-robot",
             variant="clean_50",
             tasks=["task_a"],
             checkpoint_path=checkpoint_path,
@@ -934,14 +865,14 @@ def test_multitask_action_stats_can_resume_from_partial_checkpoint():
 
         resumed_stats = compute_multitask_robotwin_stats(
             dataset_dir=tmpdir,
-            robot="test-robot",
+            embodiment="test-robot",
             variant="clean_50",
             tasks=["task_a", "task_b"],
             checkpoint_path=checkpoint_path,
         )
         full_stats = compute_multitask_robotwin_stats(
             dataset_dir=tmpdir,
-            robot="test-robot",
+            embodiment="test-robot",
             variant="clean_50",
             tasks=["task_a", "task_b"],
         )
@@ -967,7 +898,7 @@ def test_resume_does_not_recompute_already_checkpointed_shards():
 
         compute_multitask_robotwin_stats(
             dataset_dir=tmpdir,
-            robot="test-robot",
+            embodiment="test-robot",
             variant="clean_50",
             tasks=["task_a"],
             checkpoint_path=checkpoint_path,
@@ -982,7 +913,7 @@ def test_resume_does_not_recompute_already_checkpointed_shards():
 
         compute_multitask_robotwin_stats(
             dataset_dir=tmpdir,
-            robot="test-robot",
+            embodiment="test-robot",
             variant="clean_50",
             tasks=["task_a", "task_b"],
             checkpoint_path=checkpoint_path,
@@ -1006,7 +937,7 @@ def test_resume_ignores_shards_dropped_from_tasks_list():
         # Initial run creates both task shards.
         compute_multitask_robotwin_stats(
             dataset_dir=tmpdir,
-            robot="test-robot",
+            embodiment="test-robot",
             variant="clean_50",
             tasks=["task_a", "task_b"],
             checkpoint_path=checkpoint_path,
@@ -1015,14 +946,14 @@ def test_resume_ignores_shards_dropped_from_tasks_list():
         # ignored because rebuild only looks up shards for current task_roots.
         narrowed = compute_multitask_robotwin_stats(
             dataset_dir=tmpdir,
-            robot="test-robot",
+            embodiment="test-robot",
             variant="clean_50",
             tasks=["task_a"],
             checkpoint_path=checkpoint_path,
         )
         ground_truth = compute_multitask_robotwin_stats(
             dataset_dir=tmpdir,
-            robot="test-robot",
+            embodiment="test-robot",
             variant="clean_50",
             tasks=["task_a"],
         )
@@ -1039,13 +970,13 @@ def test_resume_shards_are_keyed_by_data_root():
     from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import compute_multitask_robotwin_stats
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        _make_multitask_layout(tmpdir, ["task_a"], robot="robot-x", variant="clean_50")
-        _make_multitask_layout(tmpdir, ["task_a"], robot="robot-y", variant="clean_50")
+        _make_multitask_layout(tmpdir, ["task_a"], embodiment="robot-x", variant="clean_50")
+        _make_multitask_layout(tmpdir, ["task_a"], embodiment="robot-y", variant="clean_50")
         checkpoint_path = os.path.join(tmpdir, "shared_stats.npy")
 
         compute_multitask_robotwin_stats(
             dataset_dir=tmpdir,
-            robot="robot-x",
+            embodiment="robot-x",
             variant="clean_50",
             tasks=["task_a"],
             checkpoint_path=checkpoint_path,
@@ -1054,14 +985,14 @@ def test_resume_shards_are_keyed_by_data_root():
         # robot-x shard is not reused even with the same checkpoint_path.
         stats_y = compute_multitask_robotwin_stats(
             dataset_dir=tmpdir,
-            robot="robot-y",
+            embodiment="robot-y",
             variant="clean_50",
             tasks=["task_a"],
             checkpoint_path=checkpoint_path,
         )
         ground_truth_y = compute_multitask_robotwin_stats(
             dataset_dir=tmpdir,
-            robot="robot-y",
+            embodiment="robot-y",
             variant="clean_50",
             tasks=["task_a"],
         )
@@ -1091,7 +1022,8 @@ def test_multitask_peer_rank_waits_for_shared_stats(monkeypatch, tmp_path):
     from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import atomic_save_stats_npy
 
     dataset_dir = str(tmp_path)
-    stats_path = os.path.join(dataset_dir, "test-robot_clean_50_stats.npy")
+    os.makedirs(os.path.join(dataset_dir, "meta"), exist_ok=True)
+    stats_path = os.path.join(dataset_dir, "meta", "robotwin_clean_50_normalization_stats.npy")
 
     class _FakeSubDataset:
         def __init__(self, **kwargs):
@@ -1128,14 +1060,13 @@ def test_multitask_peer_rank_waits_for_shared_stats(monkeypatch, tmp_path):
     try:
         ds = ds_mod.MultiTaskRoboTwinDataset(
             dataset_dir=dataset_dir,
-            robot="test-robot",
+            embodiment="test-robot",
             variant="clean_50",
             tasks=["task_a"],
             action_mode="joint",
             num_frames=5,
             height=32,
             width=32,
-            val_ratio=0.0,
             video_stride=1,
         )
     finally:
@@ -1173,7 +1104,7 @@ def test_from_config_uses_directory_discovery_without_task_selectors():
     config = {
         "type": "robotwin",
         "dataset_dir": "/dummy",
-        "robot": "aloha-agilex",
+        "embodiment": "aloha-agilex",
         "variant": "clean_50",
     }
 
@@ -1226,7 +1157,7 @@ def test_from_config_via_registry():
     config = {
         "type": "robotwin",
         "dataset_dir": "/dummy",
-        "robot": "aloha-agilex",
+        "embodiment": "aloha-agilex",
         "variant": "clean_50",
     }
 

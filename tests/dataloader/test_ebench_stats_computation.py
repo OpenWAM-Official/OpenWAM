@@ -41,8 +41,7 @@ from openwam.dataloader.utils.stats_computation.ebench_stats_computation import 
 )
 from tests.dataloader.test_ebench_dataset import EP_LEN, N_EPS, _make_frame_row, make_bucket
 
-DELTA_KEYS = ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS
-CUM_KEYS = ebench_mod.EBENCH_ACTION_KEYS
+DELTA_KEYS = ebench_mod.EBENCH_ACTION_KEYS
 
 
 @pytest.fixture()
@@ -118,20 +117,16 @@ def test_std_floor_matches_reader_not_accumulator(bucket):
 
 def test_parity_with_online_summary_merge(bucket):
     """Drop-in contract: offline scan == episodes_stats.jsonl summary merge on
-    every stat min-max/z-score consume, for both base sources."""
-    for keys, source in ((DELTA_KEYS, "delta"), (CUM_KEYS, "cumulative")):
-        offline, _, _ = compute_ebench_stats([bucket], keys)
-        summary = _merge_raw_stats([_build_stats_from_bucket(bucket, keys)])
-        for key in ("mean", "std", "min", "max"):
-            np.testing.assert_allclose(offline[key], summary[key], atol=1e-4, err_msg=f"{source}:{key}")
+    every stat min-max/z-score consume."""
+    offline, _, _ = compute_ebench_stats([bucket], DELTA_KEYS)
+    summary = _merge_raw_stats([_build_stats_from_bucket(bucket, DELTA_KEYS)])
+    for key in ("mean", "std", "min", "max"):
+        np.testing.assert_allclose(offline[key], summary[key], atol=1e-4, err_msg=key)
 
 
-def test_base_source_selects_column(bucket):
+def test_base_delta_column_statistics(bucket):
     delta, _, _ = compute_ebench_stats([bucket], DELTA_KEYS)
     np.testing.assert_allclose(delta["mean"][20:23], [0.01, -0.005, math.degrees(0.02)], atol=1e-5)
-    cum, _, _ = compute_ebench_stats([bucket], CUM_KEYS)
-    t_mean = (EP_LEN - 1) / 2.0
-    np.testing.assert_allclose(cum["mean"][20:23], np.array([0.01, -0.005, math.degrees(0.02)]) * t_mean, atol=1e-4)
 
 
 def test_finger_disagreement_fails_dataset_wide(tmp_path):
@@ -229,8 +224,8 @@ def test_excluded_healthy_episode_still_accumulated(tmp_path):
 
 def test_payload_accepted_by_reader_and_unlocks_quantile(bucket, monkeypatch):
     root = bucket.parents[1]
-    out_path, stats = build_and_save_ebench_stats(str(root), buckets=["simple_pnp/task1"], base_action_source="delta")
-    assert out_path == root / "meta" / "ebench_stats.npy"  # the reader's fixed cache location
+    out_path, stats = build_and_save_ebench_stats(str(root))
+    assert out_path == root / "meta" / "ebench_normalization_stats.npy"  # the reader's fixed cache location
     payload = np.load(out_path, allow_pickle=True).item()
     assert payload["pool"] == "action" and payload["source"] == "parquet_scan"
     assert "q01" in payload["ebench"] and "q99" in payload["ebench"]
@@ -260,7 +255,7 @@ def test_summary_cache_stays_rejected_for_quantile(bucket):
     root = bucket.parents[1]
     summary = _merge_raw_stats([_build_stats_from_bucket(bucket, DELTA_KEYS)])
     fingerprint = ebench_mod._stats_fingerprint([bucket], DELTA_KEYS, "ebench", str(root))
-    cache = root / "meta" / "ebench_stats.npy"
+    cache = root / "meta" / "ebench_normalization_stats.npy"
     ebench_mod._atomic_save_npy(cache, ebench_mod._stats_cache_payload(summary, N_EPS * EP_LEN, fingerprint, "ebench"))
     with pytest.raises(ValueError, match="q01"):
         _load_or_build_stats([bucket], DELTA_KEYS, action_mode="ebench", dataset_dir=str(root), normalize_mode="quantile")

@@ -21,7 +21,7 @@ from __future__ import annotations
 import functools
 import json
 import os
-import random
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -34,7 +34,7 @@ from openwam.dataloader.transforms.multiview import (
     assemble_multiview_layout,
     crop_and_resize,
 )
-from openwam.dataloader.transforms.video import VideoColorJitter
+from openwam.dataloader.transforms.video import VideoColorJitter, color_jitter_enabled
 from openwam.dataloader.utils import get_cfg
 from openwam.dataloader.utils.eef import build_action_mask_2d, build_proprio_mask_2d
 from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, load_episodes_parquet
@@ -51,13 +51,35 @@ _WRIST_SLOT_H, _WRIST_SLOT_W = 128, 160
 
 STATE_DIM = 19
 ACTION_DIM = 15
-ACTION_STATS_KEY = "robocasa365"
-STATE_STATS_KEY = "robocasa365_state"
+ACTION_STATS_KEY = "eef"
+STATE_STATS_KEY = "eef_state"
 DEFAULT_ACTION_UNIFY_MAP = ["0-9", "68-72"]
 DEFAULT_STATE_UNIFY_MAP = ["0-9", "68-76"]
 ACTION_DIM_MASK = np.ones(ACTION_DIM, dtype=bool)
 STATE_DIM_MASK = np.ones(STATE_DIM, dtype=bool)
 _DEPLOY_RESOLVABLE_MODES = ("min-max", "z-score")
+
+
+POOLED_STATS_FILENAME = "robocasa365_normalization_stats.npy"
+
+
+def _discover_repos(dataset_dir: str) -> list:
+    """Expand a dataset_dir string: a compact repo itself, or an umbrella
+    directory holding compact repos one level down (e.g. a ``robocasa365/``
+    root containing the atomic + composite conversions)."""
+    if os.path.isfile(os.path.join(dataset_dir, "meta", "info.json")):
+        return [dataset_dir]
+    subs = sorted(
+        os.path.join(dataset_dir, name)
+        for name in os.listdir(dataset_dir)
+        if os.path.isfile(os.path.join(dataset_dir, name, "meta", "info.json"))
+    )
+    if not subs:
+        raise FileNotFoundError(
+            f"{dataset_dir} is neither a compact RoboCasa365 repo (no meta/info.json) "
+            "nor an umbrella directory containing compact repos one level down"
+        )
+    return subs
 
 
 def _task_dir_name(data_root: str) -> str:
@@ -111,16 +133,13 @@ class RoboCasa365Dataset(BaseDataset):
         height: int = 384,
         width: int = 320,
         split: str = "train",
-        val_ratio: float = 0.0,
-        repeat: int = 1,
         task_name: Optional[str] = None,
-        seed: int = 42,
         normalization_stats_path: Optional[str] = None,
         normalize_mode: Optional[str] = "min-max",
-        num_val_samples: int = 4,
         window_stride: int = 1,
         video_stride: int = 4,
         multiview: bool = True,
+        target_camera: str | None = None,
         camera_layout: Optional[list] = None,
         temporal_compression: int = 4,
         causal_temporal: bool = True,
@@ -141,7 +160,6 @@ class RoboCasa365Dataset(BaseDataset):
         self.height, self.width = int(height), int(width)
         if self.height % 32 != 0 or self.width % 32 != 0:
             raise ValueError(f"Resolution {self.height}x{self.width} must be divisible by 32")
-        self.repeat = int(repeat)
         self.split = split
         self.window_stride = max(1, int(window_stride))
         self.video_stride = max(1, int(video_stride))
@@ -153,9 +171,10 @@ class RoboCasa365Dataset(BaseDataset):
         self._video_sample_indices = list(range(0, self.num_frames, self.video_stride))
         self.num_video_frames = len(self._video_sample_indices)
         self.multiview = bool(multiview)
+        self._single_camera = str(target_camera) if target_camera else HEAD_CAMERA
         self.camera_layout = list(camera_layout) if camera_layout else list(VIDEO_CAMERAS)
         self._color_jitter = None
-        if color_jitter and split == "train":
+        if color_jitter_enabled(color_jitter) and split == "train":
             get = color_jitter.get if hasattr(color_jitter, "get") else lambda key, default: default
             self._color_jitter = VideoColorJitter(
                 brightness=float(get("brightness", 0.2)),
@@ -193,7 +212,7 @@ class RoboCasa365Dataset(BaseDataset):
                 f"RoboCasa365 compact reader requires state{STATE_DIM}/action{ACTION_DIM}; got {state_shape}/{action_shape}. "
                 "The dataset must be the compact v3 conversion."
             )
-        required_cameras = VIDEO_CAMERAS if self.multiview else (HEAD_CAMERA,)
+        required_cameras = VIDEO_CAMERAS if self.multiview else (self._single_camera,)
         missing_camera_features = [camera for camera in required_cameras if camera not in info.get("features", {})]
         if missing_camera_features:
             raise ValueError(
@@ -246,16 +265,7 @@ class RoboCasa365Dataset(BaseDataset):
             }
         self._episodes = episodes
 
-        rng = random.Random(seed)
-        order = list(range(len(episodes)))
-        rng.shuffle(order)
-        if val_ratio <= 0:
-            n_val = 0
-        elif val_ratio >= 1:
-            n_val = len(episodes)
-        else:
-            n_val = max(1, int(len(episodes) * val_ratio))
-        selected = sorted(order[:n_val]) if split == "val" else sorted(order[n_val:])
+        selected = list(range(len(episodes)))
         if not selected:
             raise ValueError(f"No episodes for split={split!r}")
         self._ep_pos = selected
@@ -266,19 +276,8 @@ class RoboCasa365Dataset(BaseDataset):
                 continue
             max_start = max(0, episode_length - self.num_frames) if split == "val" else max(0, episode_length - 2)
             self._window_index.extend((local_index, start) for start in range(0, max_start + 1, self.window_stride))
-        if self.repeat > 1:
-            self._window_index *= self.repeat
         if not self._window_index:
             raise ValueError(f"No valid windows for split={split!r}")
-        self._val_samples = None
-        if split == "val" and num_val_samples > 0:
-            val_rng = random.Random(seed + 1)
-            eligible = [index for index, length in enumerate(self._ep_lengths) if length >= 2]
-            self._val_samples = []
-            for _ in range(num_val_samples):
-                local_index = eligible[val_rng.randint(0, len(eligible) - 1)]
-                start = val_rng.randint(0, max(0, self._ep_lengths[local_index] - self.num_frames))
-                self._val_samples.append((local_index, start))
         print(f"RoboCasa365Dataset[{self.task_name}]: {len(self._ep_pos)} episodes ({split})")
 
         self._action_stats = None
@@ -289,10 +288,12 @@ class RoboCasa365Dataset(BaseDataset):
                 raise ValueError(
                     f"normalize_mode={self.normalize_mode!r} is not deploy-resolvable; use {_DEPLOY_RESOLVABLE_MODES} or null"
                 )
-            stats_path = normalization_stats_path or os.path.join(self.data_root, "meta", "normalization_stats.npy")
+            stats_path = normalization_stats_path or os.path.join(self.data_root, "meta", POOLED_STATS_FILENAME)
             if not os.path.isfile(stats_path):
                 raise FileNotFoundError(
-                    f"compact RoboCasa365 stats not found: {stats_path}; conversion writes meta/normalization_stats.npy"
+                    f"compact RoboCasa365 stats not found: {stats_path}; construct via "
+                    "MultiTaskRoboCasa365Dataset (which auto-builds pooled stats) or pass "
+                    "normalization_stats_path explicitly"
                 )
             self._action_stats, self._state_stats = _load_stats(stats_path)
             self.normalization_stats_path = stats_path
@@ -329,7 +330,7 @@ class RoboCasa365Dataset(BaseDataset):
         return self._unnormalize_action(values).astype(np.float32)
 
     def __len__(self) -> int:
-        return len(self._val_samples) if self._val_samples is not None else len(self._window_index)
+        return len(self._window_index)
 
     def _data_file_path(self, chunk: int, file_index: int) -> str:
         return os.path.join(
@@ -379,10 +380,10 @@ class RoboCasa365Dataset(BaseDataset):
                 for index in range(len(local))
             ]
         else:
-            head_chunk, head_file = metadata["vcf"][HEAD_CAMERA]
+            head_chunk, head_file = metadata["vcf"][self._single_camera]
             head = decode_video_frames(
-                self._video_path(HEAD_CAMERA, head_chunk, head_file),
-                [metadata["voff"][HEAD_CAMERA] + index for index in local],
+                self._video_path(self._single_camera, head_chunk, head_file),
+                [metadata["voff"][self._single_camera] + index for index in local],
                 self.height,
                 self.width,
             )
@@ -451,10 +452,7 @@ class RoboCasa365Dataset(BaseDataset):
         }
 
     def __getitem__(self, index):
-        if self._val_samples is not None:
-            local_index, start = self._val_samples[index]
-        else:
-            local_index, start = self._window_index[index]
+        local_index, start = self._window_index[index]
         sample = self._build_sample(local_index, start)
         if self._color_jitter is not None:
             sample["video"] = self._color_jitter.apply({"video": sample["video"]})["video"]
@@ -473,19 +471,16 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         camera_layout = get_cfg(config, "camera_layout", None)
         return cls(
             dataset_dir=get_cfg(config, "dataset_dir"),
-            task_name=get_cfg(config, "task_name", None),
-            task_roots=get_cfg(config, "task_roots", None),
             normalize_mode=normalize_mode,
             normalization_stats_path=get_cfg(config, "normalization_stats_path", None),
             num_frames=int(get_cfg(config, "num_frames", 33)),
             height=int(get_cfg(config, "height", 384)),
             width=int(get_cfg(config, "width", 320)),
             split=split,
-            val_ratio=float(get_cfg(config, "val_ratio", 0.0)),
-            repeat=int(get_cfg(config, "repeat", 1)),
             window_stride=int(get_cfg(config, "window_stride", 1)),
             video_stride=int(get_cfg(config, "video_stride", 4)),
             multiview=bool(get_cfg(config, "multiview", True)),
+            target_camera=get_cfg(config, "target_camera", None),
             camera_layout=list(camera_layout) if camera_layout is not None else None,
             temporal_compression=int(get_cfg(config, "temporal_compression", 4)),
             causal_temporal=bool(get_cfg(config, "causal_temporal", True)),
@@ -493,25 +488,30 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             unify_action_map=get_cfg(config, "unify_action_map", None),
             unify_state_map=get_cfg(config, "unify_state_map", None),
             color_jitter=get_cfg(config, "color_jitter", None),
-            seed=int(get_cfg(config, "seed", 42)),
         )
 
     def __init__(
         self,
         dataset_dir,
-        task_name: Optional[str] = None,
-        task_roots: Optional[list] = None,
         normalize_mode: Optional[str] = "min-max",
         normalization_stats_path: Optional[str] = None,
         **kwargs,
     ):
         super().__init__()
-        self.task_name = task_name
-        roots = self._resolve_task_roots(dataset_dir, task_name, task_roots)
+        roots = self._resolve_task_roots(dataset_dir)
         if not roots:
             raise FileNotFoundError(f"No RoboCasa365 tasks found under {dataset_dir}")
-        if normalize_mode is not None and normalization_stats_path is None and len({repo for _, repo in roots}) > 1:
-            raise ValueError("multi-repo RoboCasa365 requires normalization_stats_path")
+        if normalize_mode is not None and normalization_stats_path is None:
+            if isinstance(dataset_dir, str):
+                normalization_stats_path = self._ensure_pooled_stats(
+                    dataset_dir, sorted({repo for _, repo in roots})
+                )
+            elif len({repo for _, repo in roots}) > 1:
+                raise ValueError(
+                    "list-form dataset_dir requires an explicit normalization_stats_path; "
+                    "point dataset_dir at the single umbrella directory instead for "
+                    "auto-built pooled stats"
+                )
         print(f"MultiTaskRoboCasa365Dataset: {len(roots)} task bucket(s)")
         self._datasets = [
             RoboCasa365Dataset(
@@ -527,8 +527,47 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         self.normalization_stats_path = self._datasets[0].normalization_stats_path
 
     @staticmethod
-    def _resolve_task_roots(dataset_dir, task_name: Optional[str], task_roots: Optional[list]):
-        repos = [dataset_dir] if isinstance(dataset_dir, str) else list(dataset_dir)
+    def _ensure_pooled_stats(dataset_dir: str, repos: list) -> str:
+        """Resolve <dataset_dir>/meta/robocasa365_normalization_stats.npy,
+        auto-building it over every discovered repo on first use (rank 0
+        computes, other ranks wait)."""
+        stats_path = os.path.join(dataset_dir, "meta", POOLED_STATS_FILENAME)
+        if os.path.isfile(stats_path):
+            return stats_path
+        try:
+            import torch.distributed as dist
+
+            dist_ready = dist.is_available() and dist.is_initialized()
+        except Exception:
+            dist_ready = False
+        if dist_ready:
+            rank = dist.get_rank()
+        else:
+            # torchrun sets RANK before init_process_group; honor it so
+            # pre-init constructions still elect a single builder.
+            rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
+        if rank == 0:
+            from openwam.dataloader.utils.stats_computation.robocasa365_stats_computation import (
+                build_and_save_robocasa365_stats,
+            )
+
+            print(
+                f"[normalizer] No RoboCasa365 stats at {stats_path} — scanning "
+                f"{len(repos)} repo(s) (rank 0; other ranks wait)"
+            )
+            build_and_save_robocasa365_stats(repos, stats_path)
+        else:
+            deadline = time.monotonic() + float(os.environ.get("OPENWAM_STATS_WAIT_TIMEOUT_S", 12 * 60 * 60))
+            poll_interval_s = float(os.environ.get("OPENWAM_STATS_POLL_INTERVAL_S", 10))
+            while not os.path.isfile(stats_path):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out waiting for rank 0 to build RoboCasa365 stats: {stats_path}")
+                time.sleep(poll_interval_s)
+        return stats_path
+
+    @staticmethod
+    def _resolve_task_roots(dataset_dir):
+        repos = _discover_repos(dataset_dir) if isinstance(dataset_dir, str) else list(dataset_dir)
         pairs = []
         for repo in repos:
             episodes = _episodes_with_offsets(str(repo))
@@ -536,14 +575,7 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
                 (task, str(repo))
                 for task in sorted({_task_from_source_prefix(prefix) for prefix in episodes["source_prefix"]})
             )
-        available = {task for task, _ in pairs}
-        if task_name is not None:
-            selected = {task_name} if task_name in available else set()
-        elif task_roots:
-            selected = set(task_roots).intersection(available)
-        else:
-            selected = available
-        return [(task, repo) for task, repo in pairs if task in selected]
+        return pairs
 
     @property
     def action_dim(self) -> int:

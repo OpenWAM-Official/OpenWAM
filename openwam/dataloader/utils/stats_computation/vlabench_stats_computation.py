@@ -4,7 +4,8 @@ Scans every data parquet shard, converts the 7-D
 ``[x, y, z, roll, pitch, yaw, gripper]`` state and action streams to 10-D EEF
 (``pos(3) + rot6d(6) + grip(1)``), and writes a merged
 ``min / max / mean / std / q01 / q99`` summary to
-``{dataset_dir}/meta/eef_stats.json``.
+``{dataset_dir}/meta/vlabench_normalization_stats.npy``
+(auto-built by the reader on first use — rank 0 scans, other ranks wait).
 
 state and action are stacked into a single ``(N, 10)`` matrix so one set of
 parameters governs both streams — matching the OXE convention and what
@@ -27,8 +28,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import List, Tuple
 
@@ -102,6 +104,28 @@ def compute_dataset_stats(dataset_dir: Path, rot6d_identity: bool = True) -> Tup
     return stats, n_state, n_action
 
 
+NORMALIZATION_STATS_FILENAME = "vlabench_normalization_stats.npy"
+
+
+def build_and_save_vlabench_stats(dataset_dir, output=None, rot6d_identity: bool = True) -> Path:
+    """Compute and atomically write the stats payload; returns the output path."""
+    dataset_dir = Path(dataset_dir)
+    out_path = Path(output) if output else dataset_dir / "meta" / NORMALIZATION_STATS_FILENAME
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    stats, _n_state, _n_action = compute_dataset_stats(dataset_dir, rot6d_identity=rot6d_identity)
+    fd, tmp_name = tempfile.mkstemp(dir=str(out_path.parent), suffix=".npy.tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            np.save(handle, stats, allow_pickle=True)
+        os.replace(tmp_name, out_path)
+    except BaseException:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+        raise
+    logger.info("wrote %s", out_path)
+    return out_path
+
+
 def _print_stats_table(stats: dict) -> None:
     """Per-dim summary for human eyeballing."""
     dim_names = ["x", "y", "z", "r6_0", "r6_1", "r6_2", "r6_3", "r6_4", "r6_5", "grip"]
@@ -130,7 +154,7 @@ def main():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Compute and print stats but do not write meta/eef_stats.json",
+        help="Compute and print stats but do not write meta/{}".format(NORMALIZATION_STATS_FILENAME),
     )
     parser.add_argument(
         "--no-rot6d-identity",
@@ -144,17 +168,15 @@ def main():
     if not ds_dir.is_dir():
         parser.error(f"dataset dir does not exist: {ds_dir}")
 
-    stats, _n_state, _n_action = compute_dataset_stats(
-        ds_dir, rot6d_identity=not args.no_rot6d_identity
-    )
-    _print_stats_table(stats)
     if args.dry_run:
+        stats, _n_state, _n_action = compute_dataset_stats(
+            ds_dir, rot6d_identity=not args.no_rot6d_identity
+        )
+        _print_stats_table(stats)
         logger.info("--dry-run, no file written")
         return
-    out_path = ds_dir / "meta" / "eef_stats.json"
-    with open(out_path, "w") as f:
-        json.dump(stats, f, indent=2)
-    logger.info("wrote %s", out_path)
+    out_path = build_and_save_vlabench_stats(ds_dir, rot6d_identity=not args.no_rot6d_identity)
+    _print_stats_table(np.load(out_path, allow_pickle=True).item())
 
 
 if __name__ == "__main__":

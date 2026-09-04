@@ -75,13 +75,13 @@ def test_real_stats_preserve_native_pose_and_load_for_each_embodiment(
     payload = compute_robodojo_stats(
         dataset_dir=tmp_path,
         embodiment=embodiment,
-        dataset_variant="real",
+        variant="real",
         reservoir_cap=100,
     )
     atomic_save_stats_npy(output, payload)
 
     metadata = payload["metadata"]
-    assert metadata["dataset_variant"] == "real"
+    assert metadata["variant"] == "real"
     assert metadata["embodiment"] == embodiment
     assert metadata["source_frame"] == (
         "per_arm_robot_base_position_and_orientation_wxyz"
@@ -99,7 +99,7 @@ def test_real_stats_preserve_native_pose_and_load_for_each_embodiment(
         dataset_root=tmp_path,
         task_name="pick_mug",
         embodiment=embodiment,
-        dataset_variant="real",
+        variant="real",
         normalization_stats_path=output,
         normalize_mode="min-max",
         unify_action=False,
@@ -112,7 +112,7 @@ def test_real_stats_preserve_native_pose_and_load_for_each_embodiment(
         raw = read_calibrated_eef20(
             handle,
             None,
-            dataset_variant="real",
+            variant="real",
             embodiment=embodiment,
         )
     np.testing.assert_allclose(

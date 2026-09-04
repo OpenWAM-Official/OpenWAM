@@ -1,31 +1,11 @@
 type: robocasa365
 
-# Independent native-delta RoboCasa365 LeRobot v3 conversions. Atomic and
-# composite share one schema and are read as one 300-task collection.
-dataset_dir:
-  - /path/to/benchmark_data/robocasa365/robocasa365-pretrain-atomic
-  - /path/to/benchmark_data/robocasa365/robocasa365-pretrain-composite
-task_name: null
-task_roots: null
+# Umbrella directory holding the independent native-delta RoboCasa365 LeRobot
+# v3 conversions (atomic + composite) one level down; they share one schema and
+# are read as one 300-task collection.
+dataset_dir: /path/to/robocasa365_data
 
-# One raw state per sample and a 32-step same-row action horizon.
-num_frames: 33
-video_stride: 4
-window_stride: 1
-repeat: 1
-
-height: 384
-width: 320
-multiview: true
-camera_layout:
-  - observation.images.robot0_agentview_left
-  - observation.images.robot0_eye_in_hand
-  - observation.images.robot0_agentview_right
-
-split: train
-val_ratio: 0.0
-seed: 42
-
+# ── Action space ─────────────────────────────────────────────────────────────
 # The converted Parquet columns are row-aligned:
 #   observation.state[19] = eef xyz3 + rot6d6 + gripper1 + base xyz3 + rot6d6
 #   action[15] = native normalized delta xyz3
@@ -33,17 +13,49 @@ seed: 42
 #                + flipped gripper1
 #                + native base vx/vy/vyaw + torso + control_mode
 # The rotation command is not multiplied by 0.5 and is not composed with state.
-action_mode: robocasa365
-normalize_mode: min-max
-normalization_stats_path: /path/to/benchmark_data/robocasa365/robocasa365_multitask_compact_stats.npy
-
 # State and action have different raw widths and independent normalization
-# blocks. There is no 20-D/25-D intermediate.
+# blocks — hence the separate unify_state_map. There is no 20-D intermediate.
+action_mode: eef
 unify_action: true
 unify_action_map: ["0-9", "68-72"]
 unify_state_map: ["0-9", "68-76"]
 
+# ── Frame sampling ───────────────────────────────────────────────────────────
+# num_frames = state/action window length; action horizon = num_frames - 1.
+# video_stride subsamples video only; state/action stay at the raw rate.
+# window_stride = sliding window step (1 = every frame starts a window).
+# One raw state per sample and a 32-step same-row action horizon.
+num_frames: 33
+video_stride: 4
+window_stride: 1
+split: train
+
+# ── Rendering (3-slot L-shape canvas) ────────────────────────────────────────
+# camera_layout = [head, left/bottom-left, right/bottom-right]; null slots are
+# rendered as black tiles. At 384x320: top 256Hx320W, bottom halves 128Hx160W,
+# each tile BILINEAR-stretched to its slot. target_camera drives single-view
+# mode and is ignored when multiview=true.
+height: 384
+width: 320
+multiview: true
+camera_layout:
+  - observation.images.robot0_agentview_left
+  - observation.images.robot0_eye_in_hand
+  - observation.images.robot0_agentview_right
+target_camera: observation.images.robot0_agentview_left
+
+# ── Normalization ────────────────────────────────────────────────────────────
+# Pooled stats live at <dataset_dir>/meta/robocasa365_normalization_stats.npy
+# and are auto-built on first use (rank 0 computes, other ranks wait).
+normalize_mode: min-max
+normalization_stats_path: null  # override only; default auto-resolves under <dataset_dir>/meta/
+
+# ── Video augmentation (optional) ────────────────────────────────────────────
+# Load-time color jitter applied by the reader to each clip with the SAME
+# random factors across all frames (temporal consistency), TRAIN split only.
+# enabled: false keeps video byte-identical while preserving the knobs.
 color_jitter:
+  enabled: true
   brightness: 0.2
   contrast: 0.2
   saturation: 0.2

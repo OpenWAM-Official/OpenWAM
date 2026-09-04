@@ -70,11 +70,11 @@ def test_contract_constants_pin_arx_x5_eef20_and_link6():
     with pytest.raises(ValueError, match="only supported.*arx_x5"):
         validate_embodiment("franka")
     for embodiment in ("arx_x5", "piper", "piper_x"):
-        validate_embodiment(embodiment, dataset_variant="real")
+        validate_embodiment(embodiment, variant="real")
     with pytest.raises(ValueError, match="only supported.*arx_x5"):
-        validate_embodiment("piper", dataset_variant="sim")
-    with pytest.raises(ValueError, match="dataset_variant"):
-        validate_embodiment("arx_x5", dataset_variant="hardware")
+        validate_embodiment("piper", variant="sim")
+    with pytest.raises(ValueError, match="variant"):
+        validate_embodiment("arx_x5", variant="hardware")
 
 
 def test_builtin_dual_x5_calibration_matches_robot_yaml_constants():

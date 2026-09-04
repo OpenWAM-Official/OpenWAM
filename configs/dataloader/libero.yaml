@@ -2,37 +2,53 @@ type: libero
 
 # Canonical LIBERO dataset. The reader accepts only the native-action
 # conversion metadata (meta/conversion.json).
-dataset_dir: /path/to/benchmark_data/libero
-action_mode: libero
-gripper_convention: minus1_closed_plus1_open
+dataset_dir: /path/to/libero_data
 
+# ── Action space ─────────────────────────────────────────────────────────────
 # Normalize action and achieved state from their separate native-action stats
 # blocks, then scatter both 10-D streams into the canonical left-arm slots.
-unify_action: true
-unify_action_map: ["0-9"]
-normalize_mode: min-max
 # Rot6d slots (3:9) are always identity-mapped by the canonical reader; this
 # is enforced even if a stale/custom stats file contains non-identity values.
+# The benchmark bridge decodes the model's native 10-D action to LIBERO's
+# runtime 7-D OSC command without absolute-goal composition or controller
+# scale.
+action_mode: eef
+unify_action: true
+unify_action_map: ["0-9"]
+unify_state_map: null  # null = state reuses unify_action_map
 
-head_camera_priority:
-  - observation.images.image
-wrist_camera_priority:
-  - observation.images.wrist_image
-  - observation.images.image2
-prompt_columns:
-  - language_instruction
-  - task
-  - prompt
-
+# ── Frame sampling ───────────────────────────────────────────────────────────
+# num_frames = state/action window length; action horizon = num_frames - 1.
+# video_stride subsamples video only; state/action stay at the raw rate.
+# window_stride = sliding window step (1 = every frame starts a window).
 num_frames: 33
 video_stride: 4
 window_stride: 1
+split: train
+
+# ── Rendering (3-slot L-shape canvas) ────────────────────────────────────────
+# camera_layout = [head, left/bottom-left, right/bottom-right]; null slots are
+# rendered as black tiles. At 384x320: top 256Hx320W, bottom halves 128Hx160W,
+# each tile BILINEAR-stretched to its slot. target_camera drives single-view
+# mode and is ignored when multiview=true.
 height: 384
 width: 320
 multiview: true
+camera_layout: [observation.images.image, observation.images.image2, null]
+target_camera: observation.images.image
 
-split: train
-enable_action_supervision: true
+# ── Normalization ────────────────────────────────────────────────────────────
+# Stats live at <dataset_dir>/meta/libero_normalization_stats.npy and are
+# auto-built on first use (rank 0 scans, other ranks wait).
+normalize_mode: min-max
 
-# The benchmark bridge decodes the model's native 10-D action to LIBERO's
-# runtime 7-D OSC command without absolute-goal composition or controller scale.
+# ── Video augmentation (optional) ────────────────────────────────────────────
+# Load-time color jitter applied by the reader to each clip with the SAME
+# random factors across all frames (temporal consistency), TRAIN split only.
+# enabled: false keeps video byte-identical while preserving the knobs.
+color_jitter:
+  enabled: false
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0

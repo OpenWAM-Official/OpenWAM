@@ -8,7 +8,7 @@ The repeated terminal action row of each episode is excluded.  rot6d dimensions
 Example::
 
     python -m openwam.dataloader.utils.stats_computation.muka_franka_stats_computation \
-      --config configs/dataloader/muka_franka.yaml \
+      --config configs/dataloader/pretrain_data/muka_franka.yaml \
       --output /path/to/muka_franka_lerobot_v3/meta/normalization_stats.npy
 """
 
@@ -119,7 +119,7 @@ def build_and_save_muka_franka_stats(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/dataloader/muka_franka.yaml")
+    parser.add_argument("--config", default="configs/dataloader/pretrain_data/muka_franka.yaml")
     parser.add_argument("--output", required=True, help="Deploy-compatible .npy output")
     parser.add_argument("--reservoir-cap", type=int, default=1_000_000)
     args = parser.parse_args()

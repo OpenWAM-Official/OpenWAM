@@ -407,7 +407,7 @@ class MixtureDataset(BaseDataset):
 
         Sub-sources live under the ``datasets:`` key. Two layouts:
 
-        **dict** (recommended, used by ``configs/dataloader/mixture.yaml``).
+        **dict** (recommended, used by ``configs/dataloader/pretrain_data/mixture.yaml``).
         Sub-source config is composed in via Hydra ``defaults``
         (``<name>@datasets.<name>``); the per-source block under ``datasets:``
         only carries ``enabled`` / ``weight`` overrides. The dict key is the

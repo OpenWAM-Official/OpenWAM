@@ -9,7 +9,7 @@ EEF/dex-hand/reserved layout. Native 44-D joint vectors are deliberately
 rejected: they must first pass through the simulator-backed FK enrichment.
 
 Normalization statistics live at ONE fixed, config-free location — the
-training root's ``meta/normalization_stats.npy`` — and are auto-built there on
+training root's ``meta/robocasa_gr1_normalization_stats.npy`` — and are auto-built there on
 first use (see :meth:`RoboCasaGR1Dataset.from_config`). There is deliberately
 no ``normalization_stats_path`` config knob: a GR1 root holds ~25 task buckets,
 each constructed as its own reader, so a per-bucket path would give every task
@@ -43,7 +43,7 @@ EEF33_DIM = 33
 # training root's meta/ dir. This same file is copied into checkpoints for
 # deployment because it carries both `eef` action and `eef_state` proprio
 # blocks; an action-only per-bucket rewrite would lose train/deploy parity.
-NORMALIZATION_STATS_FILENAME = "normalization_stats.npy"
+NORMALIZATION_STATS_FILENAME = "robocasa_gr1_normalization_stats.npy"
 STATS_SCHEMA_VERSION = 2
 
 # Sentinel distinguishing "key absent" from an explicit null in a config.
@@ -200,34 +200,16 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
     # quantile, or null to disable in-reader normalization entirely.
     DEFAULT_NORMALIZE_MODE = "min-max"
 
-    HEAD_CAMERA_PRIORITY: ClassVar[Tuple[str, ...]] = (
+    # Fixed camera layout (head, left wrist, right wrist); None slots are
+    # rendered black in multiview mode. Override via ``camera_layout``.
+    DEFAULT_CAMERA_LAYOUT: ClassVar[Tuple[Optional[str], ...]] = (
         "observation.images.ego_view",
-        "observation.images.ego_view_rgb",
-        "observation.images.ego_rgb",
-        "observation.images.head_rgb",
-        "observation.images.cam_head_rgb",
-        "observation.images.cam_high_rgb",
-        "video.ego_view_pad_res256_freq20",
-    )
-    LEFT_WRIST_CAMERA_PRIORITY: ClassVar[Tuple[str, ...]] = (
-        "observation.images.left_wrist",
-        "observation.images.left_wrist_rgb",
-        "observation.images.cam_left_wrist_rgb",
-    )
-    RIGHT_WRIST_CAMERA_PRIORITY: ClassVar[Tuple[str, ...]] = (
-        "observation.images.right_wrist",
-        "observation.images.right_wrist_rgb",
-        "observation.images.cam_right_wrist_rgb",
+        None,
+        None,
     )
 
     CONFIG_KEYS: ClassVar[Tuple[str, ...]] = LeRobotV3Reader.CONFIG_KEYS + (
         "action_mode",
-        "eef_action_column",
-        "eef_state_column",
-        "prompt_columns",
-        "head_camera_priority",
-        "left_wrist_camera_priority",
-        "right_wrist_camera_priority",
         # NOT a user-facing knob: from_config always overwrites this with the
         # single path it resolved from dataset_dir, so a value left over in a
         # yaml / CLI override is ignored rather than splitting the buckets
@@ -245,12 +227,6 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         dataset_dir: str,
         *,
         action_mode: str = "eef",
-        eef_action_column: str = "eef_action",
-        eef_state_column: str = "observation.eef_state",
-        prompt_columns: Optional[Sequence[str]] = None,
-        head_camera_priority: Optional[Sequence[str]] = None,
-        left_wrist_camera_priority: Optional[Sequence[str]] = None,
-        right_wrist_camera_priority: Optional[Sequence[str]] = None,
         normalization_stats_path: Optional[str] = None,
         unify_action: Optional[bool] = None,
         unify_action_map: Optional[Any] = None,
@@ -279,17 +255,9 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         self._resolved_stats_path: Optional[str] = None  # set by _load_stats when normalization is on
         self._state_normalization_stats: Optional[dict] = None
 
-        self._prompt_columns = [str(x) for x in _as_list(prompt_columns)]
-        self._head_priority = tuple(str(x) for x in (head_camera_priority or self.HEAD_CAMERA_PRIORITY))
-        self._left_wrist_priority = tuple(
-            str(x) for x in (left_wrist_camera_priority or self.LEFT_WRIST_CAMERA_PRIORITY)
-        )
-        self._right_wrist_priority = tuple(
-            str(x) for x in (right_wrist_camera_priority or self.RIGHT_WRIST_CAMERA_PRIORITY)
-        )
 
-        self._action_column = str(eef_action_column)
-        self._state_column = str(eef_state_column)
+        self._action_column = "eef_action"
+        self._state_column = "observation.eef_state"
 
         self.ACTION_DIM = EEF33_DIM
         action_dim_mask = _as_bool_mask(action_mask, self.ACTION_DIM, field="action_mask")
@@ -302,16 +270,7 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
             raise ValueError("RoboCasaGR1 action_mask and state_mask must match; the shared reader uses one raw mask")
         self.ACTION_DIM_MASK = action_dim_mask if action_dim_mask is not None else state_dim_mask
 
-        cols: List[str] = []
-        for col in (
-            self._action_column,
-            self._state_column,
-            *self._prompt_columns,
-        ):
-            if col:
-                cols.append(str(col))
-        cols.append("task_index")
-        self.NEEDED_COLS = tuple(dict.fromkeys(cols))
+        self.NEEDED_COLS = (self._action_column, self._state_column, "task_index")
 
         super().__init__(
             dataset_dir=dataset_dir,
@@ -321,14 +280,11 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         )
 
     def _resolve_cameras(self, info: dict):
-        features = info.get("features", {}) or {}
         if self._target_camera is not None:
             return (self._target_camera, None, None)
-        return (
-            _pick_feature(features, self._head_priority),
-            _pick_feature(features, self._left_wrist_priority),
-            _pick_feature(features, self._right_wrist_priority),
-        )
+        layout = list(self._camera_layout_param or self.DEFAULT_CAMERA_LAYOUT)
+        layout += [None] * (3 - len(layout))
+        return tuple(str(cam) if cam else None for cam in layout[:3])
 
     def _post_init(self, info: dict) -> None:
         features = info.get("features", {}) or {}
@@ -363,32 +319,6 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
                     f"RoboCasaGR1 feature {column!r} must have shape [{expected_dim}] for "
                     f"action_mode={self.action_mode!r}, got {shape}"
                 )
-
-        configured = set(self._prompt_columns)
-        self._prompt_columns = [col for col in self._prompt_columns if col in features]
-        missing = configured.difference(self._prompt_columns)
-        if missing:
-            logger.info(
-                "RoboCasaGR1(%s): ignoring prompt columns absent from info.features: %s",
-                self._dataset_id,
-                sorted(missing),
-            )
-        self.NEEDED_COLS = tuple(
-            col for col in self.NEEDED_COLS if col not in configured or col in self._prompt_columns
-        )
-
-    def _resolve_prompt(self, row, win) -> str:
-        for col in self._prompt_columns:
-            if col in win:
-                value = win[col].iloc[0]
-                # The public GR1 data's annotation.human.coarse_action is an
-                # integer class ID (e.g. 6), not language. Never stringify a
-                # categorical ID into a bogus training prompt.
-                if isinstance(value, str):
-                    text = str(value).strip()
-                    if text:
-                        return text
-        return super()._resolve_prompt(row, win)
 
     def _load_stats(self, info: dict):
         if not self._normalize_mode or self._normalize_mode in (None, "none", "null"):
@@ -479,7 +409,7 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
     def from_config(cls, config, split: str = "train"):
         """Resolve the ONE pooled stats file, then build the reader(s).
 
-        The path is fixed at ``<dataset_dir>/meta/normalization_stats.npy`` and
+        The path is fixed at ``<dataset_dir>/meta/robocasa_gr1_normalization_stats.npy`` and
         is NOT configurable: a GR1 root fans out into ~25 task buckets, each its
         own reader, so resolution has to happen here (where the root is known)
         rather than per bucket. Missing file → rank 0 scans the dataset and

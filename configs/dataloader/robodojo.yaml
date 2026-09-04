@@ -2,42 +2,51 @@ type: robodojo
 
 # Formal layout only:
 #   <dataset_dir>/<task>/<embodiment>/data/episode_*.hdf5
-# dataset_variant=real keeps the recorded per-arm base EEF pose unchanged.
-dataset_dir: /path/to/OpenWAM/data/RoboDojo
-dataset_variant: sim            # sim: env/world -> arm base; real: native pose
-split: train
+dataset_dir: /path/to/robodojo_data
+embodiment: arx_x5               # real: arx_x5, piper, piper_x; sim: arx_x5
+variant: sim                     # sim: env/world -> arm base; real: native pose
 
-embodiment: arx_x5              # real: arx_x5, piper, piper_x; sim: arx_x5
-action_mode: eef                 # only supported mode; raw representation is EEF20
-
-# Stats are discovered/generated under <dataset_dir>/meta/ for this variant
-# and embodiment. An explicit normalization_stats_path remains an API override.
-normalize_mode: min-max          # min-max, z-score, quantile, or null
-
-# Raw EEF20 is normalized first, then scattered into the shared 80-D layout:
-# left [xyz3, rot6d6, grip1] -> 0:10; right -> 34:44.
+# ── Action space ─────────────────────────────────────────────────────────────
+# EEF is the only supported mode; the raw representation is EEF20. Raw EEF20
+# is normalized first, then scattered into the shared 80-D layout:
+#   left [xyz3, rot6d6, grip1] -> 0:10; right -> 34:44.
+action_mode: eef
 unify_action: true
 unify_action_map: ["0-9", "34-43"]
+unify_state_map: null  # null = state reuses unify_action_map
 
-# State/action remain at the raw frame rate. video_stride affects video only.
+# ── Frame sampling ───────────────────────────────────────────────────────────
+# num_frames = state/action window length; action horizon = num_frames - 1.
+# video_stride subsamples video only; state/action stay at the raw rate.
+# window_stride = sliding window step (1 = every frame starts a window).
 num_frames: 33
 video_stride: 4
 window_stride: 1
-repeat: 1
-val_ratio: 0.0
-seed: 42
+split: train
 
-# Three source streams are assembled with the repository L-shape helper.
+# ── Rendering (3-slot L-shape canvas) ────────────────────────────────────────
+# camera_layout = [head, left/bottom-left, right/bottom-right]; null slots are
+# rendered as black tiles. At 384x320: top 256Hx320W, bottom halves 128Hx160W,
+# each tile BILINEAR-stretched to its slot. target_camera drives single-view
+# mode and is ignored when multiview=true.
 height: 384
 width: 320
 multiview: true
 camera_layout: [cam_head, cam_left_wrist, cam_right_wrist]
 target_camera: cam_head
 
-# Load-time color jitter, using the same random factors across every frame in
-# one clip for temporal consistency. Applied to the assembled view on train
-# only; set to null or false to disable.
+# ── Normalization ────────────────────────────────────────────────────────────
+# Pooled stats are discovered/auto-built under <dataset_dir>/meta/ for this
+# variant and embodiment. An explicit normalization_stats_path remains an API
+# override.
+normalize_mode: min-max          # min-max, z-score, quantile, or null
+
+# ── Video augmentation (optional) ────────────────────────────────────────────
+# Load-time color jitter applied by the reader to each clip with the SAME
+# random factors across all frames (temporal consistency), TRAIN split only.
+# enabled: false keeps video byte-identical while preserving the knobs.
 color_jitter:
+  enabled: true
   brightness: 0.2
   contrast: 0.2
   saturation: 0.2

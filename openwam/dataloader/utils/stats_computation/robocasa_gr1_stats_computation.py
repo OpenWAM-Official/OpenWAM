@@ -1,7 +1,7 @@
 """Compute RoboCasa GR1 normalization stats with directional hand blocks.
 
 The reader auto-builds this file on first use at its fixed location
-(``<dataset_dir>/meta/normalization_stats.npy``; see
+(``<dataset_dir>/meta/robocasa_gr1_normalization_stats.npy``; see
 ``RoboCasaGR1Dataset.from_config``), so this CLI is only needed to force a
 rebuild or to write the stats somewhere else.
 

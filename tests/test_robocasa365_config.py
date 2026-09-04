@@ -205,7 +205,7 @@ def test_hydra_compose_compact_maps_and_fixed_eval_semantics():
     cfg_dir = os.path.abspath("configs")
     with initialize_config_dir(config_dir=cfg_dir, version_base=None):
         cfg = compose(config_name="train", overrides=["dataloader=robocasa365"])
-        assert cfg.dataloader.action_mode == "robocasa365"
+        assert cfg.dataloader.action_mode == "eef"
         assert list(cfg.dataloader.unify_action_map) == ["0-9", "68-72"]
         assert list(cfg.dataloader.unify_state_map) == ["0-9", "68-76"]
         assert list(cfg.dataloader.camera_layout) == [
@@ -216,13 +216,8 @@ def test_hydra_compose_compact_maps_and_fixed_eval_semantics():
         assert "binary_action_dims" not in cfg.dataloader
         assert "gripper_convention" not in cfg.dataloader
         assert "mask_torso_action" not in cfg.dataloader
-        assert all(
-            path.startswith("/path/to/benchmark_data/robocasa365/")
-            for path in cfg.dataloader.dataset_dir
-        )
-        assert cfg.dataloader.normalization_stats_path.endswith(
-            "robocasa365_multitask_compact_stats.npy"
-        )
+        assert cfg.dataloader.dataset_dir == "/path/to/robocasa365_data"
+        assert cfg.dataloader.normalization_stats_path is None
 
 
 def test_only_canonical_robocasa365_dataset_is_registered():

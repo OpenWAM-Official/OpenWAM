@@ -524,7 +524,6 @@ def libero_obs_to_eef10(
 # byte; change them in lockstep.
 
 EBENCH_RAW_DIM = 23
-EBENCH_BASE_SOURCES = ("delta", "cumulative")
 # GenManip lift2 gripper: 0.0 closed .. 0.044 open per finger (both fingers of
 # a hand are commanded identically).
 EBENCH_GRIPPER_OPEN = 0.044
@@ -535,25 +534,19 @@ def ebench_wrap_angle_rad(angle: np.ndarray) -> np.ndarray:
     return (np.asarray(angle, dtype=np.float64) + np.pi) % (2.0 * np.pi) - np.pi
 
 
-def ebench_render_state_base(cur_base, prev_base, base_action_source: str) -> np.ndarray:
-    """Render measured ``state.base`` ``[x_m, y_m, yaw_RAD]`` into the trained
-    base-action command space. Mirror of ebench.render_ebench_state_base.
-
-    ``delta``: measured per-step displacement (yaw wrapped, rad→deg);
-    ``prev_base=None`` (episode start) → zeros. ``cumulative``: pose with yaw
-    rad→deg.
+def ebench_render_state_base(cur_base, prev_base) -> np.ndarray:
+    """Render measured ``state.base`` ``[x_m, y_m, yaw_RAD]`` into the
+    ``action.base_delta`` command space: measured per-step displacement (yaw
+    wrapped, rad→deg); ``prev_base=None`` (episode start) → zeros. Mirror of
+    ebench.render_ebench_state_base.
     """
     cur = np.asarray(cur_base, dtype=np.float64).reshape(3)
-    if base_action_source == "delta":
-        if prev_base is None:
-            return np.zeros(3, dtype=np.float32)
-        prev = np.asarray(prev_base, dtype=np.float64).reshape(3)
-        delta = cur - prev
-        dyaw = float(ebench_wrap_angle_rad(delta[2]))
-        return np.array([delta[0], delta[1], np.degrees(dyaw)], dtype=np.float32)
-    if base_action_source == "cumulative":
-        return np.array([cur[0], cur[1], np.degrees(cur[2])], dtype=np.float32)
-    raise ValueError(f"base_action_source must be one of {EBENCH_BASE_SOURCES}, got {base_action_source!r}")
+    if prev_base is None:
+        return np.zeros(3, dtype=np.float32)
+    prev = np.asarray(prev_base, dtype=np.float64).reshape(3)
+    delta = cur - prev
+    dyaw = float(ebench_wrap_angle_rad(delta[2]))
+    return np.array([delta[0], delta[1], np.degrees(dyaw)], dtype=np.float32)
 
 
 def ebench_quat_wxyz_to_rot6d(quat_wxyz: np.ndarray) -> np.ndarray:
@@ -625,7 +618,7 @@ def ebench_obs_to_raw23(state_ee_pose, state_gripper, rendered_base) -> np.ndarr
     ).astype(np.float32)
 
 
-def raw23_to_ebench_action(action: np.ndarray, base_action_source: str) -> dict:
+def raw23_to_ebench_action(action: np.ndarray) -> dict:
     """OpenWAM RAW-23 physical action → GenManip EvalClient action dict.
 
     The server already inverted normalization and the 80-D unify scatter, so
@@ -633,13 +626,9 @@ def raw23_to_ebench_action(action: np.ndarray, base_action_source: str) -> dict:
     absolute ``ee_pose`` targets (GenManip runs cuRobo IK per arm in the same
     per-arm base frames that produced the training FK); the scalar gripper is
     duplicated to both fingers and clipped to the physical range; the base
-    slot goes out per the trained ``base_action_source``:
-
-    * ``delta`` → ``base_motion=[dx_m, dy_m, dyaw_deg]``, ``base_is_rel=True``
-      (GenManip clips each step to ±0.015 m / ±1° — the same clamps the demos
-      obeyed — and converts the degree yaw internally).
-    * ``cumulative`` → absolute ``base_motion=[x_m, y_m, yaw_deg]``,
-      ``base_is_rel=False`` (GenManip applies ``deg2rad`` to index 2).
+    slot goes out as ``base_motion=[dx_m, dy_m, dyaw_deg]`` with
+    ``base_is_rel=True`` (GenManip clips each step to ±0.015 m / ±1° — the
+    same clamps the demos obeyed — and converts the degree yaw internally).
 
     Positions/quaternions are plain Python lists ON PURPOSE: the GenManip
     server concatenates ``position + orientation`` (list concat) before IK —
@@ -648,8 +637,6 @@ def raw23_to_ebench_action(action: np.ndarray, base_action_source: str) -> dict:
     a = np.asarray(action, dtype=np.float64).reshape(-1)
     if a.shape[0] != EBENCH_RAW_DIM:
         raise ValueError(f"expected raw {EBENCH_RAW_DIM}-D EBench action, got {a.shape[0]}")
-    if base_action_source not in EBENCH_BASE_SOURCES:
-        raise ValueError(f"base_action_source must be one of {EBENCH_BASE_SOURCES}, got {base_action_source!r}")
 
     def _arm(xyz: np.ndarray, r6d: np.ndarray, grip: float) -> tuple:
         quat_xyzw = rot6d_to_quat_xyzw(r6d.astype(np.float32))
@@ -665,7 +652,7 @@ def raw23_to_ebench_action(action: np.ndarray, base_action_source: str) -> dict:
         "control_type": "ee_pose",
         "is_rel": False,
         "base_motion": [float(v) for v in a[20:23]],
-        "base_is_rel": base_action_source == "delta",
+        "base_is_rel": True,
     }
 
 

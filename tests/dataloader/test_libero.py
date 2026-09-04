@@ -13,7 +13,7 @@ from openwam.dataloader.registry import DATASET_REGISTRY
 def test_canonical_config_and_registry_use_native_action_reader() -> None:
     config = yaml.safe_load(Path("configs/dataloader/libero.yaml").read_text(encoding="utf-8"))
     assert config["type"] == "libero"
-    assert config["action_mode"] == "libero"
+    assert config["action_mode"] == "eef"
     assert DATASET_REGISTRY["libero"] is LiberoDataset
 
 
@@ -43,5 +43,5 @@ def test_reader_rejects_incomplete_compatibility_stats(tmp_path) -> None:
     reader._dataset_dir = tmp_path
     reader._raw_action_dim = 10
     np.save(reader._source_stats_path, {"eef": {}}, allow_pickle=True)
-    with pytest.raises(KeyError, match="libero"):
+    with pytest.raises(KeyError, match="eef"):
         reader._load_stats({})

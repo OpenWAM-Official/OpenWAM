@@ -108,7 +108,13 @@ def _mock_decoder():
         yield
 
 
+def _write_tasks_parquet(bucket: Path, prompt: str = "pick cup") -> None:
+    pd.DataFrame({"task_index": [0]}, index=[prompt]).to_parquet(bucket / "meta" / "tasks.parquet")
+
+
 def _dataset(bucket: Path, **overrides) -> RoboCasaGR1Dataset:
+    if not (bucket / "meta" / "tasks.parquet").exists():
+        _write_tasks_parquet(bucket)
     cfg = {
         "dataset_dir": str(bucket),
         "num_frames": 5,
@@ -116,7 +122,6 @@ def _dataset(bucket: Path, **overrides) -> RoboCasaGR1Dataset:
         "height": 384,
         "width": 320,
         "multiview": True,
-        "prompt_columns": ["annotation.human.coarse_action"],
         "normalize_mode": None,
     }
     cfg.update(overrides)
@@ -243,7 +248,12 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
             }
         }
     )
-    normalizer = _build_normalizer(cfg, str(tmp_path / "meta"))
+    from openwam.train.utils.checkpointing import save_normalization_stats
+
+    ckpt_dir = tmp_path / "fake_ckpt"
+    ckpt_dir.mkdir()
+    save_normalization_stats(str(ckpt_dir), ds)
+    normalizer = _build_normalizer(cfg, str(ckpt_dir))
     assert isinstance(normalizer, _UnifyAwareNormalizer)
     raw = ds._raw_action(ds._load_data_table(0, 0).to_pandas())[:4]
     np.testing.assert_allclose(normalizer.unnormalize(sample["action"].numpy()), np.clip(raw, 0, 1), atol=1e-5)
@@ -298,18 +308,6 @@ def test_unify_mode_requires_explicit_map(tmp_path: Path):
         _dataset(tmp_path, action_mode="eef", unify_action=True, unify_action_map=None)
 
 
-def test_missing_optional_prompt_column_is_not_projected(tmp_path: Path):
-    _write_bucket(tmp_path)
-    with _mock_decoder():
-        ds = _dataset(
-            tmp_path,
-            prompt_columns=["annotation.missing", "annotation.human.coarse_action"],
-        )
-        sample = ds[0]
-    assert "annotation.missing" not in ds.NEEDED_COLS
-    assert sample["prompt"] == "pick cup"
-
-
 def test_prompt_falls_back_to_tasks_parquet(tmp_path: Path):
     _write_bucket(tmp_path)
     info_path = tmp_path / "meta" / "info.json"
@@ -322,7 +320,7 @@ def test_prompt_falls_back_to_tasks_parquet(tmp_path: Path):
     pd.DataFrame({"task_index": [0]}, index=["fallback task"]).to_parquet(tmp_path / "meta" / "tasks.parquet")
 
     with _mock_decoder():
-        sample = _dataset(tmp_path, prompt_columns=["annotation.human.coarse_action"])[0]
+        sample = _dataset(tmp_path)[0]
     assert sample["prompt"] == "fallback task"
 
 
@@ -425,10 +423,10 @@ def test_robocasa_config_wires_reader_color_jitter():
     assert "transforms" not in cfg
 
 
-def test_robocasa_config_uses_renamed_eef_columns():
+def test_robocasa_config_has_no_eef_column_knobs():
     cfg = OmegaConf.load("configs/dataloader/robocasa_gr1.yaml")
-    assert cfg.eef_action_column == "eef_action"
-    assert cfg.eef_state_column == "observation.eef_state"
+    assert "eef_action_column" not in cfg
+    assert "eef_state_column" not in cfg
 
 
 def test_robocasa_config_normalizes_min_max_without_stats_path():
@@ -461,7 +459,6 @@ def test_multibucket_forwards_generated_deploy_stats(tmp_path: Path):
             "dataset_dir": str(root),
             "num_frames": 5,
             "multiview": True,
-            "prompt_columns": ["annotation.human.coarse_action"],
             "normalize_mode": "z-score",
         }
     )
@@ -492,7 +489,6 @@ def test_stats_are_autobuilt_at_the_fixed_root_path(tmp_path: Path):
             "dataset_dir": str(root),
             "num_frames": 5,
             "multiview": True,
-            "prompt_columns": ["annotation.human.coarse_action"],
             "normalize_mode": "min-max",
         }
     )
@@ -527,7 +523,6 @@ def test_corrupt_stats_file_is_replaced_during_autobuild(tmp_path: Path):
             "dataset_dir": str(root),
             "num_frames": 5,
             "multiview": True,
-            "prompt_columns": ["annotation.human.coarse_action"],
             "normalize_mode": "min-max",
         }
     )
@@ -553,7 +548,6 @@ def test_normalize_mode_defaults_to_min_max_and_ignores_stats_path_key(tmp_path:
             "num_frames": 5,
             "video_stride": 1,
             "multiview": True,
-            "prompt_columns": ["annotation.human.coarse_action"],
             "normalization_stats_path": str(stale),
         }
     )
@@ -610,7 +604,6 @@ def test_malformed_schema_v2_stats_are_rebuilt(tmp_path: Path):
             "dataset_dir": str(root),
             "num_frames": 5,
             "multiview": True,
-            "prompt_columns": ["annotation.human.coarse_action"],
             "normalize_mode": "min-max",
         }
     )
@@ -658,7 +651,6 @@ def test_unsupported_newer_stats_schema_fails_fast(tmp_path: Path):
             "dataset_dir": str(root),
             "num_frames": 5,
             "multiview": True,
-            "prompt_columns": ["annotation.human.coarse_action"],
             "normalize_mode": "min-max",
         }
     )

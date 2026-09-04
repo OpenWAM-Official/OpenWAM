@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import time
 from pathlib import Path
 from typing import Any, ClassVar, Optional, Sequence, Tuple
 
@@ -27,13 +29,13 @@ from openwam.dataloader.utils.normalization import (
 
 logger = logging.getLogger(__name__)
 
-ACTION_MODE = "libero"
+ACTION_MODE = "eef"
 ACTION_STATS_KEY = ACTION_MODE
 STATE_STATS_KEY = f"{ACTION_MODE}_state"
 OUTPUT_REPRESENTATION = "native_delta_eef10"
 EEF10_DIM = 10
 GRIPPER_CONVENTION = "minus1_closed_plus1_open"
-NORMALIZATION_STATS_FILENAME = "normalization_stats.npy"
+NORMALIZATION_STATS_FILENAME = "libero_normalization_stats.npy"
 EEF10_NAMES = [
     "eef_x",
     "eef_y",
@@ -87,21 +89,15 @@ class LiberoDataset(LeRobotV3Reader):
     PROMPT_FILE_REQUIRED = True
     DEPLOY_ACTION_MODE = ACTION_MODE
 
-    HEAD_CAMERA_PRIORITY: ClassVar[Tuple[str, ...]] = (
+    # Fixed camera layout (head, wrist, unused); None slots are rendered black
+    # in multiview mode. Override via ``camera_layout``.
+    DEFAULT_CAMERA_LAYOUT: ClassVar[Tuple[Optional[str], ...]] = (
         "observation.images.image",
-        "observation.images.agentview_image",
-    )
-    WRIST_CAMERA_PRIORITY: ClassVar[Tuple[str, ...]] = (
-        "observation.images.wrist_image",
         "observation.images.image2",
-        "observation.images.robot0_eye_in_hand_image",
+        None,
     )
     CONFIG_KEYS: ClassVar[Tuple[str, ...]] = LeRobotV3Reader.CONFIG_KEYS + (
         "action_mode",
-        "gripper_convention",
-        "head_camera_priority",
-        "wrist_camera_priority",
-        "prompt_columns",
         "normalization_stats_path",
     )
 
@@ -110,10 +106,6 @@ class LiberoDataset(LeRobotV3Reader):
         dataset_dir: str,
         *,
         action_mode: str = ACTION_MODE,
-        gripper_convention: str = GRIPPER_CONVENTION,
-        head_camera_priority: Optional[Sequence[str]] = None,
-        wrist_camera_priority: Optional[Sequence[str]] = None,
-        prompt_columns: Optional[Sequence[str]] = None,
         normalization_stats_path: Optional[str] = None,
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
@@ -124,11 +116,6 @@ class LiberoDataset(LeRobotV3Reader):
             raise ValueError(
                 f"LIBERO supports only action_mode={ACTION_MODE!r}, got {action_mode!r}."
             )
-        convention = str(gripper_convention).strip()
-        if convention != GRIPPER_CONVENTION:
-            raise ValueError(
-                f"LIBERO requires gripper_convention={GRIPPER_CONVENTION!r}, got {gripper_convention!r}"
-            )
         if bool(unify_action) and unify_action_map is None:
             raise ValueError(
                 "LIBERO unify_action=true requires an explicit unify_action_map; "
@@ -138,9 +125,6 @@ class LiberoDataset(LeRobotV3Reader):
         self.action_mode = mode
         self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
         self._state_normalization_stats: Optional[dict] = None
-        self._head_priority = _as_priority(head_camera_priority, self.HEAD_CAMERA_PRIORITY)
-        self._wrist_priority = _as_priority(wrist_camera_priority, self.WRIST_CAMERA_PRIORITY)
-        self._prompt_columns = _as_priority(prompt_columns, ("language_instruction", "task", "prompt"))
         super().__init__(
             dataset_dir=dataset_dir,
             unify_action=bool(unify_action),
@@ -149,14 +133,11 @@ class LiberoDataset(LeRobotV3Reader):
         )
 
     def _resolve_cameras(self, info: dict):
-        features = info.get("features", {}) or {}
         if self._target_camera is not None:
             return self._target_camera, None, None
-        return (
-            _pick_feature(features, self._head_priority),
-            _pick_feature(features, self._wrist_priority),
-            None,
-        )
+        layout = list(self._camera_layout_param or self.DEFAULT_CAMERA_LAYOUT)
+        layout += [None] * (3 - len(layout))
+        return tuple(str(cam) if cam else None for cam in layout[:3])
 
     def _post_init(self, info: dict) -> None:
         features = info.get("features", {}) or {}
@@ -187,8 +168,35 @@ class LiberoDataset(LeRobotV3Reader):
                 f"expected {OUTPUT_REPRESENTATION!r}; this is not a native-delta LIBERO dataset"
             )
 
-        self._prompt_columns = tuple(col for col in self._prompt_columns if col in features)
-        self.NEEDED_COLS = self.NEEDED_COLS + self._prompt_columns
+
+    def _build_stats_rank0(self, path: Path) -> None:
+        """Auto-build the pooled stats file: rank 0 scans, other ranks wait."""
+        try:
+            import torch.distributed as dist
+
+            dist_ready = dist.is_available() and dist.is_initialized()
+        except Exception:
+            dist_ready = False
+        if dist_ready:
+            rank = dist.get_rank()
+        else:
+            # torchrun sets RANK before init_process_group; honor it so
+            # pre-init constructions still elect a single builder.
+            rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
+        if rank == 0:
+            from openwam.dataloader.utils.stats_computation.libero_stats_computation import (
+                build_and_save_libero_stats,
+            )
+
+            logger.info("No LIBERO stats at %s — scanning the dataset (rank 0; other ranks wait)", path)
+            build_and_save_libero_stats(self._dataset_dir, output=path)
+        else:
+            deadline = time.monotonic() + float(os.environ.get("OPENWAM_STATS_WAIT_TIMEOUT_S", 12 * 60 * 60))
+            poll_interval_s = float(os.environ.get("OPENWAM_STATS_POLL_INTERVAL_S", 10))
+            while not path.is_file():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out waiting for rank 0 to build LIBERO stats: {path}")
+                time.sleep(poll_interval_s)
 
     def _load_stats(self, info: dict):
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
@@ -196,10 +204,7 @@ class LiberoDataset(LeRobotV3Reader):
             return None
         stats_path = Path(self._source_stats_path) if self._source_stats_path else self._dataset_dir / "meta" / NORMALIZATION_STATS_FILENAME
         if not stats_path.is_file():
-            raise FileNotFoundError(
-                f"LIBERO normalize_mode={self._normalize_mode!r} but {stats_path} is missing; "
-                "conversion writes meta/normalization_stats.npy"
-            )
+            self._build_stats_rank0(stats_path)
 
         raw = np.load(stats_path, allow_pickle=True).item()
         if not isinstance(raw, dict):

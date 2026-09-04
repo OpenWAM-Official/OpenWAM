@@ -19,11 +19,11 @@ Usage
 
     # single-task
     python -m openwam.dataloader.utils.stats_computation.robotwin_stats_computation \
-        --data_root /path/to/task/{robot}_{variant}/data
+        --data_root /path/to/task/{embodiment}_{variant}/data
 
     # multi-task
     python -m openwam.dataloader.utils.stats_computation.robotwin_stats_computation \
-        --dataset_dir /path/to/RoboTwin2.0/dataset --robot aloha-agilex --variant both
+        --dataset_dir /path/to/RoboTwin2.0/dataset --embodiment aloha-agilex --variant both
 """
 
 from __future__ import annotations
@@ -303,10 +303,28 @@ def _rebuild_stats_from_shards(
     else:
         print("  WARNING: joint stats are empty; no joint_action/vector seen.")
     if eef_acc.total_count > 0:
-        result["eef"] = eef_acc.finalize()
+        result["eef"] = _pin_eef_rot6d_identity(eef_acc.finalize())
     else:
         print("  WARNING: eef stats are empty; no endpose/* seen.")
     return result
+
+
+_EEF_ROT6D_DIMS = (*range(3, 9), *range(13, 19))
+
+
+def _pin_eef_rot6d_identity(stats: dict) -> dict:
+    """Pin the per-arm rot6d dims to identity (the repo-wide convention).
+
+    Normalization must be a pass-through on the rotation representation:
+    min-max would otherwise rescale each rot6d component independently and
+    distort rotations. Matches the historical shipped stats files.
+    """
+    identity = {"mean": 0.0, "std": 1.0, "min": -1.0, "max": 1.0, "q01": -1.0, "q99": 1.0}
+    for key, value in identity.items():
+        arr = np.asarray(stats[key], dtype=np.float64).copy()
+        arr[list(_EEF_ROT6D_DIMS)] = value
+        stats[key] = arr
+    return stats
 
 
 def compute_normalization_stats(data_root: str) -> dict:
@@ -333,7 +351,7 @@ def compute_normalization_stats(data_root: str) -> dict:
     else:
         print("  WARNING: no joint_action/vector found in any episode; joint stats omitted.")
     if eef_acc.total_count > 0:
-        result["eef"] = eef_acc.finalize()
+        result["eef"] = _pin_eef_rot6d_identity(eef_acc.finalize())
     else:
         print("  WARNING: no endpose/* found in any episode; eef stats omitted.")
     return result
@@ -341,7 +359,7 @@ def compute_normalization_stats(data_root: str) -> dict:
 
 def compute_multitask_robotwin_stats(
     dataset_dir: str,
-    robot: str,
+    embodiment: str,
     variant: str = "clean_50",
     tasks: Optional[list] = None,
     checkpoint_path: Optional[str] = None,
@@ -350,7 +368,7 @@ def compute_multitask_robotwin_stats(
 
     Args:
         dataset_dir: Top-level RoboTwin dataset directory.
-        robot: Robot embodiment name.
+        embodiment: Robot embodiment name.
         variant: ``"clean_50"``, ``"randomized_500"``, or ``"both"``.
         tasks: Optional internal task restriction. Defaults to every task
             discovered on disk.
@@ -369,12 +387,12 @@ def compute_multitask_robotwin_stats(
 
     task_roots = []
     for v in variant_list:
-        task_roots.extend(discover_robotwin_roots(dataset_dir, robot, v, tasks))
+        task_roots.extend(discover_robotwin_roots(dataset_dir, embodiment, v, tasks))
 
     if not task_roots:
-        raise FileNotFoundError(f"No task data found in {dataset_dir} for robot={robot}, variant={variant}")
+        raise FileNotFoundError(f"No task data found in {dataset_dir} for embodiment={embodiment}, variant={variant}")
 
-    print(f"Computing joint+eef stats across {len(task_roots)} task-variant pairs for robot={robot}")
+    print(f"Computing joint+eef stats across {len(task_roots)} task-variant pairs for embodiment={embodiment}")
 
     if checkpoint_path is not None:
         return _compute_multitask_with_checkpoint(
@@ -402,7 +420,7 @@ def compute_multitask_robotwin_stats(
     else:
         print("  WARNING: joint stats are empty; no joint_action/vector seen.")
     if eef_acc.total_count > 0:
-        result["eef"] = eef_acc.finalize()
+        result["eef"] = _pin_eef_rot6d_identity(eef_acc.finalize())
     else:
         print("  WARNING: eef stats are empty; no endpose/* seen.")
 
@@ -510,7 +528,7 @@ def main():
         default=None,
         help="Multi-task mode: top-level RoboTwin dataset directory",
     )
-    parser.add_argument("--robot", type=str, default=None, help="Robot name")
+    parser.add_argument("--embodiment", type=str, default=None, help="Robot name")
     parser.add_argument("--variant", type=str, default=None, help='"clean_50" | "randomized_500" | "both"')
     parser.add_argument(
         "--tasks_file", type=str, default=None, help="Optional file listing tasks to include (one per line)"
@@ -519,9 +537,8 @@ def main():
         "--output",
         type=str,
         default=None,
-        help="Output .npy path (default: "
-        "<data_root>/<task>_<robot>_<variant>_stats.npy for single-task; "
-        "<dataset_dir>/<robot>_<variant>_stats.npy for multi-task)",
+        help="Output .npy path (required for --data_root single-task mode; default "
+        "<dataset_dir>/meta/robotwin_<variant>_normalization_stats.npy for multi-task)",
     )
     args = parser.parse_args()
 
@@ -532,35 +549,36 @@ def main():
 
     dataset_dir = args.dataset_dir or cfg.get("dataset_dir")
     data_root = args.data_root  # data_root is not a yaml concept, CLI-only
-    robot = args.robot or cfg.get("robot", "aloha-agilex")
+    embodiment = args.embodiment or cfg.get("embodiment", "aloha-agilex")
     variant = args.variant or cfg.get("variant", "clean_50")
     tasks = parse_tasks_file(args.tasks_file) if args.tasks_file else None
     output = args.output
 
     if data_root:
-        # Single-task CLI: infer the task directory from the formal layout.
-        inferred_task = os.path.basename(os.path.abspath(os.path.join(data_root, "..", "..")))
-        if inferred_task:
-            stats_name = f"{inferred_task}_{robot}_{variant}_stats.npy"
-        else:
-            stats_name = f"{robot}_{variant}_stats.npy"
-        resolved_output = output or os.path.join(data_root, stats_name)
+        # Single-task CLI (debugging aid): stats have no canonical
+        # per-task location any more, so the caller must name the output.
+        if not output:
+            parser.error("--output is required with --data_root (single-task stats have no canonical location)")
+        resolved_output = output
         print(f"Single-task stats from: {data_root}")
         stats = compute_normalization_stats(data_root)
     else:
         if not dataset_dir:
             parser.error("either --data_root or --dataset_dir / --config providing one is required")
-        resolved_output = output or os.path.join(dataset_dir, f"{robot}_{variant}_stats.npy")
-        print(f"Multi-task stats from: {dataset_dir} (robot={robot}, variant={variant})")
+        resolved_output = output or os.path.join(
+            dataset_dir, "meta", f"robotwin_{variant}_normalization_stats.npy"
+        )
+        print(f"Multi-task stats from: {dataset_dir} (embodiment={embodiment}, variant={variant})")
         stats = compute_multitask_robotwin_stats(
             dataset_dir=dataset_dir,
-            robot=robot,
+            embodiment=embodiment,
             variant=variant,
             tasks=tasks,
             checkpoint_path=resolved_output,
         )
 
     _print_summary(stats)
+    os.makedirs(os.path.dirname(resolved_output) or ".", exist_ok=True)
     atomic_save_stats_npy(resolved_output, stats)
     cleanup_partial_stats_checkpoint(resolved_output)
     print(f"\nSaved stats ({stats.get('num_timesteps', 0)} timesteps) to {resolved_output}")

@@ -60,18 +60,18 @@ def iter_episode_eef20(
     episode_paths: Iterable[str | Path],
     calibration: Mapping | None,
     *,
-    dataset_variant: str = ROBODOJO_SIM_VARIANT,
+    variant: str = ROBODOJO_SIM_VARIANT,
     embodiment: str = ROBODOJO_EMBODIMENT,
 ):
     """Yield each episode's validated release-specific EEF20 state rows."""
     for episode_path in episode_paths:
         path = Path(episode_path)
-        validate_robodojo_episode(path, dataset_variant=dataset_variant)
+        validate_robodojo_episode(path, variant=variant)
         with h5py.File(path, "r") as handle:
             yield read_calibrated_eef20(
                 handle,
                 calibration,
-                dataset_variant=dataset_variant,
+                variant=variant,
                 embodiment=embodiment,
             )
 
@@ -80,7 +80,7 @@ def _metadata(
     *,
     tasks: Sequence[str],
     calibration: Mapping | None,
-    dataset_variant: str,
+    variant: str,
     embodiment: str,
     state_rows: int,
     action_rows: int,
@@ -92,7 +92,7 @@ def _metadata(
         "action_rows": int(action_rows),
         "state_rows": int(state_rows),
         "num_timesteps": int(action_rows + state_rows),
-        "dataset_variant": dataset_variant,
+        "variant": variant,
         "target_frame": ROBODOJO_TARGET_FRAME,
         "embodiment": embodiment,
         "tasks": list(tasks),
@@ -101,7 +101,7 @@ def _metadata(
         "reservoir_cap": int(reservoir_cap),
         "reservoir_rows": int(reservoir_rows),
     }
-    if dataset_variant == ROBODOJO_REAL_VARIANT:
+    if variant == ROBODOJO_REAL_VARIANT:
         metadata.update(
             {
                 "source_frame": ROBODOJO_REAL_SOURCE_FRAME,
@@ -137,7 +137,7 @@ def compute_robodojo_stats(
     calibration_path: str | Path | None = None,
     tasks: Sequence[str] | None = None,
     embodiment: str = ROBODOJO_EMBODIMENT,
-    dataset_variant: str = ROBODOJO_SIM_VARIANT,
+    variant: str = ROBODOJO_SIM_VARIANT,
     action_mode: str = DEPLOY_ACTION_MODE,
     reservoir_cap: int = DEFAULT_RESERVOIR_CAP,
 ) -> dict:
@@ -146,7 +146,7 @@ def compute_robodojo_stats(
         raise ValueError(
             f"RoboDojo stats support only action_mode='eef', got {action_mode!r}"
         )
-    validate_embodiment(embodiment, dataset_variant=dataset_variant)
+    validate_embodiment(embodiment, variant=variant)
     if int(reservoir_cap) < 1:
         raise ValueError(f"reservoir_cap must be >= 1, got {reservoir_cap}")
 
@@ -155,7 +155,7 @@ def compute_robodojo_stats(
             "RoboDojo uses a built-in frame contract; "
             "calibration_path is not accepted"
         )
-    if dataset_variant == ROBODOJO_REAL_VARIANT:
+    if variant == ROBODOJO_REAL_VARIANT:
         if calibration is not None:
             raise ValueError(
                 "RoboDojo_real uses native per-arm base poses; calibration "
@@ -168,7 +168,7 @@ def compute_robodojo_stats(
         dataset_dir,
         tasks=tasks,
         embodiment=embodiment,
-        dataset_variant=dataset_variant,
+        variant=variant,
     )
 
     accumulator = Accumulator(
@@ -183,12 +183,12 @@ def compute_robodojo_stats(
             dataset_dir,
             task,
             embodiment=embodiment,
-            dataset_variant=dataset_variant,
+            variant=variant,
         )
         for states in iter_episode_eef20(
             episode_paths,
             resolved_calibration,
-            dataset_variant=dataset_variant,
+            variant=variant,
             embodiment=embodiment,
         ):
             states = np.asarray(states, dtype=np.float32).reshape(-1, EEF20_DIM)
@@ -215,7 +215,7 @@ def compute_robodojo_stats(
     metadata = _metadata(
         tasks=tasks,
         calibration=resolved_calibration,
-        dataset_variant=dataset_variant,
+        variant=variant,
         embodiment=embodiment,
         state_rows=state_rows,
         action_rows=action_rows,
@@ -327,8 +327,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         dataset_dir=dataset_dir,
         output=output,
         embodiment=str(config.get("embodiment", ROBODOJO_EMBODIMENT)),
-        dataset_variant=str(
-            config.get("dataset_variant", ROBODOJO_SIM_VARIANT)
+        variant=str(
+            config.get("variant", ROBODOJO_SIM_VARIANT)
         ),
         action_mode=str(config.get("action_mode", DEPLOY_ACTION_MODE)),
         reservoir_cap=args.reservoir_cap,

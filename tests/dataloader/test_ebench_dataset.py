@@ -1,6 +1,6 @@
 """EBenchDataset behavior tests on a synthetic LeRobot-v2.1 bucket.
 
-Covers the audit-driven fixes: delta/cumulative base rendering (yaw units,
+Covers the audit-driven fixes: delta base rendering (yaw units,
 wrap, episode-start zeros), min-max default + normalize-mode whitelist,
 stats index arithmetic and fingerprint (source digest, RO fail-fast),
 __getitem__ retry + wrist black-slot tolerance, prompt/bucket fail-fast,
@@ -23,7 +23,6 @@ from openwam.dataloader.ebench import (
     EBenchDataset,
     _load_or_build_stats,
     _raw_stats_to_23,
-    discover_ebench_buckets,
     render_ebench_state_base,
     wrap_angle_rad,
 )
@@ -173,17 +172,11 @@ def _make_ds(bucket, **kw):
     # __getitem__ must construct with normalize_mode=None to get past it.
     stats = None
     if kw.get("normalize_mode", "min-max") not in (None, "none", "null"):
-        base_action_source = kw.get("base_action_source", "delta")
         stats, _ = _load_or_build_stats(
             [bucket],
-            (
-                EBENCH_ACTION_KEYS
-                if base_action_source == "cumulative"
-                else ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS
-            ),
+            EBENCH_ACTION_KEYS,
             action_mode="ebench",
             dataset_dir=str(bucket.parents[1]),
-            base_action_source=base_action_source,
         )
     return EBenchDataset(str(bucket), action_stats=stats, **kw)
 
@@ -197,22 +190,18 @@ def test_wrap_angle_rad():
     assert wrap_angle_rad(-0.1) == pytest.approx(-0.1)
 
 
-def test_render_state_base_delta_and_cumulative():
+def test_render_state_base_delta():
     cur, prev = np.array([1.0, 2.0, 0.1]), np.array([0.9, 2.1, 0.05])
-    d = render_ebench_state_base(cur, prev, "delta")
+    d = render_ebench_state_base(cur, prev)
     np.testing.assert_allclose(d, [0.1, -0.1, math.degrees(0.05)], atol=1e-6)
-    assert render_ebench_state_base(cur, None, "delta") == pytest.approx([0, 0, 0])
-    c = render_ebench_state_base(cur, None, "cumulative")
-    np.testing.assert_allclose(c, [1.0, 2.0, math.degrees(0.1)], atol=1e-5)
+    assert render_ebench_state_base(cur, None) == pytest.approx([0, 0, 0])
     # wrap across the +/-pi seam: -3.1 -> 3.1 is a -(2pi-6.2) rotation
-    w = render_ebench_state_base(np.array([0, 0, 3.1]), np.array([0, 0, -3.1]), "delta")
+    w = render_ebench_state_base(np.array([0, 0, 3.1]), np.array([0, 0, -3.1]))
     assert w[2] == pytest.approx(math.degrees(6.2 - 2 * np.pi), abs=1e-4)
-    with pytest.raises(ValueError, match="base_action_source"):
-        render_ebench_state_base(cur, prev, "velocity")
 
 
 def test_delta_proprio_uses_measured_diff_in_degrees(bucket):
-    ds = _make_ds(bucket, normalize_mode=None, unify_action=False, base_action_source="delta")
+    ds = _make_ds(bucket, normalize_mode=None, unify_action=False)
     # idx>0 windows have a leading row: measured diff of the synthetic state
     # ramp is exactly [0.01, -0.005, deg(0.02)] per step.
     sample = ds[3]
@@ -223,17 +212,10 @@ def test_delta_proprio_uses_measured_diff_in_degrees(bucket):
     np.testing.assert_allclose(start, [0.0, 0.0, 0.0], atol=1e-7)
 
 
-def test_cumulative_proprio_converts_yaw_to_degrees(bucket):
-    ds = _make_ds(bucket, normalize_mode=None, unify_action=False, base_action_source="cumulative")
-    t = 3  # window at offset 3, proprio row = state at t=3
-    got = ds[3]["proprio"].numpy()[0, 20:23]
-    np.testing.assert_allclose(got, [0.01 * t, -0.005 * t, math.degrees(0.02 * t)], atol=1e-4)
-
-
 def test_delta_proprio_matches_action_space_stats(bucket):
     # With normalization ON, delta proprio base must land in the same
     # normalized range as the action.base_delta targets (shared stats).
-    ds = _make_ds(bucket, normalize_mode="min-max", unify_action=False, base_action_source="delta")
+    ds = _make_ds(bucket, normalize_mode="min-max", unify_action=False)
     s = ds[5]
     assert np.abs(s["proprio"].numpy()).max() <= 1.0 + 1e-6
     assert np.abs(s["action"].numpy()).max() <= 1.0 + 1e-6
@@ -262,11 +244,11 @@ def test_default_mode_is_min_max_and_quantile_works_off_auto_build(bucket):
 def test_auto_built_cache_is_offline_scan_with_true_quantiles(bucket):
     stats, path = _load_or_build_stats(
         [bucket],
-        ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS,
+        ebench_mod.EBENCH_ACTION_KEYS,
         action_mode="ebench",
         dataset_dir=str(bucket.parents[1]),
     )
-    assert path == str(bucket.parents[1] / "meta" / "ebench_stats.npy")
+    assert path == str(bucket.parents[1] / "meta" / "ebench_normalization_stats.npy")
     assert "q01" in stats and "q99" in stats
     payload = np.load(path, allow_pickle=True).item()
     assert payload["source"] == "parquet_scan"
@@ -307,10 +289,10 @@ def test_raw_stats_to_23_index_arithmetic():
 
 def test_fingerprint_invalidates_on_source_change(bucket):
     root = str(bucket.parents[1])
-    keys = ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS
+    keys = ebench_mod.EBENCH_ACTION_KEYS
     _load_or_build_stats([bucket], keys, action_mode="ebench", dataset_dir=root)
     # cache hit with unchanged source — the scan must not re-run
-    cache = bucket.parents[1] / "meta" / "ebench_stats.npy"
+    cache = bucket.parents[1] / "meta" / "ebench_normalization_stats.npy"
     mtime = cache.stat().st_mtime_ns
     _load_or_build_stats([bucket], keys, action_mode="ebench", dataset_dir=root)
     assert cache.stat().st_mtime_ns == mtime
@@ -334,7 +316,7 @@ def test_stats_write_failure_fails_fast(bucket, monkeypatch):
     with pytest.raises(OSError, match="Read-only"):
         _load_or_build_stats(
             [bucket],
-            ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS,
+            ebench_mod.EBENCH_ACTION_KEYS,
             action_mode="ebench",
             dataset_dir=str(bucket.parents[1]),
         )
@@ -438,13 +420,6 @@ def test_prompt_failfast_at_init(tmp_path):
         _make_ds(b, normalize_mode=None, unify_action=False)
 
 
-def test_explicit_missing_bucket_raises(bucket):
-    root = bucket.parents[1]
-    with pytest.raises(FileNotFoundError, match="task_typo"):
-        discover_ebench_buckets(str(root), buckets=["simple_pnp/task1", "simple_pnp/task_typo"])
-    assert discover_ebench_buckets(str(root), buckets=["simple_pnp/task1"])
-
-
 def test_excluded_episodes_honored(bucket):
     (bucket / "meta" / "excluded_episodes.json").write_text("[0]")
     ds = _make_ds(bucket, normalize_mode=None, unify_action=False)
@@ -473,11 +448,6 @@ def test_init_rejects_finger_disagreement(tmp_path):
     df.to_parquet(p)
     with pytest.raises(ValueError, match="finger"):
         _make_ds(b, normalize_mode=None, unify_action=False)
-
-
-def test_base_source_velocity_removed(bucket):
-    with pytest.raises(ValueError, match="base_action_source"):
-        _make_ds(bucket, normalize_mode=None, unify_action=False, base_action_source="velocity")
 
 
 def test_normalization_stats_property_is_none(bucket):
@@ -573,12 +543,12 @@ def test_stats_cache_survives_dataset_move(bucket, tmp_path):
     import shutil
 
     root_a = bucket.parents[1]
-    keys = ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS
+    keys = ebench_mod.EBENCH_ACTION_KEYS
     _load_or_build_stats([bucket], keys, action_mode="ebench", dataset_dir=str(root_a))
     root_b = tmp_path / "moved_root"
     shutil.copytree(root_a, root_b)
     moved_bucket = root_b / "simple_pnp" / "task1"
-    cache_b = root_b / "meta" / "ebench_stats.npy"
+    cache_b = root_b / "meta" / "ebench_normalization_stats.npy"
     mtime = cache_b.stat().st_mtime_ns
     # same relative path + same bytes at a different mount -> cache hit, no rebuild
     stats, path = _load_or_build_stats([moved_bucket], keys, action_mode="ebench", dataset_dir=str(root_b))
