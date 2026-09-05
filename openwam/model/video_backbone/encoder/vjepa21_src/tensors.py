@@ -29,7 +29,6 @@ def _no_grad_trunc_normal_(tensor, mean, std, a, b):
         tensor.uniform_(2 * lower - 1, 2 * upper - 1)
 
         # Use inverse cdf transform for normal distribution to get truncated
-        # standard normal
         tensor.erfinv_()
 
         # Transform to proper mean, std
@@ -44,9 +43,3 @@ def _no_grad_trunc_normal_(tensor, mean, std, a, b):
 def trunc_normal_(tensor, mean=0.0, std=1.0, a=-2.0, b=2.0):
     # type: (Tensor, float, float, float, float) -> Tensor
     return _no_grad_trunc_normal_(tensor, mean, std, a, b)
-
-
-def repeat_interleave_batch(x, B, repeat):
-    N = len(x) // B
-    x = torch.cat([torch.cat([x[i * B : (i + 1) * B] for _ in range(repeat)], dim=0) for i in range(N)], dim=0)
-    return x

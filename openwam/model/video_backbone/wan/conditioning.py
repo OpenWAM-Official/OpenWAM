@@ -113,15 +113,6 @@ def finalize_ti2v_first_frame_latents(inputs_shared: dict, first_frame_image, *,
     inputs_shared["first_frame_latents"] = ref_image_latents
 
 
-def build_vace_context(vace_video, input_latents, device, *, vae, encoder, dtype) -> Tensor:
-    all_vace = []
-    for clip_frames in vace_video:
-        vt = wan_encode.preprocess_video(clip_frames, encoder=encoder, dtype=dtype, device=device)
-        vl = wan_encode.encode_video(vt.to(device), vae=vae, encoder=encoder)
-        all_vace.append(vl)
-    return torch.cat(all_vace, dim=0) if all_vace else None
-
-
 # ================================================================
 # Native-VACE input convention (training + deploy)
 # ================================================================

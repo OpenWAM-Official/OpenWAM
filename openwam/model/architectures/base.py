@@ -241,7 +241,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # Single gate, identical for training and deploy: encoder block is
         # honored ONLY when ``from_scratch=true``. The framework yamls ship
         # an inline ``encoder:`` block for discoverability even at default
-        # ``from_scratch=false`` (see commit 6588044) — that block must be
+        # ``from_scratch=false`` — that block must be
         # silently ignored on both paths so default training and deploy of
         # ``from_scratch=false`` checkpoints (state_dict topology
         # ``_pipe.vae.*``) keep working bit-exactly.
@@ -379,7 +379,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # of the random init, masking the diagnostic.
         # Both the training reset (source is None) and the deploy reshape-only
         # path (source set + external encoder) are owned by the backbone via the
-        # ``reinit_for_from_scratch`` contract — the architecture no longer
+        # ``reinit_for_from_scratch`` contract — the architecture never
         # reaches into ``vb.dit`` / ``wan.reinit``. Non-Wan backbones raise
         # NotImplementedError, so this stays gated on from_scratch.
         if self.video_backbone is not None and from_scratch:
@@ -868,8 +868,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
     def prepare_inputs(self, batch: list[dict]) -> dict:
         """Aggregate a list of dataset samples into a batched inputs dict.
 
-        Absorbs the per-sample field collection that previously lived in
-        ``OpenWAMTrainer._forward_batch``. The returned dict is designed to be
+        The returned dict is designed to be
         unpacked directly into ``compute_loss`` via ``**inputs``.
 
         Args:

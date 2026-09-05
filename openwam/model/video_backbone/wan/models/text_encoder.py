@@ -45,7 +45,6 @@ class T5Attention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim_attn // num_heads
 
-        # layers
         self.q = nn.Linear(dim, dim_attn, bias=False)
         self.k = nn.Linear(dim, dim_attn, bias=False)
         self.v = nn.Linear(dim, dim_attn, bias=False)
@@ -58,16 +57,13 @@ class T5Attention(nn.Module):
         context:    [B, L2, C] or None.
         mask:       [B, L2] or [B, L1, L2] or None.
         """
-        # check inputs
         context = x if context is None else context
         b, n, c = x.size(0), self.num_heads, self.head_dim
 
-        # compute query, key, value
         q = self.q(x).view(b, -1, n, c)
         k = self.k(context).view(b, -1, n, c)
         v = self.v(context).view(b, -1, n, c)
 
-        # attention bias
         attn_bias = x.new_zeros(b, n, q.size(1), k.size(1))
         if pos_bias is not None:
             attn_bias += pos_bias
@@ -81,7 +77,6 @@ class T5Attention(nn.Module):
         attn = F.softmax(attn.float(), dim=-1).type_as(attn)
         x = torch.einsum("bnij,bjnc->binc", attn, v)
 
-        # output
         x = x.reshape(b, -1, n * c)
         x = self.o(x)
         x = self.dropout(x)
@@ -94,7 +89,6 @@ class T5FeedForward(nn.Module):
         self.dim = dim
         self.dim_ffn = dim_ffn
 
-        # layers
         self.gate = nn.Sequential(nn.Linear(dim, dim_ffn, bias=False), GELU())
         self.fc1 = nn.Linear(dim, dim_ffn, bias=False)
         self.fc2 = nn.Linear(dim_ffn, dim, bias=False)
@@ -118,7 +112,6 @@ class T5SelfAttention(nn.Module):
         self.num_buckets = num_buckets
         self.shared_pos = shared_pos
 
-        # layers
         self.norm1 = T5LayerNorm(dim)
         self.attn = T5Attention(dim, dim_attn, num_heads, dropout)
         self.norm2 = T5LayerNorm(dim)
@@ -140,13 +133,10 @@ class T5RelativeEmbedding(nn.Module):
         self.bidirectional = bidirectional
         self.max_dist = max_dist
 
-        # layers
         self.embedding = nn.Embedding(num_buckets, num_heads)
 
     def forward(self, lq, lk):
         device = self.embedding.weight.device
-        # rel_pos = torch.arange(lk).unsqueeze(0).to(device) - \
-        #     torch.arange(lq).unsqueeze(1).to(device)
         rel_pos = torch.arange(lk, device=device).unsqueeze(0) - torch.arange(lq, device=device).unsqueeze(1)
         rel_pos = self._relative_position_bucket(rel_pos)
         rel_pos_embeds = self.embedding(rel_pos)
@@ -154,7 +144,6 @@ class T5RelativeEmbedding(nn.Module):
         return rel_pos_embeds.contiguous()
 
     def _relative_position_bucket(self, rel_pos):
-        # preprocess
         if self.bidirectional:
             num_buckets = self.num_buckets // 2
             rel_buckets = (rel_pos > 0).long() * num_buckets
@@ -215,7 +204,6 @@ class WanTextEncoder(torch.nn.Module):
         self.num_buckets = num_buckets
         self.shared_pos = shared_pos
 
-        # layers
         self.token_embedding = vocab if isinstance(vocab, nn.Embedding) else nn.Embedding(vocab, dim)
         self.pos_embedding = T5RelativeEmbedding(num_buckets, num_heads, bidirectional=True) if shared_pos else None
         self.dropout = nn.Dropout(dropout)
@@ -227,7 +215,6 @@ class WanTextEncoder(torch.nn.Module):
         )
         self.norm = T5LayerNorm(dim)
 
-        # initialize weights
         self.apply(init_weights)
 
     def forward(self, ids, mask=None):
@@ -274,27 +261,23 @@ class HuggingfaceTokenizer:
         self.seq_len = seq_len
         self.clean = clean
 
-        # init tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(name, **kwargs)
         self.vocab_size = self.tokenizer.vocab_size
 
     def __call__(self, sequence, **kwargs):
         return_mask = kwargs.pop("return_mask", False)
 
-        # arguments
         _kwargs = {"return_tensors": "pt"}
         if self.seq_len is not None:
             _kwargs.update({"padding": "max_length", "truncation": True, "max_length": self.seq_len})
         _kwargs.update(**kwargs)
 
-        # tokenization
         if isinstance(sequence, str):
             sequence = [sequence]
         if self.clean:
             sequence = [self._clean(u) for u in sequence]
         ids = self.tokenizer(sequence, **_kwargs)
 
-        # output
         if return_mask:
             return ids.input_ids, ids.attention_mask
         else:

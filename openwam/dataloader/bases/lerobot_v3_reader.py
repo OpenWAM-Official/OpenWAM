@@ -190,8 +190,7 @@ class LeRobotV3Reader(BaseDataset):
         # Octo-style head-view sampling: a list of >=2 camera keys (must include
         # the resolved head camera). Each TRAIN window decodes the head slot from
         # ONE uniformly sampled entry — viewpoint augmentation at unchanged window
-        # count. Val / None / single entry → always the resolved head camera
-        # (byte-identical to before).
+        # count. Val / None / single entry → always the resolved head camera.
         head_camera_choices: Optional[List[str]] = None,
         # Unified action space. unify_action=True scatters this reader's raw
         # ACTION_DIM-wide action/proprio into a UNIFY_DIM-wide vector and marks
@@ -204,11 +203,10 @@ class LeRobotV3Reader(BaseDataset):
         unify_state_map: Optional[Any] = None,
         # Optional load-time video color jitter, applied consistently across a
         # clip's frames and ONLY on the train split. None / False / {} → disabled
-        # (default; byte-identical to before). Truthy → enabled; a dict overrides
+        # (default). Truthy → enabled; a dict overrides
         # the per-channel strengths {brightness, contrast, saturation, hue}.
         color_jitter: Optional[Any] = None,
-        # Optional data-budget knobs (None = use full bucket; the default
-        # path is byte-identical to the pre-budget behavior).
+        # Optional data-budget knobs (None = use the full bucket).
         max_hours: Optional[float] = None,
         subsample_seed: int = 42,
         **_unused: Any,
@@ -249,7 +247,7 @@ class LeRobotV3Reader(BaseDataset):
         # (the class ACTION_DIM). When unify is on, the public ACTION_DIM (and
         # thus the finalized action/proprio width + downstream model action_dim)
         # becomes unify_dim, and _finalize_* scatters raw -> unified via
-        # _unify_dst_index. Off (default) → byte-identical to before.
+        # _unify_dst_index. Off (default) → raw layout kept.
         # Instance attr (not type(self).ACTION_DIM) so a subclass can override the
         # raw action width per bucket BEFORE super().__init__ — RoboCOIN sets a
         # wider raw dim (pose + dexterous-hand fingers) for dex-hand buckets under
@@ -376,7 +374,7 @@ class LeRobotV3Reader(BaseDataset):
         # (the per-row _data_row_offset / _video_frame_offset columns ride
         # along). Ego4D overrides this to drop episodes whose bilingual prompt
         # has no usable English half; every other reader keeps the identity
-        # default → byte-identical to before.
+        # default.
         self._eps_df = self._filter_episodes(self._eps_df)
 
         # ── optional episode-level subsample to fit a per-bucket hour budget ──
@@ -616,7 +614,7 @@ class LeRobotV3Reader(BaseDataset):
 
         ``_valid_start`` / ``_valid_end``
             Half-open ``[start, end)`` row range of the episode that may be
-            sampled. Absent → ``[0, length)``, i.e. byte-identical to before.
+            sampled. Absent → ``[0, length)`` (the whole episode).
             ``__init__`` builds the window index from ``end - start`` and
             ``_getitem_impl`` offsets BOTH the parquet slice and the video decode
             by ``start``, so the two stay aligned and no window can reach a

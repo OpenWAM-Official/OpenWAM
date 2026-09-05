@@ -250,7 +250,7 @@ def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]], min_
     back in.
 
     Returns ``None`` only when there is genuinely nothing to filter, so the
-    plain path stays allocation-free and byte-identical to before.
+    plain path stays allocation-free.
     """
 
     if kept is None and not trim:

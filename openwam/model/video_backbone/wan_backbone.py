@@ -148,10 +148,6 @@ class WanBase(VideoBackbone):
         """
         return self._variant.needs_first_frame_skip
 
-    @property
-    def _freq_dim(self) -> int:
-        return int(self._dit.freq_dim)
-
     # ================================================================
     # ABC: Properties (6) — device/dtype inherited from VideoBackbone
     # ================================================================

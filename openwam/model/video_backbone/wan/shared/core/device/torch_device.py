@@ -21,11 +21,6 @@ def get_torch_device() -> Any:
         return torch.cuda
 
 
-def get_device_id() -> int:
-    """Get current device id based on device type."""
-    return get_torch_device().current_device()
-
-
 def synchronize() -> None:
     """Execute torch synchronize operation."""
     get_torch_device().synchronize()
@@ -34,23 +29,6 @@ def synchronize() -> None:
 def empty_cache() -> None:
     """Execute torch empty cache operation."""
     get_torch_device().empty_cache()
-
-
-def get_nccl_backend() -> str:
-    """Return distributed communication backend type based on device type."""
-    if IS_CUDA_AVAILABLE:
-        return "nccl"
-    else:
-        raise RuntimeError(f"No available distributed communication backend found on device type {get_device_type()}.")
-
-
-def enable_high_precision_for_bf16():
-    """
-    Set high accumulation dtype for matmul and reduction.
-    """
-    if IS_CUDA_AVAILABLE:
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
 
 
 def parse_device_type(device):

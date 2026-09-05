@@ -213,8 +213,8 @@ wan_series = [
             "num_heads": 12,
             "num_layers": 30,
             "eps": 1e-06,
-            # Upstream model attr for weight loading; OpenWAM adapter
-            # no longer uses reference_latents (removed in 23246ba).
+            # Upstream model attr for weight loading; the OpenWAM adapter
+            # does not use reference_latents.
             "has_ref_conv": True,
         },
     },
@@ -257,8 +257,8 @@ wan_series = [
             "num_heads": 40,
             "num_layers": 40,
             "eps": 1e-06,
-            # Upstream model attr for weight loading; OpenWAM adapter
-            # no longer uses reference_latents (removed in 23246ba).
+            # Upstream model attr for weight loading; the OpenWAM adapter
+            # does not use reference_latents.
             "has_ref_conv": True,
         },
     },
@@ -405,8 +405,8 @@ wan_series = [
             "num_heads": 40,
             "num_layers": 40,
             "eps": 1e-06,
-            # Upstream model attr for weight loading; OpenWAM adapter
-            # no longer uses reference_latents (removed in 23246ba).
+            # Upstream model attr for weight loading; the OpenWAM adapter
+            # does not use reference_latents.
             "has_ref_conv": True,
             "require_clip_embedding": False,
         },

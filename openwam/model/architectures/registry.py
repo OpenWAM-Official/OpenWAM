@@ -226,11 +226,6 @@ def list_supported_architectures() -> tuple[str, ...]:
     return tuple(name for name in sorted(ARCHITECTURE_REGISTRY.keys()) if ARCHITECTURE_SUPPORT[name].supported)
 
 
-def list_experimental_architectures() -> tuple[str, ...]:
-    """List architecture names that remain explicitly experimental."""
-    return tuple(name for name in sorted(ARCHITECTURE_REGISTRY.keys()) if not ARCHITECTURE_SUPPORT[name].supported)
-
-
 def build_architecture(name: str, cfg=None, *, allow_experimental: bool = False) -> BaseWAMArchitecture:
     """
     Instantiate a registered WAM architecture by registry key.

@@ -1,5 +1,4 @@
 from .attention import attention_forward as attention_forward
-from .data import UnifiedDataset as UnifiedDataset
 from .device import IS_CUDA_AVAILABLE as IS_CUDA_AVAILABLE
 from .device import get_available_device_type as get_available_device_type
 from .device import parse_device_type as parse_device_type

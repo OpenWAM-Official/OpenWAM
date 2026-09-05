@@ -194,30 +194,6 @@ def _pad_and_resize(image: Image.Image, target_height: int, target_width: int) -
     return canvas
 
 
-def _resize_frame(
-    image: Image.Image,
-    target_height: int,
-    target_width: int,
-    resize_mode: str = "pad",
-) -> Image.Image:
-    """Resize a single frame according to *resize_mode*.
-
-    Modes:
-        ``crop``    – scale preserving aspect ratio so the image covers the
-                      target area (short-side fit), then center-crop the
-                      overflowing dimension.
-        ``pad``     – scale preserving aspect ratio so the image fits inside
-                      the target area (long-side fit), then center-pad the
-                      shorter dimension with black pixels.
-        ``stretch`` – directly resize to target size, ignoring aspect ratio.
-    """
-    if resize_mode == "stretch":
-        return image.resize((target_width, target_height), Image.LANCZOS)
-    if resize_mode == "pad":
-        return _pad_and_resize(image, target_height, target_width)
-    return crop_and_resize(image, target_height, target_width)
-
-
 def _resolve_prompt(
     instructions: dict,
     ep_file: str,
@@ -318,7 +294,7 @@ class RoboTwinDataset(BaseDataset):
         unify_state_map: Optional[Any] = None,
         # Optional load-time video color jitter, applied consistently across a
         # clip's frames and ONLY on the train split. None / False / {} → disabled
-        # (default; byte-identical to before). Truthy → enabled; a dict overrides
+        # (default). Truthy → enabled; a dict overrides
         # the per-channel strengths {brightness, contrast, saturation, hue}.
         color_jitter: Optional[Any] = None,
     ):

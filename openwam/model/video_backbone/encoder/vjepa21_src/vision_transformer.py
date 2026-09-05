@@ -216,12 +216,6 @@ class VisionTransformer(nn.Module):
             rescale(layer.attn.proj.weight.data, layer_id + 1)
             rescale(layer.mlp.fc2.weight.data, layer_id + 1)
 
-    def get_num_layers(self):
-        return len(self.blocks)
-
-    def no_weight_decay(self):
-        return {}
-
     def check_temporal_dim(self, shape) -> bool:
         if self.img_temporal_dim_size is not None:
             if shape[2] == self.img_temporal_dim_size:

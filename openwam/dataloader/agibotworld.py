@@ -281,11 +281,6 @@ def _bucket_base_motion_flags(dataset_dir) -> tuple[bool, bool]:
     return flags[0], flags[1]
 
 
-def _bucket_has_base_motion(dataset_dir) -> bool:
-    """Backward-compatible aggregate: whether action OR state base moves."""
-    return any(_bucket_base_motion_flags(dataset_dir))
-
-
 def _action_gripper_to_open_convention(grip: np.ndarray) -> np.ndarray:
     """Convert AgiBotWorld action gripper ``0=open,1=closed`` to ``0=closed,1=open``."""
     return (1.0 - np.asarray(grip, dtype=np.float32)).astype(np.float32, copy=False)

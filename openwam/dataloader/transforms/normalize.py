@@ -74,12 +74,6 @@ class Normalizer(InvertibleModalityTransform):
         if stats:
             self._precompute()
 
-    def set_stats(self, stats: Dict[str, np.ndarray]):
-        """Update statistics (e.g., after loading from cache)."""
-        self.stats = {key: value for key, value in stats.items() if key != _NORMALIZE_STATS_KEY}
-        self.normalize_stats = stats.get(_NORMALIZE_STATS_KEY, self.stats)
-        self._precompute()
-
     def _precompute(self):
         """Precompute scale and offset for the chosen mode."""
         s = self.stats
@@ -229,25 +223,3 @@ def load_mode_stats(stats_path: str, action_mode: str) -> Optional[dict]:
             stats[_NORMALIZE_STATS_KEY] = raw[state_key]
         return stats
     return None
-
-
-def compute_extended_stats(all_actions: list) -> Dict[str, np.ndarray]:
-    """Compute extended statistics: mean, std, min, max, q01, q99.
-
-    Args:
-        all_actions: List of (T_i, action_dim) numpy arrays.
-
-    Returns:
-        Dict with float32 arrays for each stat.
-    """
-    concatenated = np.concatenate(all_actions, axis=0).astype(np.float64)
-
-    stats = {
-        "mean": concatenated.mean(axis=0).astype(np.float32),
-        "std": np.maximum(concatenated.std(axis=0), 1e-3).astype(np.float32),
-        "min": concatenated.min(axis=0).astype(np.float32),
-        "max": concatenated.max(axis=0).astype(np.float32),
-        "q01": np.percentile(concatenated, 1, axis=0).astype(np.float32),
-        "q99": np.percentile(concatenated, 99, axis=0).astype(np.float32),
-    }
-    return stats

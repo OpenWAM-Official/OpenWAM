@@ -863,8 +863,7 @@ class RoboCOINDataset(LeRobotV3Reader):
         variable-width raw collapses to the uniform 80-D head.
 
         ``trim_csv``: optional path to a quality-audit trim list; see
-        :meth:`_filter_episodes`. ``None`` (default) disables trimming and the
-        reader stays byte-identical to before.
+        :meth:`_filter_episodes`. ``None`` (default) disables trimming.
         """
 
         if is_robocoin_bucket_excluded(dataset_dir):

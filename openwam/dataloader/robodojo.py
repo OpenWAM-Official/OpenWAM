@@ -740,8 +740,8 @@ class RoboDojoDataset(BaseDataset):
             self.calibration = None
             self.frame_contract = robodojo_real_frame_contract(embodiment)
             self.frame_contract_fingerprint = real_frame_contract_fingerprint(embodiment)
-            # Kept as an alias for callers that previously exposed only the
-            # sim calibration fingerprint.
+            # Alias so callers can read one calibration fingerprint field
+            # across sim and real embodiments.
             self.calibration_fingerprint = self.frame_contract_fingerprint
             self.source_frame = ROBODOJO_REAL_SOURCE_FRAME
             self.contract_id = ROBODOJO_REAL_CONTRACT_ID

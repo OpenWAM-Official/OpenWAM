@@ -212,7 +212,7 @@ class ObsPreprocessor:
         # State-dim validation is intentionally NOT enforced: unify_action ckpts send RAW
         # proprio (pre-unify, width != state_dim) which the normalizer scatters to UNIFY_DIM,
         # so a fixed state_dim check would wrongly reject valid states. Tradeoff: a wrong-width
-        # state on a non-unify ckpt no longer fails here with a friendly message — it surfaces
+        # state on a non-unify ckpt is not caught here — it surfaces
         # downstream (Normalizer broadcast / model). Deliberate: accept proprio of any width.
         if "state" in obs and obs["state"] is not None:
             try:

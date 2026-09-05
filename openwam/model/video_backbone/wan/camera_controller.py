@@ -48,21 +48,6 @@ class SimpleAdapter(nn.Module):
 
         return out
 
-    def process_camera_coordinates(
-        self,
-        direction: Literal["Left", "Right", "Up", "Down", "LeftUp", "LeftDown", "RightUp", "RightDown"],
-        length: int,
-        height: int,
-        width: int,
-        speed: float = 1 / 54,
-        origin=(0, 0.532139961, 0.946026558, 0.5, 0.5, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0),
-    ):
-        if origin is None:
-            origin = (0, 0.532139961, 0.946026558, 0.5, 0.5, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0)
-        coordinates = generate_camera_coordinates(direction, length, speed, origin)
-        plucker_embedding = process_pose_file(coordinates, width, height)
-        return plucker_embedding
-
 
 class ResidualBlock(nn.Module):
     def __init__(self, dim):
@@ -141,11 +126,9 @@ def ray_condition(K, c2w, H, W, device):
     rays_d = directions @ c2w[..., :3, :3].transpose(-1, -2)  # B, V, 3, HW
     rays_o = c2w[..., :3, 3]  # B, V, 3
     rays_o = rays_o[:, :, None].expand_as(rays_d)  # B, V, 3, HW
-    # c2w @ dirctions
     rays_dxo = torch.linalg.cross(rays_o, rays_d)
     plucker = torch.cat([rays_dxo, rays_d], dim=-1)
     plucker = plucker.reshape(B, c2w.shape[1], H, W, 6)  # B, V, H, W, 6
-    # plucker = plucker.permute(0, 1, 4, 2, 3)
     return plucker
 
 

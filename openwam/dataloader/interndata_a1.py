@@ -815,8 +815,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 mode :meth:`from_config` passes the dataset root so every bucket
                 shares one per-embodiment stats file.
             trim_csv: optional path to a quality-audit trim list; see
-                :meth:`_filter_episodes`. ``None`` (default) disables trimming and
-                the reader stays byte-identical to before.
+                :meth:`_filter_episodes`. ``None`` (default) disables trimming.
         """
 
         self._a1_stats_root = Path(a1_stats_root) if a1_stats_root else Path(dataset_dir)
@@ -1596,15 +1595,10 @@ class MultiInternDataA1Dataset(MultiLeRobotV3Reader):
             ", ".join(f"{k}: {counts[k]} buckets/{windows[k]} windows" for k in sorted(counts)),
         )
         self._embodiment_bucket_counts = counts
-        self._embodiment_window_counts = windows
 
     @property
     def embodiment_bucket_counts(self) -> Dict[str, int]:
         return dict(self._embodiment_bucket_counts)
-
-    @property
-    def embodiment_window_counts(self) -> Dict[str, int]:
-        return dict(self._embodiment_window_counts)
 
 
 __all__ = [

@@ -60,11 +60,6 @@ Functions
     permutation + greedy prefix; preserves original row order so downstream
     offset columns stay valid.
 
-- quick_bucket_hours(bucket_dir)
-    Raw-manifest diagnostic: cheap fps × sum(episode_lengths) / 3600 scan
-    without building a full reader. Effective multi-bucket budgets deliberately
-    do not use it because it cannot see split/exclusion/trim filters.
-
 Exceptions
 ----------
 - DataContractError
@@ -637,35 +632,6 @@ def subsample_episodes_by_hours(
     return eps_df.iloc[sorted(selected)].reset_index(drop=True)
 
 
-def quick_bucket_hours(bucket_dir: Path) -> float:
-    """Raw-manifest diagnostic: fps × sum(length) / 3600.
-
-    This intentionally does *not* represent effective sampleable hours: it
-    cannot observe split, exclusion, trim, or valid-range filters. Root-mode
-    budgeting therefore builds each reader's filtered metadata population and
-    uses ``reader.effective_hours`` instead.
-
-    .. note::
-        Returns the FULL bucket total — every row in ``meta/episodes/*.parquet``
-        contributes, regardless of any ``info.json["splits"]`` declarations.
-        The reader's actual loaded hours after applying ``apply_info_splits``
-        can be slightly smaller for buckets that carry an explicit train/val
-        partition, which is why this raw diagnostic must not drive effective
-        budgeting.
-
-    Args:
-        bucket_dir: Path to a bucket containing ``meta/info.json`` and
-            ``meta/episodes/*.parquet``.
-
-    Returns:
-        Total raw footage hours across all episodes in this bucket.
-    """
-    info = parse_info_json(Path(bucket_dir))
-    fps = float(info["fps"])
-    eps = load_episodes_parquet(Path(bucket_dir))
-    return float(eps["length"].sum()) / fps / 3600.0
-
-
 def load_tasks_annotated(dataset_dir: Path, *, source_name: str = "dataset") -> Dict[int, str]:
     """Load ``meta/tasks_annotated.parquet`` → ``{episode_index: text}``.
 
@@ -831,7 +797,6 @@ __all__ = [
     "water_fill_hours",
     "effective_episode_frames",
     "subsample_episodes_by_hours",
-    "quick_bucket_hours",
     "load_tasks_annotated",
     "resolve_prompt_by_episode",
     "build_multibucket",

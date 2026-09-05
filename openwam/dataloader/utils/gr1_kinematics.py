@@ -219,18 +219,6 @@ class GR1Kinematics:
             raise ValueError(f"invalid GR1 EEF33 result: shape={out.shape}, finite={np.isfinite(out).all()}")
         return out
 
-    def joint44_to_eef33(self, vector: np.ndarray) -> np.ndarray:
-        vec = np.asarray(vector, dtype=np.float32).reshape(-1)
-        if vec.shape != (JOINT44_DIM,):
-            raise ValueError(f"GR1 joint vector must be 44-D, got {vec.shape}")
-        return self.active_to_eef33(
-            vec[JOINT44_SLICES["left_arm"]],
-            vec[JOINT44_SLICES["left_hand"]],
-            vec[JOINT44_SLICES["right_arm"]],
-            vec[JOINT44_SLICES["right_hand"]],
-            vec[JOINT44_SLICES["waist"]],
-        )
-
     def observation_to_eef33(self, obs: Mapping) -> np.ndarray:
         """Build proprio from a live GR00T observation without mutating the sim."""
         missing = [key for key in STATE_KEYS if key not in obs]

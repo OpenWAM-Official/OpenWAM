@@ -224,14 +224,6 @@ class FlowMatchScheduler:
         prev_sample = sample + model_output * (sigma_ - sigma)
         return prev_sample
 
-    def return_to_timestep(self, timestep, sample, sample_stablized):
-        if isinstance(timestep, torch.Tensor):
-            timestep = timestep.cpu()
-        timestep_id = torch.argmin((self.timesteps - timestep).abs())
-        sigma = self.sigmas[timestep_id]
-        model_output = (sample - sample_stablized) / sigma
-        return model_output
-
     def add_noise(self, original_samples, noise, timestep):
         if isinstance(timestep, torch.Tensor):
             timestep = timestep.cpu()

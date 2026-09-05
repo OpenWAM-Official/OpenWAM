@@ -1,14 +1,17 @@
-"""跨模态 attention mask 模式:控制 video 与 action 之间的可见性。
+"""Cross-modal attention mask modes: visibility between video and action.
 
-四种模式共享两个不变量:v<->v 子块由 ``video_attention_mask_mode`` 单独控制,
-a<->a 恒为相互可见。它们只决定 video 与 action 互相是否可见、可见范围:
+All four modes share two invariants: the v<->v sub-block is controlled
+separately by ``video_attention_mask_mode``, and a<->a is always mutually
+visible. The modes only decide whether (and how far) video and action can
+see each other:
 
-- ``mutual``             video 看 action,action 看全部 video
-- ``action_sees_video``  video 看不到 action,action 看全部 video(旧 ``joint``)
-- ``video_sees_action``  video 看 action,action 只看 video 第一帧
-- ``isolated``           video 看不到 action,action 只看 video 第一帧(FastWAM 形式)
+- ``mutual``             video sees action; action sees all of video
+- ``action_sees_video``  video does not see action; action sees all of video
+- ``video_sees_action``  video sees action; action sees only the first video frame
+- ``isolated``           video does not see action; action sees only the first video frame (FastWAM-style)
 
-"video 看 action" 的两种模式中,video 第一帧(干净条件帧)不看 action。
+In the two modes where video sees action, the first video frame (the clean
+conditioning frame) does not attend to action.
 """
 
 from __future__ import annotations
@@ -61,24 +64,25 @@ def fill_cross_modal_va_blocks(
     mode: str,
     video_tokens_per_frame: int,
 ) -> None:
-    """In-place 填充 v->a 与 a->v 两块。
+    """Fill the v->a and a->v blocks in place.
 
-    两个方向都显式赋值(不依赖起步默认值),故 zeros 与 ones 起步皆正确。
+    Both directions are assigned explicitly (nothing relies on the initial
+    fill), so masks starting from zeros and from ones are equally correct.
     """
     s_video = v_end - v_start
-    ff = min(video_tokens_per_frame, s_video)  # 第一帧 token 数
+    ff = min(video_tokens_per_frame, s_video)  # tokens in the first frame
 
-    # a->v:action 看 video
+    # a->v: does action see video?
     if mode in (ACTION_SEES_VIDEO, MUTUAL):
         mask[a_start:a_end, v_start:v_end] = True
-    else:  # VIDEO_SEES_ACTION, ISOLATED:只看第一帧
+    else:  # VIDEO_SEES_ACTION, ISOLATED: first frame only
         mask[a_start:a_end, v_start:v_end] = False
         mask[a_start:a_end, v_start : v_start + ff] = True
 
-    # v->a:video 看 action
+    # v->a: does video see action?
     if mode in (MUTUAL, VIDEO_SEES_ACTION):
         mask[v_start:v_end, a_start:a_end] = True
-        mask[v_start : v_start + ff, a_start:a_end] = False  # 第一帧行除外
+        mask[v_start : v_start + ff, a_start:a_end] = False  # except the first-frame rows
     else:  # ACTION_SEES_VIDEO, ISOLATED
         mask[v_start:v_end, a_start:a_end] = False
 
@@ -93,13 +97,15 @@ def build_cross_modal_attention_mask(
     device: torch.device,
     n_readonly_tail: int = 0,
 ) -> torch.Tensor:
-    """构造 ``[video, action, tail]`` 的 bool attention mask(True=可见)。
+    """Build the ``[video, action, tail]`` bool attention mask (True = visible).
 
-    - v<->v:``video_backbone.build_video_to_video_mask``(由 video_attention_mask_mode 决定)
-    - a<->a:True
-    - v<->a:按 ``mode``(见 :func:`fill_cross_modal_va_blocks`)
-    - 只读尾巴 ``tail``(tri 的 understanding / shared 的 state,二者同构):
-      video、action 都能看 tail;tail 只看自己;tail 看不到 video/action。
+    - v<->v: ``video_backbone.build_video_to_video_mask`` (driven by
+      ``video_attention_mask_mode``)
+    - a<->a: True
+    - v<->a: per ``mode`` (see :func:`fill_cross_modal_va_blocks`)
+    - read-only ``tail`` (tri-system understanding tokens / single-system state
+      tokens, structurally the same): video and action see the tail; the tail
+      sees only itself and never video/action.
     """
     validate_attention_mask_mode(mode)
     total = s_video + s_action + int(n_readonly_tail)
@@ -124,8 +130,8 @@ def build_cross_modal_attention_mask(
 
     if n_readonly_tail:
         tail_start = a_end
-        mask[:tail_start, tail_start:] = True  # video + action 看 tail
-        mask[tail_start:, tail_start:] = True  # tail 只看自己
+        mask[:tail_start, tail_start:] = True  # video + action see the tail
+        mask[tail_start:, tail_start:] = True  # the tail sees only itself
     return mask
 
 

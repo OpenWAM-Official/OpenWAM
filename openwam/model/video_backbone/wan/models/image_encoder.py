@@ -14,185 +14,6 @@ import torchvision.transforms as T
 from .dit import flash_attention
 
 
-class SelfAttention(nn.Module):
-    def __init__(self, dim, num_heads, dropout=0.1, eps=1e-5):
-        assert dim % num_heads == 0
-        super().__init__()
-        self.dim = dim
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.eps = eps
-
-        # layers
-        self.q = nn.Linear(dim, dim)
-        self.k = nn.Linear(dim, dim)
-        self.v = nn.Linear(dim, dim)
-        self.o = nn.Linear(dim, dim)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x, mask):
-        """
-        x:   [B, L, C].
-        """
-        b, s, c, n, d = *x.size(), self.num_heads, self.head_dim
-
-        # compute query, key, value
-        q = self.q(x).reshape(b, s, n, d).permute(0, 2, 1, 3)
-        k = self.k(x).reshape(b, s, n, d).permute(0, 2, 1, 3)
-        v = self.v(x).reshape(b, s, n, d).permute(0, 2, 1, 3)
-
-        # compute attention
-        p = self.dropout.p if self.training else 0.0
-        x = F.scaled_dot_product_attention(q, k, v, mask, p)
-        x = x.permute(0, 2, 1, 3).reshape(b, s, c)
-
-        # output
-        x = self.o(x)
-        x = self.dropout(x)
-        return x
-
-
-class AttentionBlock(nn.Module):
-    def __init__(self, dim, num_heads, post_norm, dropout=0.1, eps=1e-5):
-        super().__init__()
-        self.dim = dim
-        self.num_heads = num_heads
-        self.post_norm = post_norm
-        self.eps = eps
-
-        # layers
-        self.attn = SelfAttention(dim, num_heads, dropout, eps)
-        self.norm1 = nn.LayerNorm(dim, eps=eps)
-        self.ffn = nn.Sequential(nn.Linear(dim, dim * 4), nn.GELU(), nn.Linear(dim * 4, dim), nn.Dropout(dropout))
-        self.norm2 = nn.LayerNorm(dim, eps=eps)
-
-    def forward(self, x, mask):
-        if self.post_norm:
-            x = self.norm1(x + self.attn(x, mask))
-            x = self.norm2(x + self.ffn(x))
-        else:
-            x = x + self.attn(self.norm1(x), mask)
-            x = x + self.ffn(self.norm2(x))
-        return x
-
-
-class XLMRoberta(nn.Module):
-    """
-    XLMRobertaModel with no pooler and no LM head.
-    """
-
-    def __init__(
-        self,
-        vocab_size=250002,
-        max_seq_len=514,
-        type_size=1,
-        pad_id=1,
-        dim=1024,
-        num_heads=16,
-        num_layers=24,
-        post_norm=True,
-        dropout=0.1,
-        eps=1e-5,
-    ):
-        super().__init__()
-        self.vocab_size = vocab_size
-        self.max_seq_len = max_seq_len
-        self.type_size = type_size
-        self.pad_id = pad_id
-        self.dim = dim
-        self.num_heads = num_heads
-        self.num_layers = num_layers
-        self.post_norm = post_norm
-        self.eps = eps
-
-        # embeddings
-        self.token_embedding = nn.Embedding(vocab_size, dim, padding_idx=pad_id)
-        self.type_embedding = nn.Embedding(type_size, dim)
-        self.pos_embedding = nn.Embedding(max_seq_len, dim, padding_idx=pad_id)
-        self.dropout = nn.Dropout(dropout)
-
-        # blocks
-        self.blocks = nn.ModuleList(
-            [AttentionBlock(dim, num_heads, post_norm, dropout, eps) for _ in range(num_layers)]
-        )
-
-        # norm layer
-        self.norm = nn.LayerNorm(dim, eps=eps)
-
-    def forward(self, ids):
-        """
-        ids: [B, L] of torch.LongTensor.
-        """
-        b, s = ids.shape
-        mask = ids.ne(self.pad_id).long()
-
-        # embeddings
-        x = (
-            self.token_embedding(ids)
-            + self.type_embedding(torch.zeros_like(ids))
-            + self.pos_embedding(self.pad_id + torch.cumsum(mask, dim=1) * mask)
-        )
-        if self.post_norm:
-            x = self.norm(x)
-        x = self.dropout(x)
-
-        # blocks
-        mask = torch.where(mask.view(b, 1, 1, s).gt(0), 0.0, torch.finfo(x.dtype).min)
-        for block in self.blocks:
-            x = block(x, mask)
-
-        # output
-        if not self.post_norm:
-            x = self.norm(x)
-        return x
-
-
-def xlm_roberta_large(pretrained=False, return_tokenizer=False, device="cpu", **kwargs):
-    """
-    XLMRobertaLarge adapted from Huggingface.
-    """
-    # params
-    cfg = dict(
-        vocab_size=250002,
-        max_seq_len=514,
-        type_size=1,
-        pad_id=1,
-        dim=1024,
-        num_heads=16,
-        num_layers=24,
-        post_norm=True,
-        dropout=0.1,
-        eps=1e-5,
-    )
-    cfg.update(**kwargs)
-
-    # init model
-    if pretrained:
-        from sora import DOWNLOAD_TO_CACHE
-
-        # init a meta model
-        with torch.device("meta"):
-            model = XLMRoberta(**cfg)
-
-        # load checkpoint
-        model.load_state_dict(
-            torch.load(DOWNLOAD_TO_CACHE("models/xlm_roberta/xlm_roberta_large.pth"), map_location=device), assign=True
-        )
-    else:
-        # init a model on device
-        with torch.device(device):
-            model = XLMRoberta(**cfg)
-
-    # init tokenizer
-    if return_tokenizer:
-        from sora.data import HuggingfaceTokenizer
-
-        tokenizer = HuggingfaceTokenizer(name="xlm-roberta-large", seq_len=model.text_len, clean="whitespace")
-        return model, tokenizer
-    else:
-        return model
-
-
 def pos_interpolate(pos, seq_len):
     if pos.size(1) == seq_len:
         return pos
@@ -237,7 +58,6 @@ class ClipSelfAttention(nn.Module):
         self.attn_dropout = attn_dropout
         self.proj_dropout = proj_dropout
 
-        # layers
         self.to_qkv = nn.Linear(dim, dim * 3)
         self.proj = nn.Linear(dim, dim)
 
@@ -258,7 +78,6 @@ class SwiGLU(nn.Module):
         self.dim = dim
         self.mid_dim = mid_dim
 
-        # layers
         self.fc1 = nn.Linear(dim, mid_dim)
         self.fc2 = nn.Linear(dim, mid_dim)
         self.fc3 = nn.Linear(mid_dim, dim)
@@ -291,7 +110,6 @@ class ClipAttentionBlock(nn.Module):
         self.causal = causal
         self.norm_eps = norm_eps
 
-        # layers
         self.norm1 = LayerNorm(dim, eps=norm_eps)
         self.attn = ClipSelfAttention(dim, num_heads, causal, attn_dropout, proj_dropout)
         self.norm2 = LayerNorm(dim, eps=norm_eps)
@@ -326,7 +144,6 @@ class AttentionPool(nn.Module):
         self.proj_dropout = proj_dropout
         self.norm_eps = norm_eps
 
-        # layers
         gain = 1.0 / math.sqrt(dim)
         self.cls_embedding = nn.Parameter(gain * torch.randn(1, 1, dim))
         self.to_q = nn.Linear(dim, dim)
@@ -346,92 +163,17 @@ class AttentionPool(nn.Module):
         """
         b, c, n, d = x.size(0), x.size(2), self.num_heads, self.head_dim
 
-        # compute query, key, value
         q = self.to_q(self.cls_embedding).view(1, 1, n * d).expand(b, -1, -1)
         k, v = self.to_kv(x).chunk(2, dim=-1)
 
-        # compute attention
         x = flash_attention(q, k, v, num_heads=self.num_heads, compatibility_mode=True)
         x = x.reshape(b, 1, c)
 
-        # output
         x = self.proj(x)
         x = F.dropout(x, self.proj_dropout, self.training)
 
-        # mlp
         x = x + self.mlp(self.norm(x))
         return x[:, 0]
-
-
-class TextTransformer(nn.Module):
-    def __init__(
-        self,
-        vocab_size,
-        text_len,
-        dim,
-        mlp_ratio,
-        out_dim,
-        num_heads,
-        num_layers,
-        causal=False,
-        pool_type="argmax",
-        head_bias=False,
-        activation="quick_gelu",
-        attn_dropout=0.0,
-        proj_dropout=0.0,
-        embedding_dropout=0.0,
-        norm_eps=1e-5,
-    ):
-        assert pool_type in ("first", "last", "argmax")
-        super().__init__()
-        self.vocab_size = vocab_size
-        self.text_len = text_len
-        self.dim = dim
-        self.mlp_ratio = mlp_ratio
-        self.out_dim = out_dim
-        self.num_heads = num_heads
-        self.num_layers = num_layers
-        self.causal = causal
-        self.pool_type = pool_type
-        self.head_bias = head_bias
-        self.norm_eps = norm_eps
-
-        self.token_embedding = nn.Embedding(vocab_size, dim)
-        self.pos_embedding = nn.Parameter(torch.empty(1, text_len, dim))
-        self.dropout = nn.Dropout(embedding_dropout)
-        self.transformer = nn.Sequential(
-            *[
-                ClipAttentionBlock(
-                    dim,
-                    mlp_ratio,
-                    num_heads,
-                    False,
-                    causal,
-                    activation,
-                    attn_dropout,
-                    proj_dropout,
-                    norm_eps,
-                )
-                for _ in range(num_layers)
-            ]
-        )
-        self.norm = LayerNorm(dim, eps=norm_eps)
-        self.head = nn.Linear(dim, out_dim, bias=head_bias)
-
-    def forward(self, ids):
-        x = self.token_embedding(ids)
-        x = x + self.pos_embedding[:, : x.size(1)].to(dtype=x.dtype, device=x.device)
-        x = self.dropout(x)
-        x = self.transformer(x)
-        x = self.norm(x)
-
-        if self.pool_type == "first":
-            x = x[:, 0]
-        elif self.pool_type == "last":
-            x = x[:, -1]
-        else:
-            x = x[torch.arange(x.size(0), device=x.device), ids.argmax(dim=-1)]
-        return self.head(x)
 
 
 class VisionTransformer(nn.Module):
@@ -520,153 +262,6 @@ class VisionTransformer(nn.Module):
             return x
 
 
-class CLIP(nn.Module):
-    def __init__(
-        self,
-        embed_dim=512,
-        image_size=224,
-        patch_size=16,
-        vision_dim=768,
-        vision_mlp_ratio=4,
-        vision_heads=12,
-        vision_layers=12,
-        vision_pool="token",
-        vision_pre_norm=True,
-        vision_post_norm=False,
-        vocab_size=49408,
-        text_len=77,
-        text_dim=512,
-        text_mlp_ratio=4,
-        text_heads=8,
-        text_layers=12,
-        text_causal=True,
-        text_pool="argmax",
-        text_head_bias=False,
-        logit_bias=None,
-        activation="quick_gelu",
-        attn_dropout=0.0,
-        proj_dropout=0.0,
-        embedding_dropout=0.0,
-        norm_eps=1e-5,
-    ):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.image_size = image_size
-        self.patch_size = patch_size
-        self.vision_dim = vision_dim
-        self.vision_mlp_ratio = vision_mlp_ratio
-        self.vision_heads = vision_heads
-        self.vision_layers = vision_layers
-        self.vision_pool = vision_pool
-        self.vision_pre_norm = vision_pre_norm
-        self.vision_post_norm = vision_post_norm
-        self.vocab_size = vocab_size
-        self.text_len = text_len
-        self.text_dim = text_dim
-        self.text_mlp_ratio = text_mlp_ratio
-        self.text_heads = text_heads
-        self.text_layers = text_layers
-        self.text_causal = text_causal
-        self.text_pool = text_pool
-        self.text_head_bias = text_head_bias
-        self.norm_eps = norm_eps
-
-        self.visual = VisionTransformer(
-            image_size=image_size,
-            patch_size=patch_size,
-            dim=vision_dim,
-            mlp_ratio=vision_mlp_ratio,
-            out_dim=embed_dim,
-            num_heads=vision_heads,
-            num_layers=vision_layers,
-            pool_type=vision_pool,
-            pre_norm=vision_pre_norm,
-            post_norm=vision_post_norm,
-            activation=activation,
-            attn_dropout=attn_dropout,
-            proj_dropout=proj_dropout,
-            embedding_dropout=embedding_dropout,
-            norm_eps=norm_eps,
-        )
-        self.textual = TextTransformer(
-            vocab_size=vocab_size,
-            text_len=text_len,
-            dim=text_dim,
-            mlp_ratio=text_mlp_ratio,
-            out_dim=embed_dim,
-            num_heads=text_heads,
-            num_layers=text_layers,
-            causal=text_causal,
-            pool_type=text_pool,
-            head_bias=text_head_bias,
-            activation=activation,
-            attn_dropout=attn_dropout,
-            proj_dropout=proj_dropout,
-            embedding_dropout=embedding_dropout,
-            norm_eps=norm_eps,
-        )
-        self.log_scale = nn.Parameter(math.log(1 / 0.07) * torch.ones([]))
-        if logit_bias is not None:
-            self.logit_bias = nn.Parameter(logit_bias * torch.ones([]))
-
-        self.init_weights()
-
-    def forward(self, imgs, txt_ids):
-        xi = self.visual(imgs)
-        xt = self.textual(txt_ids)
-        return xi, xt
-
-    def init_weights(self):
-        nn.init.normal_(self.textual.token_embedding.weight, std=0.02)
-        nn.init.normal_(self.visual.patch_embedding.weight, std=0.1)
-
-        for modality in ["visual", "textual"]:
-            dim = self.vision_dim if modality == "visual" else self.text_dim
-            transformer = getattr(self, modality).transformer
-            proj_gain = (1.0 / math.sqrt(dim)) * (1.0 / math.sqrt(2 * len(transformer)))
-            attn_gain = 1.0 / math.sqrt(dim)
-            mlp_gain = 1.0 / math.sqrt(2.0 * dim)
-            for block in transformer:
-                nn.init.normal_(block.attn.to_qkv.weight, std=attn_gain)
-                nn.init.normal_(block.attn.proj.weight, std=proj_gain)
-                nn.init.normal_(block.mlp[0].weight, std=mlp_gain)
-                nn.init.normal_(block.mlp[2].weight, std=proj_gain)
-
-    def param_groups(self):
-        groups = [
-            {
-                "params": [p for n, p in self.named_parameters() if "norm" in n or n.endswith("bias")],
-                "weight_decay": 0.0,
-            },
-            {"params": [p for n, p in self.named_parameters() if not ("norm" in n or n.endswith("bias"))]},
-        ]
-        return groups
-
-
-class XLMRobertaWithHead(XLMRoberta):
-    def __init__(self, **kwargs):
-        self.out_dim = kwargs.pop("out_dim")
-        super().__init__(**kwargs)
-
-        # head
-        mid_dim = (self.dim + self.out_dim) // 2
-        self.head = nn.Sequential(
-            nn.Linear(self.dim, mid_dim, bias=False), nn.GELU(), nn.Linear(mid_dim, self.out_dim, bias=False)
-        )
-
-    def forward(self, ids):
-        # xlm-roberta
-        x = super().forward(ids)
-
-        # average pooling
-        mask = ids.ne(self.pad_id).unsqueeze(-1).to(x)
-        x = (x * mask).sum(dim=1) / mask.sum(dim=1)
-
-        # head
-        x = self.head(x)
-        return x
-
-
 class XLMRobertaCLIP(nn.Module):
     def __init__(
         self,
@@ -716,7 +311,6 @@ class XLMRobertaCLIP(nn.Module):
         self.text_post_norm = text_post_norm
         self.norm_eps = norm_eps
 
-        # models
         self.visual = VisionTransformer(
             image_size=image_size,
             patch_size=patch_size,
@@ -737,71 +331,25 @@ class XLMRobertaCLIP(nn.Module):
         self.textual = None
         self.log_scale = nn.Parameter(math.log(1 / 0.07) * torch.ones([]))
 
-    def forward(self, imgs, txt_ids):
-        """
-        imgs:       [B, 3, H, W] of torch.float32.
-        - mean:     [0.48145466, 0.4578275, 0.40821073]
-        - std:      [0.26862954, 0.26130258, 0.27577711]
-        txt_ids:    [B, L] of torch.long.
-                    Encoded by data.CLIPTokenizer.
-        """
-        xi = self.visual(imgs)
-        xt = self.textual(txt_ids)
-        return xi, xt
-
-    def param_groups(self):
-        groups = [
-            {
-                "params": [p for n, p in self.named_parameters() if "norm" in n or n.endswith("bias")],
-                "weight_decay": 0.0,
-            },
-            {"params": [p for n, p in self.named_parameters() if not ("norm" in n or n.endswith("bias"))]},
-        ]
-        return groups
-
 
 def _clip(
-    pretrained=False,
-    pretrained_name=None,
-    model_cls=CLIP,
+    pretrained_name,
+    model_cls,
     return_transforms=False,
-    return_tokenizer=False,
-    tokenizer_padding="eos",
-    dtype=torch.float32,
     device="cpu",
     **kwargs,
 ):
-    # init model
-    if pretrained and pretrained_name:
-        from sora import DOWNLOAD_TO_CACHE
-
-        # init a meta model
-        with torch.device("meta"):
-            model = model_cls(**kwargs)
-
-        # checkpoint path
-        checkpoint = f"models/clip/{pretrained_name}.pth"
-
-        # load
-        model.load_state_dict(torch.load(DOWNLOAD_TO_CACHE(checkpoint), map_location=device), assign=True, strict=False)
-    else:
-        # init a model on device
-        with torch.device(device):
-            model = model_cls(**kwargs)
-
-    # set device
+    with torch.device(device):
+        model = model_cls(**kwargs)
     output = (model,)
 
-    # init transforms
     if return_transforms:
-        # mean and std
         if "siglip" in pretrained_name.lower():
             mean, std = [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]
         else:
             mean = [0.48145466, 0.4578275, 0.40821073]
             std = [0.26862954, 0.26130258, 0.27577711]
 
-        # transforms
         transforms = T.Compose(
             [
                 T.Resize((model.image_size, model.image_size), interpolation=T.InterpolationMode.BICUBIC),
@@ -810,30 +358,10 @@ def _clip(
             ]
         )
         output += (transforms,)
-
-    # init tokenizer
-    if return_tokenizer:
-        from sora import data
-
-        if "siglip" in pretrained_name.lower():
-            tokenizer = data.HuggingfaceTokenizer(
-                name=f"timm/{pretrained_name}", seq_len=model.text_len, clean="canonicalize"
-            )
-        elif "xlm" in pretrained_name.lower():
-            tokenizer = data.HuggingfaceTokenizer(
-                name="xlm-roberta-large", seq_len=model.max_text_len - 2, clean="whitespace"
-            )
-        elif "mba" in pretrained_name.lower():
-            tokenizer = data.HuggingfaceTokenizer(
-                name="facebook/xlm-roberta-xl", seq_len=model.max_text_len - 2, clean="whitespace"
-            )
-        else:
-            tokenizer = data.CLIPTokenizer(seq_len=model.text_len, padding=tokenizer_padding)
-        output += (tokenizer,)
     return output[0] if len(output) == 1 else output
 
 
-def clip_xlm_roberta_vit_h_14(pretrained=False, pretrained_name="open-clip-xlm-roberta-large-vit-huge-14", **kwargs):
+def clip_xlm_roberta_vit_h_14(pretrained_name="open-clip-xlm-roberta-large-vit-huge-14", **kwargs):
     cfg = dict(
         embed_dim=1024,
         image_size=224,
@@ -858,25 +386,20 @@ def clip_xlm_roberta_vit_h_14(pretrained=False, pretrained_name="open-clip-xlm-r
         embedding_dropout=0.0,
     )
     cfg.update(**kwargs)
-    return _clip(pretrained, pretrained_name, XLMRobertaCLIP, **cfg)
+    return _clip(pretrained_name, XLMRobertaCLIP, **cfg)
 
 
 class WanImageEncoder(torch.nn.Module):
     def __init__(self, image_encoder_pretrained_path: str = None):
         super().__init__()
-        # init model
-        self.model, self.transforms = clip_xlm_roberta_vit_h_14(
-            pretrained=False, return_transforms=True, return_tokenizer=False, dtype=torch.float32, device="cpu"
-        )
+        self.model, self.transforms = clip_xlm_roberta_vit_h_14(return_transforms=True, device="cpu")
         self.image_encoder_pretrained_path = image_encoder_pretrained_path
 
     def encode_image(self, videos):
-        # preprocess
         size = (self.model.image_size,) * 2
         videos = torch.cat([F.interpolate(u, size=size, mode="bicubic", align_corners=False) for u in videos])
         videos = self.transforms.transforms[-1](videos.mul_(0.5).add_(0.5))
 
-        # forward
         dtype = next(iter(self.model.visual.parameters())).dtype
         videos = videos.to(dtype)
         out = self.model.visual(videos, use_31_block=True)
