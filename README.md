@@ -107,6 +107,20 @@ Then install OpenWAM:
 pip install -e .
 ```
 
+<details>
+<summary><b>Cosmos-Predict2.5 Extras (Optional)</b> — needed only for experiments with the <code>cosmos_predict25</code> video backbone</summary>
+
+With your environment activated:
+
+```bash
+git submodule update --init third_party/cosmos-predict2.5
+bash scripts/install_cosmos_predict25.sh
+```
+
+The script installs the upstream cosmos packages into the active environment and compiles `transformer-engine` (CUDA toolkit with `nvcc` required), then automatically restores the package versions OpenWAM pins.
+
+</details>
+
 ## Assets Preparation
 
 ### 1. Download the Video Backbone
@@ -233,7 +247,7 @@ Available groups: `wan22_ti2v_5b` (Wan2.2-TI2V-5B, default), `wan21_vace_1_3b` (
 
 > **Wan:** `video_backbone.name` only drives registry dispatch — the loaded weights are decided entirely by `video_backbone.model_path`. Override **both** together; the builder logs a WARNING (not an error) on a mismatched `(name, model_path)`.
 >
-> **Cosmos-Predict2.5:** needs extra dependencies beyond `pip install -e .` — with your training environment activated, run `git submodule update --init third_party/cosmos-predict2.5` once, then `bash scripts/install_cosmos_predict25.sh` (installs the upstream cosmos packages + transformer-engine into the active env, and automatically restores the repo's own package pins that cosmos would otherwise downgrade). `name` is validated (only `cosmos_predict25_2b` today; others raise), and the weights are located by `model_path` (bundle root) **plus** `model_variant` (e.g. `base/post-trained`) — so for cosmos both `model_path` and `model_variant` are load-bearing, not `name`. The action-side `text_dim` auto-derives from the backbone (1024), so no manual override is needed.
+> **Cosmos-Predict2.5:** requires the optional cosmos extras — see [Installation](#installation). `name` is validated (only `cosmos_predict25_2b` today; others raise), and the weights are located by `model_path` (bundle root) **plus** `model_variant` (e.g. `base/post-trained`) — so for cosmos both `model_path` and `model_variant` are load-bearing, not `name`. The action-side `text_dim` auto-derives from the backbone (1024), so no manual override is needed.
 >
 > **Cosmos3-Edge:** `name` is validated (only `cosmos3_edge`); weights load from the diffusers-style bundle at `model_path` (`transformer/` + `vae/` + `text_tokenizer/`, modeling code vendored under `cosmos3/_vendor/`). No external text encoder — the bundled tokenizer + the frozen und text stream encode prompts inline, and `text_dim` auto-derives (2048), so `joint_cross_attn` needs no action_backbone overrides. Supported variants: `joint_cross_attn`, `joint_self_attn`, `idm`, and `single_system`/{`vanilla`,`moe`} (`tri_system` is rejected — its driver does not widen the joint mask for the und prefix K/V). Launch with `bash scripts/train.sh model=dual_system model/video_backbone=cosmos3_edge`.
 
