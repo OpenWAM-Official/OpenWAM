@@ -216,6 +216,29 @@ accordingly:
 python scripts/download_assets/download_visual_encoder.py
 ```
 
+### 5. Download Released OpenWAM Checkpoints (Optional)
+
+Unlike steps 1-4, which fetch the components for training your own model,
+this downloader fetches a **finished OpenWAM checkpoint** from our public
+[collections](https://huggingface.co/OpenWAM) — the OpenWAM-Alpha releases or
+the OpenWAM-Study ablations. 
+
+If you just want to test or finetune from a
+released checkpoint, you can skip the component downloads above entirely:
+every checkpoint directory is self-contained and deploys as-is, or serves as
+a finetuning start by setting `training.finetune_ckpt_path` in
+`configs/train.yaml` to the downloaded path (finetuning still needs the
+benchmark data from step 2):
+
+```bash
+python scripts/download_assets/download_openwam_checkpoints.py
+```
+
+Checkpoints are saved under `assets/openwam_ckpt/openwam_alpha/` or
+`assets/openwam_ckpt/openwam_study/<type>/` (or a directory you choose); no
+config is rewritten. Deploy one directly with
+`bash scripts/deploy.sh <download_dir>`.
+
 ## Quick Start
 
 ### 1. Training
