@@ -22,6 +22,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Put PyTorch's bundled NVIDIA libraries ahead of any system copies. The Cosmos
+# video backbone's Transformer-Engine dlopen's libcudnn_graph.so.9 by soname; an
+# older system cuDNN (missing newer symbols) otherwise shadows the wheel's and
+# aborts the server. Harmless for the other backbones — these are the same libs
+# PyTorch already loads.
+_nvlibs="$(python - <<'PY' 2>/dev/null || true
+import importlib.util, os
+dirs = []
+for m in ("cudnn", "cublas", "cusolver", "cusparse", "cufft", "curand",
+          "cuda_runtime", "cuda_nvrtc", "nccl", "nvjitlink"):
+    spec = importlib.util.find_spec(f"nvidia.{m}")
+    if spec and spec.submodule_search_locations:
+        d = os.path.join(list(spec.submodule_search_locations)[0], "lib")
+        if os.path.isdir(d):
+            dirs.append(d)
+print(os.pathsep.join(dirs))
+PY
+)"
+if [ -n "${_nvlibs}" ]; then
+    export LD_LIBRARY_PATH="${_nvlibs}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
 NUM_GPUS="${NUM_GPUS:-1}"
 
 # Backward-compat: if first arg is a path (not a flag), treat it as --ckpt-dir

@@ -106,12 +106,44 @@ assert _COSMOS25_2B_GEOMETRY["num_layers"] == _COSMOS25_2B_NET_KWARGS["num_block
 )
 
 
+_TE_EXTRA_STATE_PATCHED = False
+
+
+def _tolerate_empty_te_extra_state() -> None:
+    """Let checkpoints saved under a newer Transformer-Engine load under TE 2.2.0.
+
+    TE 2.7.x stores an empty ``(0,)`` byte tensor as the (non-FP8) ``_extra_state``
+    of each attention / RMSNorm module. TE 2.2.0 — the version cosmos_predict2
+    pins — hands that blob straight to ``pickle.loads`` in ``set_extra_state`` and
+    aborts with ``EOFError``. The blob holds no FP8 scaling data (these
+    checkpoints are bf16), so skipping an empty one is loss-free. Idempotent.
+    """
+    global _TE_EXTRA_STATE_PATCHED
+    if _TE_EXTRA_STATE_PATCHED:
+        return
+    try:
+        import torch
+        from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+    except Exception:  # TE absent or restructured — nothing to patch.
+        return
+    _orig = TransformerEngineBaseModule.set_extra_state
+
+    def set_extra_state(self, state):
+        if isinstance(state, torch.Tensor) and state.numel() == 0:
+            return
+        return _orig(self, state)
+
+    TransformerEngineBaseModule.set_extra_state = set_extra_state
+    _TE_EXTRA_STATE_PATCHED = True
+
+
 def import_cosmos_predict2():
     """Import the upstream ``cosmos_predict2`` package, with a clear error message."""
     try:
         import cosmos_predict2  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - exercised only when extra is missing
         raise ImportError(_COSMOS_INSTALL_HINT) from exc
+    _tolerate_empty_te_extra_state()
     return cosmos_predict2
 
 
