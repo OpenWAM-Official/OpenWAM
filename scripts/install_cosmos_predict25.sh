@@ -128,10 +128,11 @@ for p in "${PROTECTED_PKGS[@]}"; do PRE_VER[$p]="$(pkg_ver "$p")"; done
 #    it spawns nvcc+g++ against the cuDNN headers we located above).
 "${PYBIN}" -m pip install pybind11
 
-# 5) transformer-engine[pytorch]==2.7.0 — pinned to the version cosmos-oss's
-#    cu128_torch27 extra resolves to. Set NVTE_FRAMEWORK so TE skips JAX. The
-#    compile-time CPATH lets g++ see cudnn.h; LD path lets the resulting .so
-#    find libcudnn at runtime.
+# 5) transformer-engine[pytorch]==2.7.0 — the TE build OpenWAM trains and
+#    deploys the Cosmos DiT against (the DiT imports transformer_engine at
+#    runtime). Coexists with the restored transformers stack. Set NVTE_FRAMEWORK
+#    so TE skips JAX. The compile-time CPATH lets g++ see cudnn.h; LD path lets
+#    the resulting .so find libcudnn at runtime.
 CUDA_HOME="${CUDA_HOME}" \
 PATH="${CUDA_HOME}/bin:$(dirname "${PYBIN}"):${PATH}" \
 LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDNN_LIB}:${LD_LIBRARY_PATH:-}" \
