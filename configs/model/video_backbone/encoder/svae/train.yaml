@@ -12,7 +12,7 @@ svae:
 
 train:
   features_dir: ??? # REQUIRED — dir from collect_svae_features.py (features_*.pt + stats.pt)
-  output_dir: /path/to/workspace/openwam/svae
+  output_dir: outputs/openwam_svae
 
   batch_size: 8     # clips per step
   num_epochs: 50

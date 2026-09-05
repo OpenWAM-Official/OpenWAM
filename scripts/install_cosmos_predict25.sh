@@ -21,14 +21,28 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COSMOS_ROOT="${REPO_ROOT}/third_party/cosmos-predict2.5"
 
-# Interpreter resolution: explicit $PYBIN > conda env named `openwam`
-# (probed via `conda env list`, then common conda roots — no activation
-# needed) > system python3.
+# Interpreter resolution: explicit $PYBIN > the environment ACTIVATED in the
+# calling shell (venv $VIRTUAL_ENV, then non-base conda $CONDA_PREFIX) > conda
+# env named `openwam` (probed via `conda env list`, then common conda roots —
+# no activation needed) > system python3. In short: activate your env and run
+# the script — it installs into that env.
 resolve_pybin() {
     if [ -n "${PYBIN:-}" ]; then
         echo "${PYBIN}"
         return
     fi
+    if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "${VIRTUAL_ENV}/bin/python" ]; then
+        echo "${VIRTUAL_ENV}/bin/python"
+        return
+    fi
+    case "${CONDA_PREFIX:-}" in
+        */envs/*)  # an explicitly activated conda env (base is skipped on purpose)
+            if [ -x "${CONDA_PREFIX}/bin/python" ]; then
+                echo "${CONDA_PREFIX}/bin/python"
+                return
+            fi
+            ;;
+    esac
     if command -v conda >/dev/null 2>&1; then
         local env_path
         env_path="$(conda env list 2>/dev/null | awk '$1 == "openwam" {print $NF}')"
@@ -67,9 +81,10 @@ if [ ! -x "${CUDA_HOME}/bin/nvcc" ]; then
 fi
 
 # Locate cuDNN headers bundled inside torch's nvidia-cudnn-cu12 wheel.
-CUDNN_INC=$("${PYBIN}" -c "import importlib.util, os; spec=importlib.util.find_spec('nvidia.cudnn'); print(os.path.join(os.path.dirname(spec.origin), 'include'))")
-if [ ! -f "${CUDNN_INC}/cudnn.h" ]; then
-    echo "error: cudnn.h not found at ${CUDNN_INC}. Install nvidia-cudnn-cu12 (torch dep) or system cuDNN-dev." >&2
+CUDNN_INC=$("${PYBIN}" -c "import importlib.util, os; spec=importlib.util.find_spec('nvidia.cudnn'); print(os.path.join(os.path.dirname(spec.origin), 'include') if spec and spec.origin else '')")
+if [ -z "${CUDNN_INC}" ] || [ ! -f "${CUDNN_INC}/cudnn.h" ]; then
+    echo "error: cuDNN headers not found via ${PYBIN} (nvidia-cudnn-cu12 missing)." >&2
+    echo "       This python likely isn't the env with torch installed — activate it or set PYBIN=/path/to/env/bin/python." >&2
     exit 1
 fi
 CUDNN_LIB=$("${PYBIN}" -c "import importlib.util, os; spec=importlib.util.find_spec('nvidia.cudnn'); print(os.path.join(os.path.dirname(spec.origin), 'lib'))")
@@ -87,6 +102,15 @@ echo "[install_cosmos_predict25] submodule: ${COSMOS_ROOT}"
 echo "[install_cosmos_predict25] CUDA:      ${CUDA_HOME}"
 echo "[install_cosmos_predict25] cuDNN:     ${CUDNN_INC}"
 echo "[install_cosmos_predict25] SM list:   ${TORCH_CUDA_ARCH_LIST}"
+
+# Packages the host repo pins that cosmos-oss would otherwise downgrade (its
+# transformers==4.51.3 pin predates Qwen3-VL and would break the tri_system
+# VLM backbone). Snapshot the versions now, restore them after the installs;
+# runtime coexistence with cosmos_predict2 is verified by the smoke import.
+PROTECTED_PKGS=(transformers tokenizers huggingface_hub diffusers)
+pkg_ver() { { "${PYBIN}" -m pip show "$1" 2>/dev/null || true; } | awk '/^Version:/{print $2}'; }
+declare -A PRE_VER
+for p in "${PROTECTED_PKGS[@]}"; do PRE_VER[$p]="$(pkg_ver "$p")"; done
 
 # 1) cosmos-cuda is a sentinel package that cosmos-oss.__init__ imports to
 #    confirm a CUDA extra was installed — it carries no code, just version.
@@ -118,14 +142,43 @@ NVTE_FRAMEWORK=pytorch \
 TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
     "${PYBIN}" -m pip install --no-build-isolation 'transformer-engine[pytorch]==2.7.0'
 
-# 6) Smoke import: this is what build_cosmos_predict25_pipeline will need at runtime.
+# 6) Restore the host repo's package pins that cosmos-oss moved. After this,
+#    `pip check` reports cosmos-oss's stricter transformers pin as a metadata
+#    conflict — expected and harmless; the smoke import below proves the
+#    restored stack and cosmos_predict2 coexist at runtime.
+RESTORE=()
+for p in "${PROTECTED_PKGS[@]}"; do
+    pre="${PRE_VER[$p]}"
+    [ -n "${pre}" ] || continue
+    post="$(pkg_ver "$p")"
+    if [ "${post}" != "${pre}" ]; then
+        RESTORE+=("${p}==${pre}")
+    fi
+done
+if [ "${#RESTORE[@]}" -gt 0 ]; then
+    echo "[install_cosmos_predict25] restoring host-repo pins moved by cosmos deps: ${RESTORE[*]}"
+    "${PYBIN}" -m pip install "${RESTORE[@]}"
+else
+    echo "[install_cosmos_predict25] no protected packages were moved; nothing to restore."
+fi
+
+# 7) Smoke import: what build_cosmos_predict25_pipeline needs at runtime, plus
+#    proof that the restored transformers stack still serves the VLM backbone.
 "${PYBIN}" - <<'PY'
 import cosmos_oss
 import cosmos_predict2
 from cosmos_predict2._src.predict2.networks.minimal_v4_dit import MiniTrainDIT, Block
 from transformer_engine.pytorch import RMSNorm  # noqa: F401
+import transformers
 print(f"OK cosmos_predict2 v{cosmos_predict2.__about__.__version__} from {cosmos_predict2.__file__}")
 print(f"OK MiniTrainDIT, Block from {MiniTrainDIT.__module__}")
+print(f"OK transformers {transformers.__version__} coexists")
+try:
+    from transformers import Qwen3VLForConditionalGeneration  # noqa: F401
+    print("OK Qwen3-VL classes available (tri_system VLM backbone unaffected)")
+except ImportError:
+    print("WARNING: this transformers lacks Qwen3-VL; if you use tri_system, "
+          "restore the host pin with `pip install -e .` from the repo root.")
 PY
 
 echo "[install_cosmos_predict25] done."

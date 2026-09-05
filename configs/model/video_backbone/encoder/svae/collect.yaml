@@ -8,4 +8,4 @@ defaults:
   - _self_
 
 svae_collect:
-  output_dir: /path/to/workspace/openwam/svae  # script writes <encoder_name>_<timestamp>/ with feature shards + stats.pt
+  output_dir: outputs/openwam_svae  # script writes <encoder_name>_<timestamp>/ with feature shards + stats.pt
