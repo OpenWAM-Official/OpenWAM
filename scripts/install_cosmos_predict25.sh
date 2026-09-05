@@ -128,12 +128,10 @@ for p in "${PROTECTED_PKGS[@]}"; do PRE_VER[$p]="$(pkg_ver "$p")"; done
 #    it spawns nvcc+g++ against the cuDNN headers we located above).
 "${PYBIN}" -m pip install pybind11
 
-# 5) transformer-engine[pytorch]==2.2.0 — the version cosmos-oss 1.5.0's
-#    cu128-torch27 extra pins (its cosmos-cuda kernels are built against the
-#    TE 2.2.0 ABI). A newer TE imports fine but corrupts memory at DiT-forward
-#    time (illegal memory access), so this pin is load-bearing, not cosmetic.
-#    Set NVTE_FRAMEWORK so TE skips JAX. The compile-time CPATH lets g++ see
-#    cudnn.h; LD path lets the resulting .so find libcudnn at runtime.
+# 5) transformer-engine[pytorch]==2.7.0 — pinned to the version cosmos-oss's
+#    cu128_torch27 extra resolves to. Set NVTE_FRAMEWORK so TE skips JAX. The
+#    compile-time CPATH lets g++ see cudnn.h; LD path lets the resulting .so
+#    find libcudnn at runtime.
 CUDA_HOME="${CUDA_HOME}" \
 PATH="${CUDA_HOME}/bin:$(dirname "${PYBIN}"):${PATH}" \
 LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDNN_LIB}:${LD_LIBRARY_PATH:-}" \
@@ -142,7 +140,7 @@ CPLUS_INCLUDE_PATH="${CUDNN_INC}:${CPLUS_INCLUDE_PATH:-}" \
 C_INCLUDE_PATH="${CUDNN_INC}:${C_INCLUDE_PATH:-}" \
 NVTE_FRAMEWORK=pytorch \
 TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
-    "${PYBIN}" -m pip install --no-build-isolation 'transformer-engine[pytorch]==2.2.0'
+    "${PYBIN}" -m pip install --no-build-isolation 'transformer-engine[pytorch]==2.7.0'
 
 # 6) Restore the host repo's package pins that cosmos-oss moved. After this,
 #    `pip check` reports cosmos-oss's stricter transformers pin as a metadata
