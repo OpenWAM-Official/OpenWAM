@@ -169,9 +169,7 @@ def main():
         parser.error(f"dataset dir does not exist: {ds_dir}")
 
     if args.dry_run:
-        stats, _n_state, _n_action = compute_dataset_stats(
-            ds_dir, rot6d_identity=not args.no_rot6d_identity
-        )
+        stats, _n_state, _n_action = compute_dataset_stats(ds_dir, rot6d_identity=not args.no_rot6d_identity)
         _print_stats_table(stats)
         logger.info("--dry-run, no file written")
         return

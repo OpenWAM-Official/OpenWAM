@@ -146,9 +146,7 @@ def test_droid_stats_aggregate_canonical_openness_not_raw_closedness(tmp_path):
             **{column: [""] * 4 for column in OxeDroidDataset.PROMPT_FALLBACK_COLS},
         }
     ).to_parquet(root / "data" / "chunk-000" / "file-000.parquet")
-    pd.DataFrame({"task_index": [0]}, index=pd.Index(["task"], name="task")).to_parquet(
-        root / "meta" / "tasks.parquet"
-    )
+    pd.DataFrame({"task_index": [0]}, index=pd.Index(["task"], name="task")).to_parquet(root / "meta" / "tasks.parquet")
     _write_manifest(root, [4])
     _write_exclusions(root, canonical=[])
 

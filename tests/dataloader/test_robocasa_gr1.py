@@ -363,9 +363,7 @@ def test_stats_split_hand_commands_from_joint_angle_state(tmp_path: Path):
     _write_bucket(tmp_path)
     dataset = _dataset(tmp_path)
     action, state = next(iter(_iter_bucket_arrays(dataset)))
-    mode, dim, action_stats, state_stats, action_rows, state_rows = _compute_global_stats(
-        dataset, reservoir_cap=10_000
-    )
+    mode, dim, action_stats, state_stats, action_rows, state_rows = _compute_global_stats(dataset, reservoir_cap=10_000)
 
     pooled = np.concatenate([action, state], axis=0)
     assert mode == "eef"

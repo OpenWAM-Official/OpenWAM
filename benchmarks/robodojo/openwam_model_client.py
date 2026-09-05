@@ -66,9 +66,7 @@ def _validate_pose(value: Any, name: str) -> np.ndarray:
     pose = _finite_vector(value, (7,), name)
     norm = float(np.linalg.norm(pose[3:7]))
     if not np.isclose(norm, 1.0, rtol=0.0, atol=_QUATERNION_ATOL):
-        raise ValueError(
-            f"{name} must contain a unit quaternion in wxyz order; norm is {norm:.8g}"
-        )
+        raise ValueError(f"{name} must contain a unit quaternion in wxyz order; norm is {norm:.8g}")
     pose[3:7] /= norm
     return pose
 
@@ -108,25 +106,18 @@ def _jpeg_bytes(value: Any, camera_name: str) -> bytes:
     elif isinstance(value, np.ndarray) and value.dtype == np.uint8 and value.ndim == 1:
         encoded = value.tobytes()
     else:
-        raise ValueError(
-            f"vision/{camera_name}/color encoded input must be bytes or "
-            "one-dimensional uint8"
-        )
+        raise ValueError(f"vision/{camera_name}/color encoded input must be bytes or one-dimensional uint8")
     if not encoded:
         raise ValueError(f"vision/{camera_name}/color encoded JPEG must not be empty")
     try:
         with Image.open(io.BytesIO(encoded)) as image:
             if image.format != "JPEG":
-                raise ValueError(
-                    f"vision/{camera_name}/color encoded input must be JPEG"
-                )
+                raise ValueError(f"vision/{camera_name}/color encoded input must be JPEG")
             image.verify()
     except ValueError:
         raise
     except Exception as error:
-        raise ValueError(
-            f"vision/{camera_name}/color could not be decoded as JPEG"
-        ) from error
+        raise ValueError(f"vision/{camera_name}/color could not be decoded as JPEG") from error
     return encoded
 
 
@@ -135,10 +126,7 @@ def _encode_camera(value: Any, camera_name: str) -> tuple[str, list[int]]:
         if value.dtype != np.uint8:
             raise ValueError(f"vision/{camera_name}/color RGB array must use uint8")
         if value.ndim != 3 or value.shape[2] != 3 or 0 in value.shape:
-            raise ValueError(
-                f"vision/{camera_name}/color RGB array must have shape (H, W, 3), "
-                f"got {value.shape}"
-            )
+            raise ValueError(f"vision/{camera_name}/color RGB array must have shape (H, W, 3), got {value.shape}")
         return encode_numpy_b64(value), list(value.shape)
     encoded = _jpeg_bytes(value, camera_name)
     return base64.b64encode(encoded).decode("ascii"), [len(encoded)]
@@ -150,37 +138,25 @@ def _validate_robot_dimensions(robot_action_dim_info: Any) -> None:
     arm_dims = robot_action_dim_info.get("arm_dim")
     ee_dims = robot_action_dim_info.get("ee_dim")
     if list(arm_dims or []) != _EXPECTED_ARM_DIMS:
-        raise ValueError(
-            "RoboDojo OpenWAM evaluation requires arm_dim [6, 6], "
-            f"got {arm_dims!r}"
-        )
+        raise ValueError(f"RoboDojo OpenWAM evaluation requires arm_dim [6, 6], got {arm_dims!r}")
     if list(ee_dims or []) != _EXPECTED_EE_DIMS:
-        raise ValueError(
-            "RoboDojo OpenWAM evaluation requires ee_dim [1, 1], "
-            f"got {ee_dims!r}"
-        )
+        raise ValueError(f"RoboDojo OpenWAM evaluation requires ee_dim [1, 1], got {ee_dims!r}")
 
 
 def _validate_live_target_robots(task_env: Any) -> None:
     try:
         robots = task_env.robot_manager.robot_list
     except AttributeError as error:
-        raise ValueError(
-            "live RoboDojo EvalEnv must expose robot_manager.robot_list"
-        ) from error
+        raise ValueError("live RoboDojo EvalEnv must expose robot_manager.robot_list") from error
     targets = [robot for robot in robots if getattr(robot, "type", None) == "target"]
     valid = (
         len(targets) == 2
         and all(getattr(robot, "robot_type", None) == "arm" for robot in targets)
         and all(getattr(robot, "robot_name", None) == "x5" for robot in targets)
-        and {getattr(robot, "arm_name", None) for robot in targets}
-        == {"left_arm", "right_arm"}
+        and {getattr(robot, "arm_name", None) for robot in targets} == {"left_arm", "right_arm"}
     )
     if not valid:
-        raise ValueError(
-            "RoboDojo OpenWAM evaluation requires exactly two target X5 arms "
-            "named left_arm and right_arm"
-        )
+        raise ValueError("RoboDojo OpenWAM evaluation requires exactly two target X5 arms named left_arm and right_arm")
 
 
 class OpenWAMRoboDojoModelClient:
@@ -200,20 +176,14 @@ class OpenWAMRoboDojoModelClient:
         frame_provider: Callable[[], Mapping[str, Any]] | None = None,
         debug: bool = False,
     ):
-        if (
-            isinstance(num_envs, bool)
-            or not isinstance(num_envs, (int, np.integer))
-            or int(num_envs) != 1
-        ):
+        if isinstance(num_envs, bool) or not isinstance(num_envs, (int, np.integer)) or int(num_envs) != 1:
             raise ValueError(
                 "OpenWAM's RoboDojo adapter supports exactly one environment "
                 "and requires integer num_envs == 1, "
                 f"got {num_envs!r}"
             )
         if env_config != ROBODOJO_EMBODIMENT:
-            raise ValueError(
-                f"OpenWAM's RoboDojo adapter supports only arx_x5, got {env_config!r}"
-            )
+            raise ValueError(f"OpenWAM's RoboDojo adapter supports only arx_x5, got {env_config!r}")
         if robot_action_dim_info is None and task_env is not None:
             robot_action_dim_info = getattr(task_env, "robot_action_dim_info", None)
         _validate_robot_dimensions(robot_action_dim_info)
@@ -224,15 +194,11 @@ class OpenWAMRoboDojoModelClient:
                 or not isinstance(task_env.num_envs, (int, np.integer))
                 or int(task_env.num_envs) != 1
             ):
-                raise ValueError(
-                    "live RoboDojo EvalEnv must contain integer num_envs == 1, "
-                    f"got {task_env.num_envs!r}"
-                )
+                raise ValueError(f"live RoboDojo EvalEnv must contain integer num_envs == 1, got {task_env.num_envs!r}")
         if frame_provider is None:
             if task_env is None:
                 raise ValueError(
-                    "task_env is required for live calibration; frame_provider is "
-                    "reserved for fake/debug runs"
+                    "task_env is required for live calibration; frame_provider is reserved for fake/debug runs"
                 )
             _validate_live_target_robots(task_env)
 
@@ -277,10 +243,7 @@ class OpenWAMRoboDojoModelClient:
         try:
             pong = self._transport.ping()
             if not isinstance(pong, Mapping) or pong.get("type") != "pong":
-                raise ConnectionError(
-                    "OpenWAM liveness probe expected {'type': 'pong'}, "
-                    f"got {pong!r}"
-                )
+                raise ConnectionError(f"OpenWAM liveness probe expected {{'type': 'pong'}}, got {pong!r}")
         except BaseException:
             self._transport.close()
             self._closed = True
@@ -295,9 +258,7 @@ class OpenWAMRoboDojoModelClient:
     def _validated_observation(obs: Any) -> dict[str, Any]:
         if isinstance(obs, list):
             if len(obs) != 1:
-                raise ValueError(
-                    "single-env RoboDojo observation list must contain exactly one item"
-                )
+                raise ValueError("single-env RoboDojo observation list must contain exactly one item")
             obs = obs[0]
         if not isinstance(obs, Mapping):
             raise TypeError("RoboDojo observation must be a mapping or one-item list")
@@ -312,12 +273,8 @@ class OpenWAMRoboDojoModelClient:
             if not isinstance(camera, Mapping):
                 raise KeyError(f"missing required camera vision/{camera_name}")
             if "color" not in camera:
-                raise KeyError(
-                    f"missing required camera field vision/{camera_name}/color"
-                )
-            images[payload_name], camera_shapes[camera_name] = _encode_camera(
-                camera["color"], camera_name
-            )
+                raise KeyError(f"missing required camera field vision/{camera_name}/color")
+            images[payload_name], camera_shapes[camera_name] = _encode_camera(camera["color"], camera_name)
 
         instruction = _decode_instruction(obs.get("instruction"))
         state = obs.get("state")
@@ -325,34 +282,21 @@ class OpenWAMRoboDojoModelClient:
             raise ValueError("RoboDojo observation state must be a mapping")
         missing = [field for field in _STATE_FIELDS if field not in state]
         if missing:
-            raise KeyError(
-                "RoboDojo observation state is missing required field(s): "
-                + ", ".join(missing)
-            )
+            raise KeyError("RoboDojo observation state is missing required field(s): " + ", ".join(missing))
         env_idx = obs.get("env_idx")
         if isinstance(env_idx, bool) or not isinstance(env_idx, (int, np.integer)):
             raise ValueError(f"env_idx must be integer 0, got {env_idx!r}")
         if int(env_idx) != 0:
-            raise ValueError(
-                f"single-env RoboDojo observation requires env_idx == 0, got {env_idx!r}"
-            )
+            raise ValueError(f"single-env RoboDojo observation requires env_idx == 0, got {env_idx!r}")
 
         return {
             "images": images,
             "camera_shapes": camera_shapes,
             "instruction": instruction,
-            "left_ee_pose": _validate_pose(
-                state["left_ee_pose"], "left_ee_pose"
-            ),
-            "left_ee_joint_state": _validate_gripper(
-                state["left_ee_joint_state"], "left_ee_joint_state"
-            ),
-            "right_ee_pose": _validate_pose(
-                state["right_ee_pose"], "right_ee_pose"
-            ),
-            "right_ee_joint_state": _validate_gripper(
-                state["right_ee_joint_state"], "right_ee_joint_state"
-            ),
+            "left_ee_pose": _validate_pose(state["left_ee_pose"], "left_ee_pose"),
+            "left_ee_joint_state": _validate_gripper(state["left_ee_joint_state"], "left_ee_joint_state"),
+            "right_ee_pose": _validate_pose(state["right_ee_pose"], "right_ee_pose"),
+            "right_ee_joint_state": _validate_gripper(state["right_ee_joint_state"], "right_ee_joint_state"),
         }
 
     @staticmethod
@@ -379,29 +323,19 @@ class OpenWAMRoboDojoModelClient:
             observation["right_ee_joint_state"],
         )
         if state.shape != (EEF20_DIM,):
-            raise RuntimeError(
-                f"internal RoboDojo state conversion produced {state.shape}, expected (20,)"
-            )
+            raise RuntimeError(f"internal RoboDojo state conversion produced {state.shape}, expected (20,)")
         return state
 
     @staticmethod
     def _validated_server_action(response: Any) -> np.ndarray:
         if not isinstance(response, Mapping) or response.get("type") != "action":
-            response_type = (
-                response.get("type") if isinstance(response, Mapping) else None
-            )
-            raise ValueError(
-                "OpenWAM response type must be 'action', "
-                f"got {response_type!r}"
-            )
+            response_type = response.get("type") if isinstance(response, Mapping) else None
+            raise ValueError(f"OpenWAM response type must be 'action', got {response_type!r}")
         action = np.asarray(response.get("action"))
         if action.dtype.kind not in "fiu":
             raise ValueError("OpenWAM action must contain real numeric values")
         if action.shape != (EEF20_DIM,):
-            raise ValueError(
-                "OpenWAM action must be a flat array with exact shape (20,), "
-                f"got {action.shape}"
-            )
+            raise ValueError(f"OpenWAM action must be a flat array with exact shape (20,), got {action.shape}")
         action = action.astype(np.float64, copy=False)
         if not np.all(np.isfinite(action)):
             raise ValueError("OpenWAM action must contain only finite values")
@@ -439,17 +373,13 @@ class OpenWAMRoboDojoModelClient:
         self._poisoned = True
         response = self._transport.reset()
         if not isinstance(response, Mapping) or response.get("type") != "reset_ack":
-            raise RuntimeError(
-                "OpenWAM reset expected {'type': 'reset_ack'}, "
-                f"got {response!r}"
-            )
+            raise RuntimeError(f"OpenWAM reset expected {{'type': 'reset_ack'}}, got {response!r}")
         self._poisoned = False
 
     def _update_obs(self, obs: Any) -> None:
         if self._observation is not None:
             raise RuntimeError(
-                "update_obs received a duplicate observation before the previous "
-                "one was consumed by get_action"
+                "update_obs received a duplicate observation before the previous one was consumed by get_action"
             )
         self._observation = self._validated_observation(obs)
 
@@ -484,9 +414,7 @@ class OpenWAMRoboDojoModelClient:
                     "base_transforms": {
                         side: {
                             "base_pos_relative_to_env_origin": np.asarray(
-                                calibration["arms"][side][
-                                    "base_pos_relative_to_env_origin"
-                                ],
+                                calibration["arms"][side]["base_pos_relative_to_env_origin"],
                                 dtype=np.float64,
                             ).copy(),
                             "base_quat_wxyz": np.asarray(
@@ -496,9 +424,7 @@ class OpenWAMRoboDojoModelClient:
                         }
                         for side in ("left", "right")
                     },
-                    "converted_action": {
-                        key: value.copy() for key, value in native.items()
-                    },
+                    "converted_action": {key: value.copy() for key, value in native.items()},
                     "response_step": response.get("step"),
                     "latency_ms": response.get("latency_ms"),
                     "camera_shapes": copy.deepcopy(observation["camera_shapes"]),
@@ -517,18 +443,14 @@ class OpenWAMRoboDojoModelClient:
         if kwargs:
             unexpected = ", ".join(sorted(kwargs))
             raise TypeError(
-                "OpenWAMRoboDojoModelClient.call() accepts only func_name and "
-                f"obs; unexpected keyword(s): {unexpected}"
+                f"OpenWAMRoboDojoModelClient.call() accepts only func_name and obs; unexpected keyword(s): {unexpected}"
             )
         if func_name != "reset" and self._poisoned:
             raise RuntimeError(
-                "OpenWAMRoboDojoModelClient is poisoned after an uncertain "
-                "action/reset; a successful reset is required"
+                "OpenWAMRoboDojoModelClient is poisoned after an uncertain action/reset; a successful reset is required"
             )
         if func_name in {"update_obs_batch", "get_action_batch"}:
-            raise NotImplementedError(
-                f"{func_name} is a batch call and is unavailable in this single-env integration"
-            )
+            raise NotImplementedError(f"{func_name} is a batch call and is unavailable in this single-env integration")
         if func_name == "reset":
             if obs is not None:
                 raise TypeError("reset takes no obs payload")

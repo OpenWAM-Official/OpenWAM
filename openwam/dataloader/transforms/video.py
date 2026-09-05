@@ -159,8 +159,7 @@ class VideoColorJitter(ModalityTransform):
             exclusion_mask = exclusion_masks[index] if exclusion_masks is not None else None
             if exclusion_mask is not None and exclusion_mask.size != frame.size:
                 raise ValueError(
-                    "video jitter exclusion mask must match its frame size: "
-                    f"{exclusion_mask.size} != {frame.size}"
+                    f"video jitter exclusion mask must match its frame size: {exclusion_mask.size} != {frame.size}"
                 )
 
             frame = ImageEnhance.Brightness(frame).enhance(b_factor)

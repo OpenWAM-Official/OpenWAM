@@ -79,9 +79,7 @@ def _normalization_stats_values_equal(left, right) -> bool:
             return False
         return all(_normalization_stats_values_equal(left[key], right[key]) for key in left)
     if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
-        return len(left) == len(right) and all(
-            _normalization_stats_values_equal(a, b) for a, b in zip(left, right)
-        )
+        return len(left) == len(right) and all(_normalization_stats_values_equal(a, b) for a, b in zip(left, right))
     left_arr = np.asarray(left) if isinstance(left, np.ndarray) or isinstance(right, np.ndarray) else None
     if left_arr is not None:
         right_arr = np.asarray(right)

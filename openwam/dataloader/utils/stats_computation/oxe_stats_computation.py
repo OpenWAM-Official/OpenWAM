@@ -7,37 +7,6 @@ exclusions, inverts gripper closedness, and records data-population provenance.
 Rot6d dimensions are pinned to identity before output.
 """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 from __future__ import annotations
 
 import argparse
@@ -79,7 +48,6 @@ logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logg
 logger = logging.getLogger("oxe_stats_computation")
 
 
-
 SCHEMA: Dict[str, Dict] = {
     "BC-Z": {
         "state_cols": ["observation.state"],
@@ -100,12 +68,7 @@ SCHEMA: Dict[str, Dict] = {
         "action_fn": "euler7_action",
     },
     "DROID": {
-
-
         "state_cols": ["other_information.observation_gripper_pose6d", "state"],
-
-
-
         "action_cols": ["other_information.action_wrist_pose"],
         "state_fn": "droid_gripper_pose6",
         "action_fn": "droid_euler7",
@@ -121,17 +84,11 @@ def _convert_state(rows: Dict[str, np.ndarray], state_fn: str) -> np.ndarray:
         assert_unit_quaternion(quat, tol=0.05, sample_n=min(64, len(quat)))
         return fractal_state_to_arm10(rows["observation.state"])
     if state_fn == "droid_state":
-
-
-
-
         return droid_state_to_arm10(
             rows["observation.state.cartesian_position"],
             rows["observation.state.gripper_position"],
         )
     if state_fn == "euler7_state":
-
-
         return euler7_action_to_arm10(rows[list(rows.keys())[0]])
     if state_fn == "droid_euler7":
         return droid_euler7_to_arm10(rows[list(rows.keys())[0]])
@@ -145,7 +102,6 @@ def _convert_state(rows: Dict[str, np.ndarray], state_fn: str) -> np.ndarray:
 
 def _convert_action(rows: Dict[str, np.ndarray], action_fn: str) -> np.ndarray:
     if action_fn == "euler7_action":
-
         return euler7_action_to_arm10(rows[list(rows.keys())[0]])
     if action_fn == "droid_euler7":
         return droid_euler7_to_arm10(rows[list(rows.keys())[0]])
@@ -182,9 +138,6 @@ def compute_dataset_stats(
     Returns:
         (stats_dict, n_state_samples, n_action_samples)
     """
-
-
-
 
     spec = SCHEMA[dataset_name]
     excluded_episode_indices: set[int] = set()
@@ -261,20 +214,6 @@ def compute_dataset_stats(
         "n_action_samples": n_action,
         "min": merged.min(axis=0).astype(np.float64).tolist(),
         "max": merged.max(axis=0).astype(np.float64).tolist(),
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         "mean": merged.mean(axis=0, dtype=np.float64).tolist(),
         "std": merged.std(axis=0, dtype=np.float64).tolist(),
         "q01": np.quantile(merged, 0.01, axis=0).astype(np.float64).tolist(),
@@ -291,7 +230,6 @@ def compute_dataset_stats(
         stats[DROID_STATS_POPULATION_KEY] = droid_stats_population
         stats[DROID_EEF_STATS_CONTRACT_KEY] = dict(DROID_EEF_STATS_CONTRACT)
     if rot6d_identity:
-
         pin_rot6d_identity(stats, ROT6D_DIMS_ARM10)
     return stats, n_state, n_action
 

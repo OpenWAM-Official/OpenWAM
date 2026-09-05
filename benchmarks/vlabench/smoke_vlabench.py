@@ -176,15 +176,9 @@ class _MockServer:
                     )
                     continue
                 # Hold still: command the pose we are already at.
-                ws.send(
-                    json.dumps({"type": transport.ACTION, "action": list(state), "step": self.calls})
-                )
+                ws.send(json.dumps({"type": transport.ACTION, "action": list(state), "step": self.calls}))
             else:
-                ws.send(
-                    json.dumps(
-                        {"type": transport.ERROR, "code": transport.ERR_UNKNOWN_TYPE, "message": kind}
-                    )
-                )
+                ws.send(json.dumps({"type": transport.ERROR, "code": transport.ERR_UNKNOWN_TYPE, "message": kind}))
 
     def start(self) -> int:
         from websockets.sync.server import serve
@@ -290,11 +284,7 @@ def main() -> None:
         raise SystemExit("VLABENCH_ROOT is not set (run_smoke.sh sets it)")
 
     print(f"[smoke:{args.mode}] task={args.task}")
-    rc = (
-        check_env(args.task)
-        if args.mode == "env"
-        else check_loop(args.task, args.max_steps, server_addr=args.server)
-    )
+    rc = check_env(args.task) if args.mode == "env" else check_loop(args.task, args.max_steps, server_addr=args.server)
     print("PASS" if rc == 0 else "FAIL")
     sys.exit(rc)
 

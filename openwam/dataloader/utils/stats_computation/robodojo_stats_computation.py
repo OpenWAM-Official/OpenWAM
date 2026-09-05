@@ -107,9 +107,7 @@ def _metadata(
                 "source_frame": ROBODOJO_REAL_SOURCE_FRAME,
                 "endpoint": REAL_ENDPOINT_NAME,
                 "pose_transform": "identity_before_quaternion_to_rot6d",
-                "frame_contract_fingerprint": real_frame_contract_fingerprint(
-                    embodiment
-                ),
+                "frame_contract_fingerprint": real_frame_contract_fingerprint(embodiment),
                 "contract_id": ROBODOJO_REAL_CONTRACT_ID,
                 "gripper_preprocessing": "clip_sensor_noise_to_[0,1]",
             }
@@ -143,24 +141,16 @@ def compute_robodojo_stats(
 ) -> dict:
     """Compute bounded pooled raw-20D statistics across selected formal tasks."""
     if action_mode != DEPLOY_ACTION_MODE:
-        raise ValueError(
-            f"RoboDojo stats support only action_mode='eef', got {action_mode!r}"
-        )
+        raise ValueError(f"RoboDojo stats support only action_mode='eef', got {action_mode!r}")
     validate_embodiment(embodiment, variant=variant)
     if int(reservoir_cap) < 1:
         raise ValueError(f"reservoir_cap must be >= 1, got {reservoir_cap}")
 
     if calibration_path is not None:
-        raise ValueError(
-            "RoboDojo uses a built-in frame contract; "
-            "calibration_path is not accepted"
-        )
+        raise ValueError("RoboDojo uses a built-in frame contract; calibration_path is not accepted")
     if variant == ROBODOJO_REAL_VARIANT:
         if calibration is not None:
-            raise ValueError(
-                "RoboDojo_real uses native per-arm base poses; calibration "
-                "must be None"
-            )
+            raise ValueError("RoboDojo_real uses native per-arm base poses; calibration must be None")
         resolved_calibration = None
     else:
         resolved_calibration = resolve_robodojo_calibration(calibration)
@@ -193,10 +183,7 @@ def compute_robodojo_stats(
         ):
             states = np.asarray(states, dtype=np.float32).reshape(-1, EEF20_DIM)
             if states.shape[0] < 2:
-                raise ValueError(
-                    f"cannot compute RoboDojo stats from an episode with "
-                    f"{states.shape[0]} state rows"
-                )
+                raise ValueError(f"cannot compute RoboDojo stats from an episode with {states.shape[0]} state rows")
             targets = states[1:]
             accumulator.update_batch(states)
             accumulator.update_batch(targets)
@@ -207,9 +194,7 @@ def compute_robodojo_stats(
         raise ValueError("cannot compute RoboDojo stats from an empty dataset")
 
     eef = {
-        key: np.asarray(value, dtype=np.float32)
-        for key, value in accumulator.finalize().items()
-        if key in STAT_KEYS
+        key: np.asarray(value, dtype=np.float32) for key, value in accumulator.finalize().items() if key in STAT_KEYS
     }
     pin_rot6d_identity(eef, ROT6D_DIMS_EEF20)
     metadata = _metadata(
@@ -245,10 +230,7 @@ def atomic_save_stats_npy(path: str | Path, payload: dict) -> None:
     if output.suffix != ".npy":
         raise ValueError("RoboDojo stats output must end in .npy")
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(
-        f".{output.name}.{socket.gethostname()}.{os.getpid()}."
-        f"{uuid.uuid4().hex[:8]}.tmp"
-    )
+    temporary = output.with_name(f".{output.name}.{socket.gethostname()}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         with temporary.open("wb") as handle:
             np.save(handle, payload, allow_pickle=True)
@@ -314,9 +296,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("--output must end in .npy")
     config = _load_config(args.config)
     if config.get("type", "robodojo") != "robodojo":
-        raise ValueError(
-            f"stats config type must be 'robodojo', got {config.get('type')!r}"
-        )
+        raise ValueError(f"stats config type must be 'robodojo', got {config.get('type')!r}")
     dataset_dir = config.get("dataset_dir", config.get("dataset_root"))
     if not dataset_dir:
         raise ValueError(f"{args.config} has no dataset_dir")
@@ -327,9 +307,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dataset_dir=dataset_dir,
         output=output,
         embodiment=str(config.get("embodiment", ROBODOJO_EMBODIMENT)),
-        variant=str(
-            config.get("variant", ROBODOJO_SIM_VARIANT)
-        ),
+        variant=str(config.get("variant", ROBODOJO_SIM_VARIANT)),
         action_mode=str(config.get("action_mode", DEPLOY_ACTION_MODE)),
         reservoir_cap=args.reservoir_cap,
     )

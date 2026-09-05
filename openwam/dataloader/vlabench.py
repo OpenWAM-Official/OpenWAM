@@ -181,9 +181,7 @@ class VLABenchDataset(LeRobotV3Reader):
         chunks = np.array([data_files[i][0] for i in file_pos], dtype=np.int64)
         files = np.array([data_files[i][1] for i in file_pos], dtype=np.int64)
         n_moved = int(
-            (
-                (eps["data/chunk_index"].to_numpy() != chunks) | (eps["data/file_index"].to_numpy() != files)
-            ).sum()
+            ((eps["data/chunk_index"].to_numpy() != chunks) | (eps["data/file_index"].to_numpy() != files)).sum()
         )
         if n_moved:
             logger.warning(
@@ -248,15 +246,11 @@ class VLABenchDataset(LeRobotV3Reader):
 
     def _action_20d(self, win: pd.DataFrame) -> np.ndarray:
         action = np.stack(win["actions"].values).astype(np.float32)  # (T_actual, 7)
-        return apply_normalization(
-            euler7_action_to_arm10(action), self._normalization_stats, self._normalize_mode
-        )
+        return apply_normalization(euler7_action_to_arm10(action), self._normalization_stats, self._normalize_mode)
 
     def _proprio_20d(self, win: pd.DataFrame) -> np.ndarray:
         state = np.stack(win["state"].values[:1]).astype(np.float32)  # (1, 7)
-        return apply_normalization(
-            euler7_action_to_arm10(state), self._normalization_stats, self._normalize_mode
-        )
+        return apply_normalization(euler7_action_to_arm10(state), self._normalization_stats, self._normalize_mode)
 
 
 __all__ = ["VLABenchDataset"]

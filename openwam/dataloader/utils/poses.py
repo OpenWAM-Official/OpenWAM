@@ -41,10 +41,7 @@ def _validated_quaternion(value, name: str = "quaternion") -> tuple[np.ndarray, 
     if np.any(bad):
         flat_index = int(np.flatnonzero(bad)[0])
         bad_norm = float(norms.reshape(-1)[flat_index])
-        raise ValueError(
-            f"{name} must be unit quaternion(s) in wxyz order; "
-            f"entry {flat_index} has norm {bad_norm:.8g}"
-        )
+        raise ValueError(f"{name} must be unit quaternion(s) in wxyz order; entry {flat_index} has norm {bad_norm:.8g}")
     return quaternion / norms[..., None], output_dtype
 
 
@@ -164,20 +161,14 @@ def _validated_rot6d(value) -> tuple[np.ndarray, np.ndarray, np.dtype]:
     bad_first = first_norm[..., 0] <= _ROT6D_DEGENERACY_EPS
     if np.any(bad_first):
         flat_index = int(np.flatnonzero(bad_first)[0])
-        raise ValueError(
-            "rotation_6d is degenerate: "
-            f"entry {flat_index} has a near-zero first direction"
-        )
+        raise ValueError(f"rotation_6d is degenerate: entry {flat_index} has a near-zero first direction")
     first_unit = first / first_norm
     second_orthogonal = second - np.sum(first_unit * second, axis=-1, keepdims=True) * first_unit
     second_norm = np.linalg.norm(second_orthogonal, axis=-1, keepdims=True)
     bad_second = second_norm[..., 0] <= _ROT6D_DEGENERACY_EPS
     if np.any(bad_second):
         flat_index = int(np.flatnonzero(bad_second)[0])
-        raise ValueError(
-            "rotation_6d is degenerate: "
-            f"entry {flat_index} has parallel or near-zero directions"
-        )
+        raise ValueError(f"rotation_6d is degenerate: entry {flat_index} has parallel or near-zero directions")
     second_unit = second_orthogonal / second_norm
     matrix = np.stack((first_unit, second_unit, np.cross(first_unit, second_unit)), axis=-1)
     return rot6d, matrix, output_dtype
@@ -198,10 +189,7 @@ def _validated_base_transform(
         "base_pos_relative_to_env_origin",
     )
     if base_position.shape != (3,):
-        raise ValueError(
-            "base_pos_relative_to_env_origin must have exact shape (3,), "
-            f"got {base_position.shape}"
-        )
+        raise ValueError(f"base_pos_relative_to_env_origin must have exact shape (3,), got {base_position.shape}")
     base_quaternion, quaternion_dtype = _validated_quaternion(
         base_quat_wxyz,
         "base_quat_wxyz",

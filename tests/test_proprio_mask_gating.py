@@ -101,15 +101,13 @@ def test_mixed_batch_routing():
     inputs = _make_inputs(B=3, L=4, D=16)
     proprio = torch.randn(3, 7)
 
-    inputs["_proprio_sample_mask"] = torch.tensor(
-        [[True], [False], [True]], dtype=torch.bool
-    )
+    inputs["_proprio_sample_mask"] = torch.tensor([[True], [False], [True]], dtype=torch.bool)
     out = arch._append_proprio_context_token(inputs, proprio)
 
     appended = out["context"][:, -1, :]
-    assert appended[0].abs().sum().item() > 0          # mask=True
-    assert appended[1].abs().sum().item() == 0.0       # mask=False
-    assert appended[2].abs().sum().item() > 0          # mask=True
+    assert appended[0].abs().sum().item() > 0  # mask=True
+    assert appended[1].abs().sum().item() == 0.0  # mask=False
+    assert appended[2].abs().sum().item() > 0  # mask=True
 
     assert out["context_mask"][:, -1].tolist() == [True, False, True]
 
@@ -146,9 +144,7 @@ def test_gradient_isolation_mixed_batch():
     arch_mixed = _ContextProprioArch(state_dim=state_dim, text_dim=text_dim)
     arch_mixed.proprio_encoder.zero_grad(set_to_none=True)
     inputs_mixed = dict(inputs_full)
-    inputs_mixed["_proprio_sample_mask"] = torch.tensor(
-        [[True], [False]], dtype=torch.bool
-    )
+    inputs_mixed["_proprio_sample_mask"] = torch.tensor([[True], [False]], dtype=torch.bool)
     out_mixed = arch_mixed._append_proprio_context_token(inputs_mixed, proprio_full)
     out_mixed["context"].sum().backward()
     g_mixed = arch_mixed.proprio_encoder.weight.grad.clone()
@@ -162,9 +158,7 @@ def test_gradient_isolation_mixed_batch():
         "seq_lens": inputs_full["seq_lens"][:1].clone(),
     }
     inputs_solo["_proprio_sample_mask"] = torch.ones(1, 1, dtype=torch.bool)
-    out_solo = arch_solo._append_proprio_context_token(
-        inputs_solo, proprio_full[:1].detach().clone()
-    )
+    out_solo = arch_solo._append_proprio_context_token(inputs_solo, proprio_full[:1].detach().clone())
     out_solo["context"].sum().backward()
     g_solo = arch_solo.proprio_encoder.weight.grad.clone()
 

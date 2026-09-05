@@ -226,9 +226,7 @@ class OpenWAMVLABenchPolicy:
         if frames.ndim != 4 or frames.shape[-1] != 3:
             raise ValueError(f"obs['rgb'] must be (ncam, H, W, 3), got {frames.shape}")
         if not (0 <= index < frames.shape[0]):
-            raise IndexError(
-                f"{label} camera index {index} out of range for obs['rgb'] with {frames.shape[0]} cameras"
-            )
+            raise IndexError(f"{label} camera index {index} out of range for obs['rgb'] with {frames.shape[0]} cameras")
         return np.ascontiguousarray(frames[index].astype(np.uint8, copy=False))
 
     def _maybe_encode(self, obs: dict, index: int | None, label: str, slot: str) -> str | None:

@@ -22,8 +22,8 @@ from benchmarks.web_control import (  # noqa: E402,F401
     build_handler,
     create_adapter,
     detect_benchmark,
-    main as _web_control_main,
 )
+from benchmarks.web_control import main as _web_control_main  # noqa: E402
 
 
 def main() -> int:

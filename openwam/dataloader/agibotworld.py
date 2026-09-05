@@ -18,87 +18,6 @@ supervised.  Optional normalization uses separate action and proprio stats,
 with rot6d dimensions pinned to identity.
 """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 from __future__ import annotations
 
 import hashlib
@@ -139,24 +58,11 @@ _EEF_RAW_DIM = 20
 _DEX_RAW_DIM = 18 + 2 * _DEX_PER_HAND
 
 
-
-
-
-
-
-
-
-
 # Differential drive publishes [forward, lateral, yaw]; lateral is unsupported.
 _MOVE_SRC_DIMS = (0, 2)
 _MOVE_DIM = len(_MOVE_SRC_DIMS)
 _MOVE_SLOTS = (68, 70)  # shared 80-D forward/yaw slots
 _MOVE_EPS = 1e-6
-
-
-
-
-
 
 
 _GRIPPER_STATE_OPEN_POSITION_M = 0.035
@@ -175,14 +81,28 @@ _GRIPPER_CONTRACT = {
 _STATS_SCHEMA_VERSION = 3
 
 
-
-
-
 # ``info.features`` declares both signal families, so bucket flavor is explicit.
 _DEX_BUCKET_IDS = frozenset(
     {
-        "475", "536", "549", "554", "577", "578", "595", "608", "620", "622",
-        "660", "679", "705", "710", "727", "730", "731", "749", "753",
+        "475",
+        "536",
+        "549",
+        "554",
+        "577",
+        "578",
+        "595",
+        "608",
+        "620",
+        "622",
+        "660",
+        "679",
+        "705",
+        "710",
+        "727",
+        "730",
+        "731",
+        "749",
+        "753",
     }
 )
 
@@ -211,19 +131,13 @@ _POSE_ONLY_COLS = (
 _MOVE_COLS = ("action.robot_velocity", "observation.state.robot_velocity")
 
 
-
-
 # Dex raw layout: L pose9 + L fingers6 + R pose9 + R fingers6.
 _ROT6D_DIMS_DEX30 = (3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23)
 
 _STAT_FIELDS = ("min", "max", "mean", "std", "q01", "q99")
 
 
-
-
 _UNIFIED_STATS_FILENAME = "stats_g2a.json"
-
-
 
 
 _BUCKET_STATS_FILENAME = "stats.json"
@@ -239,10 +153,6 @@ def _validate_trim_ratio(value) -> float | None:
     fraction) would silently disable the filter, and ``0`` would drop every
     episode including the untrimmed ones.
     """
-
-
-
-
 
     if value is None:
         return None
@@ -271,11 +181,6 @@ def _apply_segment_annotations(
     from accidentally pooling the leading/trailing frames that the reader can
     never serve.
     """
-
-
-
-
-
 
     ratio = _validate_trim_ratio(segment_max_trim_ratio)
     summary = {
@@ -344,20 +249,12 @@ def _bucket_base_motion_flags(dataset_dir) -> tuple[bool, bool]:
     warning, so no fabricated constant-zero movement is supervised.
     """
 
-
-
-
-
-
-
-
-
-
     p = Path(dataset_dir) / "meta" / _BUCKET_STATS_FILENAME
     if not p.exists():
         logger.warning(
             "AgiBotWorld %s: no %s — treating base as stationary (move slots unmapped).",
-            dataset_dir, _BUCKET_STATS_FILENAME,
+            dataset_dir,
+            _BUCKET_STATS_FILENAME,
         )
         return False, False
     try:
@@ -366,7 +263,9 @@ def _bucket_base_motion_flags(dataset_dir) -> tuple[bool, bool]:
     except (OSError, ValueError) as e:
         logger.warning(
             "AgiBotWorld %s: could not read %s (%s) — treating base as stationary (move slots unmapped).",
-            dataset_dir, p.name, e,
+            dataset_dir,
+            p.name,
+            e,
         )
         return False, False
 
@@ -396,9 +295,7 @@ def _state_gripper_to_open_convention(grip: np.ndarray) -> np.ndarray:
     """Convert closing-actuator position to a clipped ``0=closed,1=open`` fraction."""
     raw = np.asarray(grip, dtype=np.float32)
     span = _GRIPPER_STATE_CLOSED_POSITION_M - _GRIPPER_STATE_OPEN_POSITION_M
-    return np.clip((_GRIPPER_STATE_CLOSED_POSITION_M - raw) / span, 0.0, 1.0).astype(
-        np.float32, copy=False
-    )
+    return np.clip((_GRIPPER_STATE_CLOSED_POSITION_M - raw) / span, 0.0, 1.0).astype(np.float32, copy=False)
 
 
 def _eef18_to_eef20(ee18: np.ndarray, grip2: np.ndarray) -> np.ndarray:
@@ -417,28 +314,11 @@ def _eef18_to_eef20(ee18: np.ndarray, grip2: np.ndarray) -> np.ndarray:
     AgiBotWorld from RoboCOIN's :func:`eef14_to_eef20`).
     """
 
-
-
-
-
-
-
-
-
-
-
-
-
     l_pose9 = ee18[:, 0:9]
     r_pose9 = ee18[:, 9:18]
     l_grip = grip2[:, 0:1]
     r_grip = grip2[:, 1:2]
     return np.concatenate([l_pose9, l_grip, r_pose9, r_grip], axis=-1).astype(np.float32)
-
-
-
-
-
 
 
 class AgiBotWorldDataset(LeRobotV3Reader):
@@ -448,11 +328,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
     prompt machinery is inherited from :class:`LeRobotV3Reader`; only the
     AgiBotWorld-specific bits are overridden below.
     """
-
-
-
-
-
 
     DATASET_NAME = "AgiBotWorld"
     HEAD_CAMERA = HEAD_CAMERA
@@ -465,8 +340,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
 
     WRIST_DECODE_TOLERATED = (Exception,)
     CONFIG_KEYS = LeRobotV3Reader.CONFIG_KEYS + ("use_segment_annotations", "segment_max_trim_ratio")
-
-
 
     def __init__(
         self,
@@ -505,40 +378,12 @@ class AgiBotWorldDataset(LeRobotV3Reader):
                 rule. Only meaningful with ``use_segment_annotations=True``.
         """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         self._is_dex = Path(dataset_dir).name in _DEX_BUCKET_IDS
 
-
-        action_moves, state_moves = (
-            _bucket_base_motion_flags(dataset_dir) if unify_action else (False, False)
-        )
+        action_moves, state_moves = _bucket_base_motion_flags(dataset_dir) if unify_action else (False, False)
         self._action_has_move = bool(action_moves)
         self._proprio_has_move = bool(state_moves)
         self._has_move = self._action_has_move or self._proprio_has_move
-
 
         self.ACTION_DIM_MASK = None
         self.PROPRIO_DIM_MASK = None
@@ -552,8 +397,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
                 self._segment_max_trim_ratio,
             )
         if unify_action:
-
-
             move_dim = _MOVE_DIM if self._has_move else 0
             move_slots = list(_MOVE_SLOTS) if self._has_move else []
             if self._is_dex:
@@ -571,8 +414,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
                 self.PROPRIO_DIM_MASK = proprio_mask
         super().__init__(dataset_dir, unify_action=unify_action, unify_action_map=unify_action_map, **kwargs)
 
-
-
     def _filter_episodes(self, eps_df: pd.DataFrame) -> pd.DataFrame:
         """Apply segment-boundary annotations to the trainable episode span.
 
@@ -586,29 +427,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         boundary trim would remove at least that fraction.  Mid-segment frames
         are never spliced or reordered.
         """
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
         out, summary = _apply_segment_annotations(
             eps_df,
@@ -648,23 +466,12 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         dex + unify-OFF grip mask (mirrors RoboCOIN).
         """
 
-
-
-
-
-
-
         self._robot_type = info.get("robot_type", "unknown")
         move_cols = _MOVE_COLS if self._has_move else ()
         if self._is_dex:
             if self._unify:
-
-
-
-
                 self.NEEDED_COLS = _DEX_COLS + move_cols
             else:
-
                 self.NEEDED_COLS = _POSE_ONLY_COLS
                 self.ACTION_DIM_MASK = GRIP_EXCLUDED_DIM_MASK
                 self.PROPRIO_DIM_MASK = GRIP_EXCLUDED_DIM_MASK
@@ -698,29 +505,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         ``_dataset_dir.parent / meta``.
         """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         self._action_norm_stats = None
         self._proprio_norm_stats = None
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
@@ -742,9 +526,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
                 "Regenerate stats with the current canonical direction and endpoint calibration."
             )
 
-
-
-
         population = raw.get("population")
         if not isinstance(population, dict) or population.get("schema_version") != _STATS_SCHEMA_VERSION:
             raise DataContractError(
@@ -760,10 +541,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
             raise DataContractError(
                 f"AgiBotWorld stats {stats_path} has a malformed pooled contributor map; regenerate stats."
             )
-
-
-
-
 
         current_buckets = {
             path.name
@@ -806,7 +583,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
                 "regenerate normalization stats."
             )
 
-
         if self._split == population.get("split") and self._max_hours is None:
             effective_digest = _effective_segment_population_digest(self._eps_df)
             if bucket_population.get("effective_population_digest") != effective_digest:
@@ -843,14 +619,8 @@ class AgiBotWorldDataset(LeRobotV3Reader):
                     combined[k] = np.concatenate([e[0:9], gg[0:1], e[9:18], gg[1:2]]).astype(np.float32)
                 pin_rot6d_identity(combined, ROT6D_DIMS_EEF20)
             if self._has_move:
-
-
-
-
                 stream_moves = self._action_has_move if prefix == "action" else self._proprio_has_move
                 if stream_moves:
-
-
                     vel = _mat(f"{prefix}.robot_velocity", 3)
                 else:
                     vel = {
@@ -869,7 +639,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         self._action_norm_stats = _build("action")
         self._proprio_norm_stats = _build("observation.state")
 
-
         return self._action_norm_stats
 
     def _train_min_window_len(self) -> int:
@@ -884,11 +653,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         ``num_frames`` window never emits that last row because ``T_action`` is
         one shorter; a truncated window does, so drop exactly its final row.
         """
-
-
-
-
-
 
         if actual_raw_len >= self._num_frames:
             return actual_raw_len
@@ -905,10 +669,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         fill flows through :func:`_eef18_to_eef20` into the grip slots, which are
         masked out of supervision by ``GRIP_EXCLUDED_DIM_MASK``.
         """
-
-
-
-
 
         if not self._is_dex:
             grip = np.stack(win[col].values[:n]).astype(np.float32)
@@ -929,12 +689,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         appended (so the whole raw vector normalizes in one pass).
         """
 
-
-
-
-
-
-
         l_pose9 = ee18[:, 0:9]
         r_pose9 = ee18[:, 9:18]
         l_fing = dex12[:, 0:_DEX_PER_HAND]
@@ -951,8 +705,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         if stream_moves:
             vel = np.stack(win[col].values[:n]).astype(np.float32)[:, _MOVE_SRC_DIMS]
         else:
-
-
             vel = np.zeros((n, _MOVE_DIM), dtype=np.float32)
         return np.concatenate([raw, vel], axis=-1)
 
@@ -988,11 +740,6 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         return MultiAgiBotWorldDataset
 
 
-
-
-
-
-
 class MultiAgiBotWorldDataset(MultiLeRobotV3Reader):
     """Aggregate of N AgiBotWorld-Beta per-task buckets."""
 
@@ -1006,9 +753,6 @@ class MultiAgiBotWorldDataset(MultiLeRobotV3Reader):
             len(self._buckets) - n_dex,
             len(self),
         )
-
-
-
 
     @classmethod
     def from_config(cls, config, split: str = "train"):

@@ -44,9 +44,7 @@ def _target_x5_robots(eval_env: Any) -> dict[str, Any]:
     try:
         robots = eval_env.robot_manager.robot_list
     except AttributeError as error:
-        raise ValueError(
-            "eval_env must expose robot_manager.robot_list"
-        ) from error
+        raise ValueError("eval_env must expose robot_manager.robot_list") from error
 
     targets = [robot for robot in robots if getattr(robot, "type", None) == "target"]
     valid_dual_x5 = (
@@ -55,10 +53,7 @@ def _target_x5_robots(eval_env: Any) -> dict[str, Any]:
         and all(getattr(robot, "robot_name", None) == "x5" for robot in targets)
     )
     if not valid_dual_x5:
-        raise ValueError(
-            "live calibration requires the dual-arm arx_x5 configuration "
-            "with exactly two target x5 arms"
-        )
+        raise ValueError("live calibration requires the dual-arm arx_x5 configuration with exactly two target x5 arms")
 
     by_arm_name = {getattr(robot, "arm_name", None): robot for robot in targets}
     if set(by_arm_name) != {"left_arm", "right_arm"}:
@@ -106,13 +101,9 @@ def extract_live_calibration(eval_env: Any, *, env_idx: int = 0) -> dict[str, An
     origins_value, origins_name = _live_env_origins(eval_env)
     origins = _to_numpy(origins_value, origins_name)
     if origins.ndim != 2 or origins.shape[1] != 3:
-        raise ValueError(
-            f"{origins_name} must have shape (num_envs, 3), got {origins.shape}"
-        )
+        raise ValueError(f"{origins_name} must have shape (num_envs, 3), got {origins.shape}")
     if env_idx >= len(origins):
-        raise ValueError(
-            f"env_idx {env_idx} is out of range for {len(origins)} environment origins"
-        )
+        raise ValueError(f"env_idx {env_idx} is out of range for {len(origins)} environment origins")
 
     robots = _target_x5_robots(eval_env)
     arms: dict[str, dict[str, list[float]]] = {}
@@ -126,23 +117,14 @@ def extract_live_calibration(eval_env: Any, *, env_idx: int = 0) -> dict[str, An
                 is_relative=False,
             )
         except AttributeError as error:
-            raise ValueError(
-                "eval_env.robot_manager must provide get_link_pose"
-            ) from error
+            raise ValueError("eval_env.robot_manager must provide get_link_pose") from error
         if not isinstance(result, dict) or env_idx not in result or result[env_idx] is None:
-            raise ValueError(
-                f"get_link_pose did not return a pose for {side} arm env_idx {env_idx}"
-            )
+            raise ValueError(f"get_link_pose did not return a pose for {side} arm env_idx {env_idx}")
         world_pose = _to_numpy(result[env_idx], f"{side} base_link world pose")
         if world_pose.shape != (7,):
-            raise ValueError(
-                f"{side} base_link world pose must have exact shape (7,), "
-                f"got {world_pose.shape}"
-            )
+            raise ValueError(f"{side} base_link world pose must have exact shape (7,), got {world_pose.shape}")
         arms[side] = {
-            "base_pos_relative_to_env_origin": (
-                world_pose[:3] - origins[env_idx]
-            ).tolist(),
+            "base_pos_relative_to_env_origin": (world_pose[:3] - origins[env_idx]).tolist(),
             "base_quat_wxyz": world_pose[3:7].tolist(),
         }
 

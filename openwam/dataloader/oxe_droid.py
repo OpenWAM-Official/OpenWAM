@@ -15,79 +15,6 @@ ranges, exclusions, and normalization provenance so stale artifacts fail
 before training.
 """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 from __future__ import annotations
 
 import hashlib
@@ -120,7 +47,6 @@ _PLACEHOLDER_RE = re.compile(
     r"^(?:no[\s_-]*action\.?|not[\s_-]*action|no[\s_-]*instruction|n/?a|null|none|nothing|test"
     r"|[.\-_/]+|pree|pm|op)$"
 )
-
 
 
 # Versioned contracts keep prompt exclusions and EEF stats tied to source data.
@@ -220,10 +146,6 @@ def resolve_droid_stats_population(
     prompt-exclusion set, including each episode's physical manifest range.
     """
 
-
-
-
-
     selected = apply_info_splits(
         population.episodes,
         split,
@@ -289,12 +211,6 @@ def digest_droid_prompt_shard(table: pa.Table) -> str:
     digest independent of parquet row groups, compression, and dictionary
     encoding while preserving row order and null-vs-empty distinctions.
     """
-
-
-
-
-
-
 
     missing = [column for column in DROID_PROMPT_SOURCE_COLUMNS if column not in table.column_names]
     if missing:
@@ -503,9 +419,7 @@ def load_droid_prompt_exclusions(
         if current_inputs_digest != recorded_inputs_digest:
             raise ValueError(f"{DROID_PROMPT_INPUTS_DIGEST_KEY} does not match tasks.parquet and prompt source columns")
     except (KeyError, OSError, TypeError, ValueError) as exc:
-        raise ValueError(
-            f"{path} is stale or malformed ({exc}). Regenerate the prompt-exclusion manifest."
-        ) from exc
+        raise ValueError(f"{path} is stale or malformed ({exc}). Regenerate the prompt-exclusion manifest.") from exc
     return payload, canonical
 
 
@@ -514,17 +428,6 @@ class OxeDroidDataset(LeRobotV3Reader):
     HEAD_CAMERA = "observation.images.primary"
     LEFT_WRIST_CAMERA = "observation.images.wrist"
     RIGHT_WRIST_CAMERA = None
-
-
-
-
-
-
-
-
-
-
-
 
     PROMPT_FALLBACK_COLS: ClassVar[Tuple[str, ...]] = DROID_PROMPT_FALLBACK_COLS
     NEEDED_COLS = (
@@ -638,14 +541,6 @@ class OxeDroidDataset(LeRobotV3Reader):
         exhausts the retries and kills the DataLoader worker.
         """
 
-
-
-
-
-
-
-
-
         task_idx = int(win["task_index"].iloc[0])
         if task_idx not in self._task_idx_to_text:
             raise KeyError(
@@ -667,14 +562,10 @@ class OxeDroidDataset(LeRobotV3Reader):
         )
 
     def _action_20d(self, win: pd.DataFrame) -> np.ndarray:
-
-
         action = np.stack(win["other_information.action_wrist_pose"].values).astype(np.float32)
         return single_arm_20d(droid_euler7_to_arm10(action), self._normalization_stats, self._normalize_mode)
 
     def _proprio_20d(self, win: pd.DataFrame) -> Optional[np.ndarray]:
-
-
         pose = np.stack(win["other_information.observation_gripper_pose6d"].values[:1]).astype(np.float32)
         state = np.stack(win["state"].values[:1]).astype(np.float32)
         arm10 = droid_pose6_closedness_to_arm10(pose, state[:, 6:7])

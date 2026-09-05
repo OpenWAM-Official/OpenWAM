@@ -98,8 +98,7 @@ class OpenWAMLiberoPolicy:
     ) -> None:
         if str(action_mode).strip().lower() != LIBERO_ACTION_MODE:
             raise ValueError(
-                f"native-delta LIBERO client requires action_mode={LIBERO_ACTION_MODE!r}, "
-                f"got {action_mode!r}"
+                f"native-delta LIBERO client requires action_mode={LIBERO_ACTION_MODE!r}, got {action_mode!r}"
             )
         if image_transform not in ("none", "rotate_180"):
             raise ValueError("image_transform must be 'none' or 'rotate_180'")
@@ -150,9 +149,7 @@ class OpenWAMLiberoPolicy:
 
     def act(self, obs: dict, prompt: str) -> np.ndarray:
         payload = build_payload(
-            head=encode_numpy_b64(
-                resize_for_lshape_slot(self._image(obs, self._head_camera_key), "head_camera")
-            ),
+            head=encode_numpy_b64(resize_for_lshape_slot(self._image(obs, self._head_camera_key), "head_camera")),
             left_wrist=self._maybe_encode(obs, self._left_wrist_camera_key, "left_wrist_camera"),
             right_wrist=self._maybe_encode(obs, self._right_wrist_camera_key, "right_wrist_camera"),
             prompt=prompt,

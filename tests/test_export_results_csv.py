@@ -45,9 +45,12 @@ def _write_log(path: Path, episodes: str) -> None:
 
 def test_parse_episode_stats_distinguishes_step_limit_hits(tmp_path):
     body = (
-        _episode_success(160, 40) + _rate(1, 1)          # success, not a hit
-        + _episode_fail(160, 160) + _rate(1, 2)          # step-limit hit (160/160)
-        + _episode_fail(160, 90) + _rate(1, 3)           # model failure (stopped early)
+        _episode_success(160, 40)
+        + _rate(1, 1)  # success, not a hit
+        + _episode_fail(160, 160)
+        + _rate(1, 2)  # step-limit hit (160/160)
+        + _episode_fail(160, 90)
+        + _rate(1, 3)  # model failure (stopped early)
     )
 
     episodes, step_limit_hits = export_results_csv.parse_episode_stats_from_text(body)
@@ -70,20 +73,16 @@ def test_export_csv_reports_missing_log(tmp_path, monkeypatch):
     task_log = log_dir / "node0" / "worker0" / "adjust_bottle_demo_clean.log"
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / "summary.tsv").write_text(
-        "task\tmode\tnode\tworker\tstatus\texit_code\tlog\n"
-        f"adjust_bottle\tdemo_clean\t0\t0\tok\t0\t{task_log}\n",
+        f"task\tmode\tnode\tworker\tstatus\texit_code\tlog\nadjust_bottle\tdemo_clean\t0\t0\tok\t0\t{task_log}\n",
         encoding="utf-8",
     )
     (log_dir / "run.env").write_text(
-        "run_id=run_missing\npolicy_name=openwam\nmode=demo_clean\n"
-        "total_jobs=1\ntasks=adjust_bottle\n",
+        "run_id=run_missing\npolicy_name=openwam\nmode=demo_clean\ntotal_jobs=1\ntasks=adjust_bottle\n",
         encoding="utf-8",
     )
 
     out_csv = log_dir / "results.csv"
-    monkeypatch.setattr(
-        "sys.argv", ["export_results_csv.py", str(log_dir), "-o", str(out_csv), "--strict"]
-    )
+    monkeypatch.setattr("sys.argv", ["export_results_csv.py", str(log_dir), "-o", str(out_csv), "--strict"])
     assert export_results_csv.main() == 2
 
     with out_csv.open(encoding="utf-8", newline="") as f:
@@ -105,20 +104,16 @@ def test_export_csv_reports_zero_episodes_not_blank_when_log_is_readable(tmp_pat
     _write_log(task_log, "booting policy server...\nstep: 1 / 160\r")
 
     (log_dir / "summary.tsv").write_text(
-        "task\tmode\tnode\tworker\tstatus\texit_code\tlog\n"
-        f"adjust_bottle\tdemo_clean\t0\t0\tfailed\t1\t{task_log}\n",
+        f"task\tmode\tnode\tworker\tstatus\texit_code\tlog\nadjust_bottle\tdemo_clean\t0\t0\tfailed\t1\t{task_log}\n",
         encoding="utf-8",
     )
     (log_dir / "run.env").write_text(
-        "run_id=run_zero\npolicy_name=openwam\nmode=demo_clean\n"
-        "total_jobs=1\ntasks=adjust_bottle\n",
+        "run_id=run_zero\npolicy_name=openwam\nmode=demo_clean\ntotal_jobs=1\ntasks=adjust_bottle\n",
         encoding="utf-8",
     )
 
     out_csv = log_dir / "results.csv"
-    monkeypatch.setattr(
-        "sys.argv", ["export_results_csv.py", str(log_dir), "-o", str(out_csv)]
-    )
+    monkeypatch.setattr("sys.argv", ["export_results_csv.py", str(log_dir), "-o", str(out_csv)])
     export_results_csv.main()
 
     with out_csv.open(encoding="utf-8", newline="") as f:
@@ -134,26 +129,21 @@ def test_export_csv_includes_step_limit_columns(tmp_path, monkeypatch):
     task_log = log_dir / "node0" / "worker0" / "adjust_bottle_demo_clean.log"
     _write_log(
         task_log,
-        _episode_success(160, 40) + _rate(1, 1)
-        + _episode_fail(160, 160) + _rate(1, 2),
+        _episode_success(160, 40) + _rate(1, 1) + _episode_fail(160, 160) + _rate(1, 2),
     )
 
     (log_dir).mkdir(parents=True, exist_ok=True)
     (log_dir / "summary.tsv").write_text(
-        "task\tmode\tnode\tworker\tstatus\texit_code\tlog\n"
-        f"adjust_bottle\tdemo_clean\t0\t0\tok\t0\t{task_log}\n",
+        f"task\tmode\tnode\tworker\tstatus\texit_code\tlog\nadjust_bottle\tdemo_clean\t0\t0\tok\t0\t{task_log}\n",
         encoding="utf-8",
     )
     (log_dir / "run.env").write_text(
-        "run_id=run1\npolicy_name=openwam\nmode=demo_clean\n"
-        "total_jobs=1\ntasks=adjust_bottle\n",
+        "run_id=run1\npolicy_name=openwam\nmode=demo_clean\ntotal_jobs=1\ntasks=adjust_bottle\n",
         encoding="utf-8",
     )
 
     out_csv = log_dir / "results.csv"
-    monkeypatch.setattr(
-        "sys.argv", ["export_results_csv.py", str(log_dir), "-o", str(out_csv)]
-    )
+    monkeypatch.setattr("sys.argv", ["export_results_csv.py", str(log_dir), "-o", str(out_csv)])
     assert export_results_csv.main() == 0
 
     with out_csv.open(encoding="utf-8", newline="") as f:

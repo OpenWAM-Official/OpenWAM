@@ -565,9 +565,7 @@ def main():
     else:
         if not dataset_dir:
             parser.error("either --data_root or --dataset_dir / --config providing one is required")
-        resolved_output = output or os.path.join(
-            dataset_dir, "meta", f"robotwin_{variant}_normalization_stats.npy"
-        )
+        resolved_output = output or os.path.join(dataset_dir, "meta", f"robotwin_{variant}_normalization_stats.npy")
         print(f"Multi-task stats from: {dataset_dir} (embodiment={embodiment}, variant={variant})")
         stats = compute_multitask_robotwin_stats(
             dataset_dir=dataset_dir,

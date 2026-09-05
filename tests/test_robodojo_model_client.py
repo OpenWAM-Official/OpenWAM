@@ -94,13 +94,9 @@ def valid_observation(*, instruction="Move the block.", env_idx=0) -> dict:
     )
     return {
         "vision": {
-            "cam_head": {
-                "color": np.full((11, 13, 3), (10, 20, 30), dtype=np.uint8)
-            },
+            "cam_head": {"color": np.full((11, 13, 3), (10, 20, 30), dtype=np.uint8)},
             "cam_left_wrist": {"color": encoded_jpeg((40, 50, 60))},
-            "cam_right_wrist": {
-                "color": np.frombuffer(encoded_jpeg((70, 80, 90)), dtype=np.uint8)
-            },
+            "cam_right_wrist": {"color": np.frombuffer(encoded_jpeg((70, 80, 90)), dtype=np.uint8)},
         },
         "instruction": instruction,
         "state": {
@@ -216,13 +212,9 @@ def make_client(
         timeout=kwargs.pop("timeout", 42.0),
         num_envs=kwargs.pop("num_envs", 1),
         env_config=kwargs.pop("env_config", "arx_x5"),
-        robot_action_dim_info=kwargs.pop(
-            "robot_action_dim_info", copy.deepcopy(ROBOT_DIMS)
-        ),
+        robot_action_dim_info=kwargs.pop("robot_action_dim_info", copy.deepcopy(ROBOT_DIMS)),
         transport_factory=factory,
-        frame_provider=kwargs.pop(
-            "frame_provider", lambda: calibration or valid_calibration()
-        ),
+        frame_provider=kwargs.pop("frame_provider", lambda: calibration or valid_calibration()),
         **kwargs,
     )
     if auto_reset:
@@ -257,12 +249,11 @@ def test_fake_transport_ping_reset_action_close_and_camera_passthrough():
     }
     with Image.open(io.BytesIO(base64.b64decode(payload["images"]["head_camera"]))) as image:
         assert image.size == (13, 11)
-    assert base64.b64decode(payload["images"]["left_wrist_camera"]) == observation[
-        "vision"
-    ]["cam_left_wrist"]["color"]
-    assert base64.b64decode(payload["images"]["right_wrist_camera"]) == observation[
-        "vision"
-    ]["cam_right_wrist"]["color"].tobytes()
+    assert base64.b64decode(payload["images"]["left_wrist_camera"]) == observation["vision"]["cam_left_wrist"]["color"]
+    assert (
+        base64.b64decode(payload["images"]["right_wrist_camera"])
+        == observation["vision"]["cam_right_wrist"]["color"].tobytes()
+    )
 
 
 @pytest.mark.parametrize(
@@ -421,15 +412,11 @@ def test_direct_and_one_item_list_observations_are_accepted(wrap):
             "cam_left_wrist.*color",
         ),
         (
-            lambda obs: obs["vision"]["cam_head"].update(
-                color=np.zeros((10, 10), dtype=np.uint8)
-            ),
+            lambda obs: obs["vision"]["cam_head"].update(color=np.zeros((10, 10), dtype=np.uint8)),
             "cam_head.*color",
         ),
         (
-            lambda obs: obs["vision"]["cam_head"].update(
-                color=np.zeros((10, 10, 3), dtype=np.float32)
-            ),
+            lambda obs: obs["vision"]["cam_head"].update(color=np.zeros((10, 10, 3), dtype=np.float32)),
             "uint8",
         ),
         (lambda obs: obs.update(instruction="  "), "instruction"),
@@ -444,9 +431,7 @@ def test_direct_and_one_item_list_observations_are_accepted(wrap):
             "finite",
         ),
         (
-            lambda obs: obs["state"]["left_ee_pose"].__setitem__(
-                slice(3, 7), [2.0, 0.0, 0.0, 0.0]
-            ),
+            lambda obs: obs["state"]["left_ee_pose"].__setitem__(slice(3, 7), [2.0, 0.0, 0.0, 0.0]),
             "unit.*wxyz",
         ),
         (
@@ -489,9 +474,7 @@ def test_prompt_has_byte_string_parity_with_training_formatter(instruction):
     client, transport, _ = make_client()
     client.call(func_name="update_obs", obs=valid_observation(instruction=instruction))
     client.call(func_name="get_action")
-    assert transport.payloads[0]["prompt"] == format_prompt_for_inference(
-        "Lift the cup."
-    )
+    assert transport.payloads[0]["prompt"] == format_prompt_for_inference("Lift the cup.")
 
 
 class FakeTensor:
@@ -626,9 +609,7 @@ def test_native_action_dict_keys_shapes_and_only_grippers_are_clipped():
         right_xyz=(-7.0, 8.0, -9.0),
         right_gripper=1.5,
     )
-    transport = FakeTransport(
-        actions=[{"type": "action", "action": action.tolist()}]
-    )
+    transport = FakeTransport(actions=[{"type": "action", "action": action.tolist()}])
     client, _, _ = make_client(transport)
     client.call(func_name="update_obs", obs=valid_observation())
     output = client.call(func_name="get_action")
@@ -672,9 +653,7 @@ def test_native_action_dict_keys_shapes_and_only_grippers_are_clipped():
     ],
 )
 def test_server_action_rejects_wrong_width_nan_and_degenerate_rot6d(action, message):
-    transport = FakeTransport(
-        actions=[{"type": "action", "action": np.asarray(action).tolist()}]
-    )
+    transport = FakeTransport(actions=[{"type": "action", "action": np.asarray(action).tolist()}])
     client, _, _ = make_client(transport)
     client.call(func_name="update_obs", obs=valid_observation())
     with pytest.raises(ValueError, match=message):
@@ -729,9 +708,7 @@ def test_out_of_order_unknown_payload_and_batch_calls_fail_clearly():
         ),
     ],
 )
-def test_one_env_embodiment_and_dimension_guards_run_before_transport(
-    overrides, message
-):
+def test_one_env_embodiment_and_dimension_guards_run_before_transport(overrides, message):
     transport = FakeTransport()
     factory = TransportFactory(transport)
     kwargs = {
@@ -791,9 +768,7 @@ def test_debug_metadata_records_canonical_server_eef20_and_frame_details():
     assert record["latency_ms"] == 99.5
     assert set(record["base_transforms"]) == {"left", "right"}
     assert record["camera_shapes"]["cam_head"] == [11, 13, 3]
-    np.testing.assert_array_equal(
-        record["converted_action"]["left_ee_pose"], native["left_ee_pose"]
-    )
+    np.testing.assert_array_equal(record["converted_action"]["left_ee_pose"], native["left_ee_pose"])
 
 
 class OriginalNetworkClient:
@@ -864,9 +839,7 @@ def valid_runner_config(root: Path) -> dict:
         (lambda cfg: cfg.update(task=""), "task"),
     ],
 )
-def test_runner_validation_rejects_invalid_prelaunch_config(
-    tmp_path: Path, mutation, message
-):
+def test_runner_validation_rejects_invalid_prelaunch_config(tmp_path: Path, mutation, message):
     cfg = valid_runner_config(tmp_path)
     mutation(cfg)
     with pytest.raises((FileNotFoundError, TypeError, ValueError), match=message):
@@ -935,12 +908,7 @@ def test_single_eval_cli_max_steps_overrides_nullable_yaml(monkeypatch):
 
 
 def test_policy_config_leaves_native_max_steps_unset():
-    config_path = (
-        Path(__file__).resolve().parents[1]
-        / "benchmarks"
-        / "robodojo"
-        / "policy_config.yml"
-    )
+    config_path = Path(__file__).resolve().parents[1] / "benchmarks" / "robodojo" / "policy_config.yml"
     assert single_eval.load_runner_config(config_path)["max_steps"] is None
 
 
@@ -1001,9 +969,7 @@ def _make_runtime_checkouts(tmp_path: Path) -> tuple[Path, Path, list[Path]]:
     return openwam_root, robodojo_root, source_roots
 
 
-def test_runtime_import_paths_prioritize_all_configured_source_roots(
-    tmp_path: Path, monkeypatch
-):
+def test_runtime_import_paths_prioritize_all_configured_source_roots(tmp_path: Path, monkeypatch):
     openwam_root, robodojo_root, source_roots = _make_runtime_checkouts(tmp_path)
     xpolicylab_root = robodojo_root / "XPolicyLab"
     monkeypatch.setattr(
@@ -1032,9 +998,7 @@ def test_runtime_import_paths_prioritize_all_configured_source_roots(
     assert not any("__editable__." in entry for entry in sys.path)
 
 
-def test_runtime_import_provenance_accepts_only_configured_checkout(
-    tmp_path: Path, monkeypatch
-):
+def test_runtime_import_provenance_accepts_only_configured_checkout(tmp_path: Path, monkeypatch):
     openwam_root, robodojo_root, _ = _make_runtime_checkouts(tmp_path)
     for name in PROVENANCE_MODULES:
         monkeypatch.delitem(sys.modules, name, raising=False)
@@ -1048,16 +1012,12 @@ def test_runtime_import_provenance_accepts_only_configured_checkout(
         assert Path(origins[name]).is_relative_to(openwam_root)
     for name in ("env", "task", "utils", "XPolicyLab", "src"):
         assert Path(origins[name]).is_relative_to(robodojo_root)
-    assert Path(origins["client_server"]).is_relative_to(
-        robodojo_root / "XPolicyLab"
-    )
+    assert Path(origins["client_server"]).is_relative_to(robodojo_root / "XPolicyLab")
     for name in ("isaaclab", "isaaclab_assets", "isaaclab_tasks", "curobo"):
         assert Path(origins[name]).is_relative_to(robodojo_root / "third_party")
 
 
-def test_runtime_import_provenance_rejects_loaded_old_editable(
-    tmp_path: Path, monkeypatch
-):
+def test_runtime_import_provenance_rejects_loaded_old_editable(tmp_path: Path, monkeypatch):
     openwam_root, robodojo_root, _ = _make_runtime_checkouts(tmp_path)
     stale_root = tmp_path / "old-editable"
     stale_root.mkdir()
@@ -1074,9 +1034,7 @@ def test_runtime_import_provenance_rejects_loaded_old_editable(
         verify_runtime_import_provenance(openwam_root, robodojo_root)
 
 
-def test_runtime_import_provenance_rejects_stale_loaded_openwam_package(
-    tmp_path: Path, monkeypatch
-):
+def test_runtime_import_provenance_rejects_stale_loaded_openwam_package(tmp_path: Path, monkeypatch):
     openwam_root, robodojo_root, _ = _make_runtime_checkouts(tmp_path)
     stale_root = tmp_path / "stale-OpenWAM"
     configure_runtime_import_paths(openwam_root, robodojo_root)
@@ -1090,9 +1048,7 @@ def test_runtime_import_provenance_rejects_stale_loaded_openwam_package(
         verify_runtime_import_provenance(openwam_root, robodojo_root)
 
 
-def test_runtime_import_provenance_rejects_mixed_filesystem_namespace(
-    tmp_path: Path, monkeypatch
-):
+def test_runtime_import_provenance_rejects_mixed_filesystem_namespace(tmp_path: Path, monkeypatch):
     openwam_root, robodojo_root, _ = _make_runtime_checkouts(tmp_path)
     stale_root = tmp_path / "stale-editable"
     (robodojo_root / "env" / "__init__.py").unlink()
@@ -1132,9 +1088,7 @@ def test_real_configured_checkout_provenance_excludes_stale_luminis_release():
     origins = json.loads(result.stdout)
     assert set(PROVENANCE_MODULES) <= set(origins)
     assert all(
-        str(Path(origin).resolve()).startswith(
-            (str(openwam_root.resolve()), str(robodojo_root.resolve()))
-        )
+        str(Path(origin).resolve()).startswith((str(openwam_root.resolve()), str(robodojo_root.resolve())))
         for origin in origins.values()
     )
     assert "luminis_release" not in result.stdout
@@ -1313,11 +1267,7 @@ def test_stdio_restore_failure_without_primary_is_explicit():
     with pytest.raises(RuntimeError, match="restore.*fd 1"):
         with single_eval.preserve_stdio_fds(
             dup_fn=lambda target: target + 10,
-            dup2_fn=lambda _saved, target: (
-                (_ for _ in ()).throw(OSError("restore failed"))
-                if target == 1
-                else None
-            ),
+            dup2_fn=lambda _saved, target: (_ for _ in ()).throw(OSError("restore failed")) if target == 1 else None,
             close_fn=closed.append,
         ):
             pass
@@ -1333,9 +1283,7 @@ def test_real_monitor_shutdown_then_reexec_has_healthy_stdio():
     robodojo_root = Path(configured)
     if not robodojo_root.is_dir():
         pytest.skip("configured RoboDojo checkout is unavailable")
-    task_config = (
-        robodojo_root / "task" / "RoboDojo" / "config" / "press_by_number.yml"
-    )
+    task_config = robodojo_root / "task" / "RoboDojo" / "config" / "press_by_number.yml"
     code = f"""
 import os
 from benchmarks.robodojo import single_eval
@@ -1476,11 +1424,7 @@ class FakePhysXEnv(FakeNativeEnv):
         self.success_nums += 1
 
     def get_seeds_for_envs(self, env_idxs):
-        return {
-            self.current_env_seed_map[index]
-            for index in env_idxs
-            if index in self.current_env_seed_map
-        }
+        return {self.current_env_seed_map[index] for index in env_idxs if index in self.current_env_seed_map}
 
     def persist_resume_manifest(self, *, restart_count):
         self.events.append(("persist", restart_count))
@@ -1508,9 +1452,7 @@ def test_native_runner_skips_unstable_seed_then_calibrates_after_successful_rese
         env,
         1,
         unstable_error=FakeUnStableError,
-        calibration_callback=lambda current_env: current_env.events.append(
-            "calibration"
-        ),
+        calibration_callback=lambda current_env: current_env.events.append("calibration"),
     )
 
     assert env.success_nums == 1
@@ -1545,9 +1487,7 @@ def test_native_runner_calibration_callback_runs_only_once():
         env,
         2,
         unstable_error=FakeUnStableError,
-        calibration_callback=lambda current_env: current_env.events.append(
-            "calibration"
-        ),
+        calibration_callback=lambda current_env: current_env.events.append("calibration"),
     )
 
     assert env.events.count("calibration") == 1
@@ -1687,9 +1627,7 @@ def test_generic_exception_uses_monitor_broken_env_backstop(phase):
     env = FakeGenericPhysXEnv(
         [[61], [62]],
         reset_outcomes=[generic, None] if phase == "reset" else [None, None],
-        run_outcomes=[generic, "success"]
-        if phase == "run_eval"
-        else ["success"],
+        run_outcomes=[generic, "success"] if phase == "run_eval" else ["success"],
     )
     monitor = FakePhysXMonitor(broken_envs={0, 99})
 
@@ -1834,10 +1772,7 @@ def test_resume_manifest_path_matches_current_upstream_layout():
         "run-123",
         benchmark="RoboDojo",
     )
-    assert path == Path(
-        "eval_result/RoboDojo/stack_blocks/openwam/arx_x5/"
-        "7_review/_resume_run-123.json"
-    )
+    assert path == Path("eval_result/RoboDojo/stack_blocks/openwam/arx_x5/7_review/_resume_run-123.json")
 
 
 def test_resume_manifest_load_and_best_effort_delete(tmp_path: Path):
@@ -1989,15 +1924,9 @@ def test_smoke_shell_resolves_relative_inputs_against_caller_cwd(
         text=True,
     ).stdout.splitlines()
 
-    assert output[output.index("--calibration") + 1] == str(
-        caller / "calibration" / "live.json"
-    )
-    assert output[output.index("--dataset-root") + 1] == str(
-        caller / "datasets" / "robodojo"
-    )
-    assert output[output.index("--robodojo-root") + 1] == str(
-        caller / "external" / "RoboDojo"
-    )
+    assert output[output.index("--calibration") + 1] == str(caller / "calibration" / "live.json")
+    assert output[output.index("--dataset-root") + 1] == str(caller / "datasets" / "robodojo")
+    assert output[output.index("--robodojo-root") + 1] == str(caller / "external" / "RoboDojo")
 
 
 @pytest.mark.parametrize("retry_code", [99, 134, 139])
@@ -2012,12 +1941,12 @@ def test_isaac_smoke_preserves_run_id_and_retries_native_failures(
     stub.write_text(
         "#!/usr/bin/env bash\n"
         "count=0\n"
-        "[[ -f \"${STUB_STATE}\" ]] && count=\"$(<\"${STUB_STATE}\")\"\n"
+        '[[ -f "${STUB_STATE}" ]] && count="$(<"${STUB_STATE}")"\n'
         "count=$((count + 1))\n"
-        "printf '%s' \"${count}\" >\"${STUB_STATE}\"\n"
+        'printf \'%s\' "${count}" >"${STUB_STATE}"\n'
         "printf 'attempt=%s run_id=%s cwd=%s\\n' "
-        "\"${count}\" \"${ROBODOJO_RUN_ID:-}\" \"$PWD\"\n"
-        "if [[ \"${count}\" -eq 1 ]]; then exit \"${STUB_RETRY_CODE}\"; fi\n"
+        '"${count}" "${ROBODOJO_RUN_ID:-}" "$PWD"\n'
+        'if [[ "${count}" -eq 1 ]]; then exit "${STUB_RETRY_CODE}"; fi\n'
         "exit 0\n",
         encoding="utf-8",
     )
@@ -2041,9 +1970,7 @@ def test_isaac_smoke_preserves_run_id_and_retries_native_failures(
         text=True,
     )
 
-    attempts = [
-        line for line in result.stdout.splitlines() if line.startswith("attempt=")
-    ]
+    attempts = [line for line in result.stdout.splitlines() if line.startswith("attempt=")]
     assert len(attempts) == 2
     run_ids = {line.split("run_id=", 1)[1].split(" ", 1)[0] for line in attempts}
     assert len(run_ids) == 1
@@ -2064,8 +1991,8 @@ def test_isaac_smoke_retry_limit_counts_retries_after_initial_launch(
     stub.write_text(
         "#!/usr/bin/env bash\n"
         "count=0\n"
-        "[[ -f \"${STUB_STATE}\" ]] && count=\"$(<\"${STUB_STATE}\")\"\n"
-        "printf '%s' \"$((count + 1))\" >\"${STUB_STATE}\"\n"
+        '[[ -f "${STUB_STATE}" ]] && count="$(<"${STUB_STATE}")"\n'
+        'printf \'%s\' "$((count + 1))" >"${STUB_STATE}"\n'
         "exit 99\n",
         encoding="utf-8",
     )
@@ -2097,9 +2024,7 @@ def test_non_isaac_smoke_failure_is_not_retried(tmp_path: Path):
     state = tmp_path / "attempt"
     stub = tmp_path / "failing-stub"
     stub.write_text(
-        "#!/usr/bin/env bash\n"
-        "printf x >>\"${STUB_STATE}\"\n"
-        "exit 99\n",
+        '#!/usr/bin/env bash\nprintf x >>"${STUB_STATE}"\nexit 99\n',
         encoding="utf-8",
     )
     stub.chmod(0o755)

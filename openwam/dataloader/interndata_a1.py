@@ -17,162 +17,6 @@ embodiment, with rot6d and padded dimensions pinned to identity.  Bucket
 discovery is recursive because published task buckets have variable depth.
 """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 from __future__ import annotations
 
 import csv
@@ -205,8 +49,6 @@ logger = logging.getLogger(__name__)
 _ACTION_DIM = EEF_DIM
 
 
-
-
 # Distinguish a missing config key from one explicitly set to null.
 _CONFIG_SENTINEL = object()
 
@@ -217,40 +59,6 @@ ROBOT_TYPE_TO_EMBODIMENT: Dict[str, str] = {
     "Genie-1": "genie1",
     "AgileX Split Aloha": "split_aloha",
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # Convert native gripper positions to aperture fractions (0 closed, 1 open).
@@ -290,21 +98,6 @@ def resolve_gripper_scale(bucket_dir: Path, embodiment: str, grip_col: str) -> f
     logged at WARNING when the bucket's ``mean`` does not corroborate the pick.
     """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     primary = GRIPPER_FULL_OPEN.get(embodiment, 1.0)
     alt = GRIPPER_ALT_FULL_OPEN.get(embodiment)
     stats_path = bucket_dir / "meta" / "stats.json"
@@ -312,10 +105,6 @@ def resolve_gripper_scale(bucket_dir: Path, embodiment: str, grip_col: str) -> f
         with open(stats_path) as f:
             blk = json.load(f)[grip_col]
         observed_max = float(np.ravel(blk["max"])[0])
-
-
-
-
 
         try:
             observed_mean = float(np.ravel(blk["mean"])[0])
@@ -333,22 +122,8 @@ def resolve_gripper_scale(bucket_dir: Path, embodiment: str, grip_col: str) -> f
 
     scale = primary
     if alt is not None and observed_max > 0:
-
         if abs(np.log(observed_max / alt)) < abs(np.log(observed_max / primary)):
             scale = alt
-
-
-
-
-
-
-
-
-
-
-
-
-
 
             if observed_mean > primary:
                 logger.info(
@@ -376,13 +151,6 @@ def resolve_gripper_scale(bucket_dir: Path, embodiment: str, grip_col: str) -> f
                     alt / primary,
                 )
 
-
-
-
-
-
-
-
     if observed_max / scale > _GRIPPER_SANE_MAX:
         logger.warning(
             "InternData-A1 %s: raw source stats %s max %.4f is %.2fx the assumed "
@@ -396,8 +164,6 @@ def resolve_gripper_scale(bucket_dir: Path, embodiment: str, grip_col: str) -> f
             embodiment,
         )
     return scale
-
-
 
 
 _BIMANUAL_COLS: Tuple[str, ...] = (
@@ -452,10 +218,6 @@ def detect_arm_layout(features: Dict[str, Any]) -> str:
     long as its schema is one of the two known shapes.
     """
 
-
-
-
-
     if "states.left_ee_to_robot_pose" in features and "states.right_ee_to_robot_pose" in features:
         return "bimanual"
     if "states.ee_to_robot_pose" in features:
@@ -476,11 +238,6 @@ def embodiment_key(robot_type: str, arm_layout: str) -> str:
     one's scale. The fallback is logged because it means the stats-computation
     script must be re-run to produce the matching file.
     """
-
-
-
-
-
 
     if robot_type in ROBOT_TYPE_TO_EMBODIMENT:
         return ROBOT_TYPE_TO_EMBODIMENT[robot_type]
@@ -528,43 +285,12 @@ def discover_a1_buckets(root: Path) -> List[Path]:
     ``__getitem__`` mid-training.
     """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     out: List[Path] = []
     seen: set = set()
     for dirpath, dirnames, _ in os.walk(root, followlinks=True):
         try:
             st = os.stat(dirpath)
         except OSError:
-
-
             dirnames[:] = []
             continue
         key = (st.st_dev, st.st_ino)
@@ -577,20 +303,8 @@ def discover_a1_buckets(root: Path) -> List[Path]:
             dirnames[:] = []
             continue
 
-
-
-
-
         dirnames[:] = sorted(d for d in dirnames if not d.startswith(".") and d not in ("data", "videos"))
     return sorted(out)
-
-
-
-
-
-
-
-
 
 
 _CHUNK_DIR_RE = re.compile(r"chunk-(\d+)")
@@ -615,20 +329,6 @@ def parse_shard_path(path) -> Optional[Tuple[int, int]]:
     ``file-000.parquet`` would otherwise both claim shard 0.
     """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     p = Path(path)
     chunk = _CHUNK_DIR_RE.fullmatch(p.parent.name)
     shard = _SHARD_FILE_RE.fullmatch(p.name)
@@ -649,12 +349,6 @@ def iter_data_shards(bucket) -> List[Tuple[int, int, Path]]:
     names where the two agree, which is exactly why sorting on the parsed value
     costs nothing and removes the dependency on that padding.
     """
-
-
-
-
-
-
 
     out: List[Tuple[int, int, Path]] = []
     for pth in (Path(bucket) / "data").glob("chunk-*/file-*.parquet"):
@@ -678,17 +372,6 @@ def load_excluded_episodes(bucket) -> set:
     valid is refused. ``bool`` is excluded explicitly because it passes
     ``isinstance(x, int)`` and would silently become episode 0/1.
     """
-
-
-
-
-
-
-
-
-
-
-
 
     path = Path(bucket) / "meta" / "excluded_episodes.json"
     if not path.is_file():
@@ -724,20 +407,6 @@ def validate_manifest_ranges(from_idx, to_idx, lengths, episode_idx, who: str) -
     the two disagreeing means one of them is describing a different episode.
     """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     from_idx = np.asarray(from_idx, dtype=np.int64)
     to_idx = np.asarray(to_idx, dtype=np.int64)
     lengths = np.asarray(lengths, dtype=np.int64)
@@ -758,12 +427,6 @@ def validate_manifest_ranges(from_idx, to_idx, lengths, episode_idx, who: str) -
             f"declares length={int(lengths[i])}. The reader sizes windows from one and "
             "bounds them with the other, so they must describe the same episode."
         )
-
-
-
-
-
-
 
     order = np.argsort(from_idx, kind="stable")
     fs, ts = from_idx[order], to_idx[order]
@@ -788,24 +451,6 @@ def _shard_episode_bounds(pf) -> Optional[Tuple[int, int]]:
     missing evidence as success.  ``None`` means the column itself is absent.
     The result is an envelope check, not proof of row order within the shard.
     """
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     try:
         col = pf.schema_arrow.names.index("episode_index")
@@ -840,8 +485,6 @@ class _A1TrimSnapshot:
         return {"schema_version": 1, "sha256": self.sha256}
 
 
-
-
 _TRIM_SPEC_CACHE: Dict[str, Tuple[Tuple[int, int, int, int], _A1TrimSnapshot]] = {}
 
 
@@ -857,10 +500,6 @@ def _load_trim_snapshot(path) -> _A1TrimSnapshot:
     file's stat signature is unchanged.  The SHA-256 is persisted in normalization
     stats; the reader compares it before accepting those stats.
     """
-
-
-
-
 
     key = str(path)
     trim_path = Path(key)
@@ -951,8 +590,7 @@ class AmbiguousBucketKey(LookupError):
     """A bare bucket name matches several keys, so the bucket cannot be identified."""
 
 
-def resolve_bucket_key(keys, dataset_id: str, bucket_dir, *, what: str,
-                       source: str) -> Optional[str]:
+def resolve_bucket_key(keys, dataset_id: str, bucket_dir, *, what: str, source: str) -> Optional[str]:
     """Resolve a bucket onto a key in a mapping keyed by bucket path.
 
     **Shared by the reader and the stats generator on purpose** — they used to
@@ -977,42 +615,17 @@ def resolve_bucket_key(keys, dataset_id: str, bucket_dir, *, what: str,
     names is expected).
     """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     if dataset_id in keys:
         return dataset_id
 
     if "/" in dataset_id:
         return None
 
-
-
     parts = Path(bucket_dir).resolve().parts
     for n in range(min(len(parts), 6), 0, -1):
         cand = "/".join(parts[-n:])
         if cand in keys:
             return cand
-
-
 
     leaf = Path(bucket_dir).name
     cands = sorted(k for k in keys if k == leaf or k.endswith("/" + leaf))
@@ -1045,19 +658,6 @@ def resolve_trim_bounds(entry, length: int, min_len: int) -> Optional[Tuple[int,
         usable window — better a whole episode than a degenerate one.
     """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
     head, tail_from, total = entry
     if total is not None and int(total) != int(length):
         return None
@@ -1079,12 +679,6 @@ def effective_a1_population_provenance(eps_df, trim_spec: Optional[Dict[int, Tup
     or trim bounds even when the bucket name and aggregate row count stay the
     same.  The stats generator calls this same function on its selected manifest.
     """
-
-
-
-
-
-
 
     required = ("episode_index", "dataset_from_index", "length")
     missing = [column for column in required if column not in eps_df.columns]
@@ -1138,11 +732,6 @@ def _validate_a1_root_stats_contributors(
     the authoritative discovered set, so compare it before bucket fan-out.
     """
 
-
-
-
-
-
     current: Dict[str, set[str]] = {}
     for sub in sub_dirs:
         try:
@@ -1151,9 +740,7 @@ def _validate_a1_root_stats_contributors(
             embodiment = embodiment_key(info.get("robot_type", "unknown"), layout)
             dataset_id = str(sub.relative_to(root))
         except Exception as exc:
-            raise DataContractError(
-                f"InternData-A1 cannot classify pooled stats contributor {sub}: {exc}"
-            ) from exc
+            raise DataContractError(f"InternData-A1 cannot classify pooled stats contributor {sub}: {exc}") from exc
         current.setdefault(embodiment, set()).add(dataset_id)
 
     for embodiment, current_buckets in sorted(current.items()):
@@ -1165,8 +752,7 @@ def _validate_a1_root_stats_contributors(
             empty = population.get("empty_buckets", [])
         except (KeyError, OSError, TypeError, ValueError) as exc:
             raise DataContractError(
-                f"InternData-A1 pooled stats {stats_path} has no readable contributor population; "
-                "regenerate stats."
+                f"InternData-A1 pooled stats {stats_path} has no readable contributor population; regenerate stats."
             ) from exc
         if (
             not isinstance(contributed, list)
@@ -1199,15 +785,8 @@ class InternDataA1Dataset(LeRobotV3Reader):
     prompt machinery is inherited from :class:`LeRobotV3Reader`.
     """
 
-
-
-
-
-
-
     DATASET_NAME = "InternDataA1"
     ACTION_DIM = _ACTION_DIM
-
 
     NEEDED_COLS = _BIMANUAL_COLS
     PROMPT_SOURCE = "task_index"
@@ -1216,13 +795,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
     STATS_STRICT_MINMAX = False
     DEFAULT_NORMALIZE_MODE = "quantile"
 
-
-
-
-
-
     DEPLOY_ACTION_MODE = None
-
 
     CONFIG_KEYS = LeRobotV3Reader.CONFIG_KEYS + ("trim_csv",)
 
@@ -1246,14 +819,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 the reader stays byte-identical to before.
         """
 
-
-
-
-
-
-
-
-
         self._a1_stats_root = Path(a1_stats_root) if a1_stats_root else Path(dataset_dir)
         self._trim_csv = trim_csv
         trim_snapshot_was_provided = _trim_snapshot is not None
@@ -1268,10 +833,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
             _trim_snapshot = _load_trim_snapshot(trim_csv)
         self._trim_snapshot = _trim_snapshot
 
-
-
-
-
         self._a1_excluded_episode_indices = tuple(sorted(load_excluded_episodes(dataset_dir)))
         super().__init__(dataset_dir, **kwargs)
         current_exclusions = tuple(sorted(load_excluded_episodes(dataset_dir)))
@@ -1284,10 +845,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
         if self._trim_snapshot is not None and not trim_snapshot_was_provided:
             _assert_trim_snapshot_current(self._trim_snapshot, context="reader construction")
 
-
         self._trim_snapshot = None
-
-
 
     def _load_excluded_episode_indices(self) -> set[int]:
         """Use the strict exclusion snapshot pinned before base construction."""
@@ -1300,10 +858,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         supported point to set instance ``NEEDED_COLS`` and ``ACTION_DIM_MASK``
         (the base consults both after this hook, including for the unify mask).
         """
-
-
-
-
 
         features = info.get("features", {}) or {}
         self._arm_layout = detect_arm_layout(features)
@@ -1331,8 +885,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 f"feature(s) {missing} in info.json."
             )
 
-
-
         self._grip_scale = tuple(
             resolve_gripper_scale(self._dataset_dir, self._embodiment, spec[1]) if spec is not None else 1.0
             for spec in self._sides["state"]
@@ -1344,7 +896,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 f"InternData-A1 bucket {self._dataset_id}: no {_HEAD_CAMERA!r} camera in info.features "
                 f"(has {sorted(k for k in features if k.startswith('images.'))})"
             )
-
 
         if left_wrist is not None and left_wrist not in features:
             left_wrist = None
@@ -1361,28 +912,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         row coverage, per-episode shard capacity, and the shard's advertised
         episode envelope before publishing offsets.
         """
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
         from concurrent.futures import ThreadPoolExecutor
 
@@ -1402,10 +931,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
         who = f"{self.DATASET_NAME}({self._dataset_id})"
 
-
-
-
-
         validate_manifest_ranges(
             eps["dataset_from_index"].to_numpy(),
             eps["dataset_to_index"].to_numpy(),
@@ -1415,12 +940,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         )
 
         starts = np.concatenate([[0], np.cumsum([n for _, _, n, _ in data_files])]).astype(np.int64)
-
-
-
-
-
-
 
         manifest_end = int(eps["dataset_to_index"].to_numpy().max())
         if manifest_end != int(starts[-1]):
@@ -1435,10 +954,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         if (file_pos < 0).any() or (file_pos >= len(data_files)).any():
             raise ValueError(f"{who}: dataset_from_index outside the data parquet row range")
 
-
-
-
-
         offsets = global_starts - starts[file_pos]
         lengths = eps["dataset_to_index"].to_numpy().astype(np.int64) - global_starts
         capacity = np.array([data_files[i][2] for i in file_pos], dtype=np.int64)
@@ -1451,14 +966,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 f"{int(capacity[i])}. The shard set does not match the manifest — resolving "
                 "offsets against it would map episodes onto another episode's rows."
             )
-
-
-
-
-
-
-
-
 
         ep_vals = eps["episode_index"].to_numpy()
         for i, pos in enumerate(file_pos):
@@ -1488,28 +995,10 @@ class InternDataA1Dataset(LeRobotV3Reader):
         fail explicitly rather than leaving one camera on a stale offset.
         """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         super()._add_episode_offsets(eps)
         for cam in self._video_cameras():
             col = f"videos/{cam}/from_timestamp"
             if col not in eps.columns:
-
-
-
-
                 raise ValueError(
                     f"{self.DATASET_NAME}({self._dataset_id}): camera {cam!r} has no "
                     f"{col!r} in meta/episodes, so its frame offset cannot be resolved."
@@ -1541,23 +1030,13 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 )
             off = np.rint(frames).astype(np.int64)
 
-
-
-
-
-
-
-
-
-
-
-
             ck = f"videos/{cam}/chunk_index"
             fk = f"videos/{cam}/file_index"
             if fk in eps.columns:
                 ep_len = eps["length"].to_numpy().astype(np.int64)
-                chunk_of = (eps[ck].to_numpy().astype(np.int64) if ck in eps.columns
-                            else np.zeros(len(off), dtype=np.int64))
+                chunk_of = (
+                    eps[ck].to_numpy().astype(np.int64) if ck in eps.columns else np.zeros(len(off), dtype=np.int64)
+                )
                 file_of = eps[fk].to_numpy().astype(np.int64)
                 ep_vals = eps["episode_index"].to_numpy()
                 shard_key = np.stack([chunk_of, file_of], axis=1)
@@ -1575,16 +1054,10 @@ class InternDataA1Dataset(LeRobotV3Reader):
                                 "them would read the other's frames."
                             )
 
-
-
-
-
             tcol = f"videos/{cam}/to_timestamp"
             if tcol in eps.columns:
                 span = (eps[tcol].to_numpy().astype(np.float64) - ts) * self._fps
                 declared = eps["length"].to_numpy().astype(np.int64)
-
-
 
                 bad = np.flatnonzero(~np.isfinite(span) | (np.abs(span - declared) > 0.5))
                 if bad.size:
@@ -1605,10 +1078,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         bound produces a different kept population.
         """
 
-
-
-
-
         return self._num_frames if self._split == "val" else self._train_min_window_len()
 
     def _match_bucket_key(self, keys, what: str) -> Optional[str]:
@@ -1628,21 +1097,9 @@ class InternDataA1Dataset(LeRobotV3Reader):
         matching the wrong bucket would apply another embodiment's numbers.
         """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-        return resolve_bucket_key(keys, self._dataset_id, self._dataset_dir,
-                                  what=what, source=f"InternDataA1({self._dataset_id})")
+        return resolve_bucket_key(
+            keys, self._dataset_id, self._dataset_dir, what=what, source=f"InternDataA1({self._dataset_id})"
+        )
 
     def _trim_key(self) -> Optional[str]:
         spec = self._get_trim_snapshot().spec
@@ -1669,38 +1126,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         and the exact retained population is bound into normalization stats.
         """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         eps_df = super()._filter_episodes(eps_df)
         spec = None
         if self._trim_csv:
@@ -1709,8 +1134,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 spec = self._get_trim_snapshot().spec.get(key)
 
         min_len = self._trim_min_len()
-
-
 
         self._a1_effective_population = effective_a1_population_provenance(
             eps_df,
@@ -1721,7 +1144,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
             return eps_df
 
         cam_cols = [c for c in eps_df.columns if c.startswith("_video_frame_offset/")]
-
 
         lengths = eps_df["length"].to_numpy().copy()
         row_off = eps_df["_data_row_offset"].to_numpy().copy()
@@ -1735,8 +1157,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
             length = int(lengths[pos])
             bounds = resolve_trim_bounds(entry, length, min_len)
             if bounds is None:
-
-
                 if not (entry[0] == 0 and entry[1] in (None, length)):
                     n_skip += 1
                 continue
@@ -1786,9 +1206,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         drop in :meth:`_n_supervised_action_steps` and yield an all-masked sample.
         """
 
-
-
-
         return 2
 
     def _n_supervised_action_steps(self, actual_raw_len: int) -> int:
@@ -1799,11 +1216,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         target instead. ``actual_raw_len < num_frames`` means the window ran into
         the episode end, so its last row carries that fabricated target.
         """
-
-
-
-
-
 
         if actual_raw_len >= self._num_frames:
             return actual_raw_len
@@ -1833,26 +1245,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         one generator re-run.
         """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         pop = raw.get("population")
         rerun = (
             "Re-run python -m openwam.dataloader.utils.stats_computation."
@@ -1865,13 +1257,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 f"block, so there is no way to tell whether it describes the rows this reader "
                 f"loads (split, trimming and keep-bound all change the distribution). {rerun}."
             )
-
-
-
-
-
-
-
 
         if pop.get("split") != "train":
             raise DataContractError(
@@ -1889,11 +1274,9 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 f"InternData-A1 bucket {self._dataset_id}: {stats_path} was computed {state} a "
                 f"trim list but this reader {mine} trimming. Trimming removes the motionless "
                 f"head/tail, so the two describe different distributions. {rerun}"
-                + (f" --trim_csv {self._trim_csv}" if want_trim else "") + "."
+                + (f" --trim_csv {self._trim_csv}" if want_trim else "")
+                + "."
             )
-
-
-
 
         want_keep = self._train_min_window_len()
         try:
@@ -1924,17 +1307,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 f"its 'population' block, or carries malformed bucket identifiers. {rerun}."
             )
 
-
-
-
-
-
-
-
-
         known = list(buckets) + list(empty_buckets)
-
-
 
         try:
             population_key = self._match_bucket_key(dict.fromkeys(known), "stats population")
@@ -1952,10 +1325,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 f"numbers. {rerun}."
             )
 
-
-
-
-
         if want_trim:
             if pop.get("schema_version") != 2:
                 raise DataContractError(
@@ -1971,9 +1340,8 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 )
 
             bucket_provenance = pop.get("bucket_provenance")
-            if (
-                not isinstance(bucket_provenance, dict)
-                or not all(isinstance(key, str) and key for key in bucket_provenance)
+            if not isinstance(bucket_provenance, dict) or not all(
+                isinstance(key, str) and key for key in bucket_provenance
             ):
                 raise DataContractError(
                     f"InternData-A1 bucket {self._dataset_id}: {stats_path} has no per-bucket "
@@ -2000,10 +1368,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
                     f"{recorded.get('excluded_episode_indices')}, current={current_exclusions}."
                 )
 
-
-
-
-
             if self._split == "train":
                 current_effective = getattr(self, "_a1_effective_population", None)
                 if recorded.get("effective_population") != current_effective:
@@ -2018,11 +1382,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
             return None
         stats_path = self._a1_stats_root / "meta" / f"stats_{self._embodiment}.json"
         if not stats_path.exists():
-
-
-
-
-
             raise FileNotFoundError(
                 f"normalize_mode={self._normalize_mode!r} but stats file is missing: {stats_path}. "
                 "Run python -m openwam.dataloader.utils.stats_computation."
@@ -2035,10 +1394,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         self._check_stats_population(raw, stats_path)
 
         eef_raw = raw.get("eef", {})
-
-
-
-
 
         for k in ("mean", "std", "min", "max", "q01", "q99"):
             if k not in eef_raw:
@@ -2072,11 +1427,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         (``quaternion.w`` first) and covered by the reader's unit tests.
         """
 
-
-
-
-
-
         if len(self._eps_df) == 0:
             return
         row = self._eps_df.iloc[0]
@@ -2089,17 +1439,12 @@ class InternDataA1Dataset(LeRobotV3Reader):
             return
         assert_unit_quaternion(sample[:, 3:7])
 
-
-
     def _arm10(self, win, spec, n: int, grip_scale: float) -> np.ndarray:
         """Build one arm's ``(n, 10)`` ``[xyz(3), rot6d(6), grip(1)]`` block.
 
         ``grip_scale`` maps the raw gripper column onto a normalized aperture in
         [0, 1] — see :func:`resolve_gripper_scale`.
         """
-
-
-
 
         pose_col, grip_col = spec
         pose = np.stack(win[pose_col].values[:n]).astype(np.float32)
@@ -2114,10 +1459,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         are excluded from supervision by ``ACTION_DIM_MASK`` and pinned to
         identity stats so normalization leaves the zeros untouched.
         """
-
-
-
-
 
         left_spec, right_spec = self._sides[kind]
         out = np.zeros((n, _ACTION_DIM), dtype=np.float32)
@@ -2137,8 +1478,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
     def _proprio_20d(self, win) -> np.ndarray:
         return self._normalize_array(self._eef20(win, "state", 1))
 
-
-
     @property
     def robot_type(self) -> str:
         return self._robot_type
@@ -2155,8 +1494,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
     def _multibucket_wrapper(cls):
         return MultiInternDataA1Dataset
 
-
-
     @classmethod
     def from_config(cls, config, split: str = "train") -> Any:
         """Build one bucket, or recursively discover every bucket under a root.
@@ -2167,12 +1504,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         the ``total_hours`` water-fill, per-bucket failure tolerance — is
         delegated to the same :func:`build_multibucket` the other readers use.
         """
-
-
-
-
-
-
 
         from openwam.dataloader.utils import get_cfg as _get
 
@@ -2187,13 +1518,9 @@ class InternDataA1Dataset(LeRobotV3Reader):
             if v is _CONFIG_SENTINEL:
                 continue
 
-
-
             if v is None and key != "normalize_mode":
                 continue
             common[key] = v
-
-
 
         stats_root = _get(config, "stats_root") or str(root)
         common["a1_stats_root"] = stats_root
@@ -2201,7 +1528,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         if common.get("trim_csv"):
             trim_snapshot = _load_trim_snapshot(common["trim_csv"])
             common["_trim_snapshot"] = trim_snapshot
-
 
         if (root / "meta" / "info.json").is_file():
             kwargs = dict(common)
@@ -2232,9 +1558,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
             _validate_a1_root_stats_contributors(root, Path(stats_root), sub_dirs)
 
         def _per_bucket(sub: Path) -> Dict[str, Any]:
-
-
-
             try:
                 return {"dataset_id": str(sub.relative_to(root))}
             except ValueError:

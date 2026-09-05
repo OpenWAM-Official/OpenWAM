@@ -11,74 +11,6 @@ Rot6d dimensions are pinned to identity, and each output records contributor,
 exclusion, trim, and retained-population provenance required by the reader.
 """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import argparse
 import json
 import os
@@ -212,11 +144,6 @@ class Accumulator:
         }
 
 
-
-
-
-
-
 def discover_datasets_by_robot_type(root: str) -> dict:
     """Group datasets by robot_type."""
     groups = {}
@@ -229,8 +156,6 @@ def discover_datasets_by_robot_type(root: str) -> dict:
             continue
         with open(info_path) as f:
             info = json.load(f)
-
-
 
         rtype = str(info.get("robot_type", "unknown"))
         groups.setdefault(rtype, []).append(os.path.join(root, name))
@@ -269,22 +194,6 @@ def _classify_dataset(ds_dir: str, *, fail_closed: bool = False):
     :func:`dex_finger_layout` gate so the stats producer and the reader agree.
     """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     try:
         with open(os.path.join(ds_dir, "meta", "info.json")) as f:
             feats = json.load(f).get("features", {})
@@ -299,9 +208,6 @@ def _classify_dataset(ds_dir: str, *, fail_closed: bool = False):
         aL, aR, sL, sR = layout
         return "dex", (aL + aR, sL + sR, len(aL), len(aR))
     if "eef_sim_pose_action" in feats:
-
-
-
         aL, aR = _finger_indices(feats.get("action", {}))
         sL, sR = _finger_indices(feats.get("observation.state", {}))
         print(
@@ -358,22 +264,6 @@ def compute_stats_for_robot_type(
     Returns a dict ready to dump: ``{"eef": <20-D stats>, "hand": <finger stats>?}``.
     """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     dataset_dirs = list(dataset_dirs)
     excluded_dirs = [ds_dir for ds_dir in dataset_dirs if is_robocoin_bucket_excluded(ds_dir)]
     dataset_dirs = [ds_dir for ds_dir in dataset_dirs if not is_robocoin_bucket_excluded(ds_dir)]
@@ -383,14 +273,10 @@ def compute_stats_for_robot_type(
             + ", ".join(sorted(Path(path).name for path in excluded_dirs))
         )
     if not dataset_dirs:
-        raise DataContractError(
-            f"RoboCOIN stats for robot_type {rtype!r}: no non-excluded dataset directories"
-        )
+        raise DataContractError(f"RoboCOIN stats for robot_type {rtype!r}: no non-excluded dataset directories")
 
     trim_enabled = trim_csv is not None
-    if _trim_snapshot is not None and (
-        not trim_enabled or _trim_snapshot.path != str(trim_csv)
-    ):
+    if _trim_snapshot is not None and (not trim_enabled or _trim_snapshot.path != str(trim_csv)):
         raise ValueError("_trim_snapshot requires a matching non-null trim_csv")
     trim_snapshot = _trim_snapshot
     if trim_enabled and trim_snapshot is None:
@@ -405,12 +291,6 @@ def compute_stats_for_robot_type(
     hand_acc = None
     hand_dims = None
     hand_files = 0
-
-
-
-
-
-
 
     grip_example = None
     nogrip_example = None
@@ -450,11 +330,6 @@ def compute_stats_for_robot_type(
                 hand_dims = (kL, kR)
                 hand_acc = Accumulator(dim=kL + kR)
             elif hand_dims != (kL, kR):
-
-
-
-
-
                 raise ValueError(
                     f"robot_type {rtype!r} has heterogeneous dexterous-hand finger DOF: "
                     f"{ds_dir} has {(kL, kR)} but an earlier dataset had {hand_dims}. "
@@ -462,7 +337,6 @@ def compute_stats_for_robot_type(
                     f"slices it by each bucket's own kL/kR. Split these into distinct robot_types."
                 )
         if trim_enabled:
-
             info = parse_info_json(Path(ds_dir))
             file_paths = [
                 path
@@ -472,17 +346,13 @@ def compute_stats_for_robot_type(
                 )
             ]
         else:
-
-
             file_paths = []
             for chunk in sorted(os.listdir(data_dir)):
                 chunk_path = data_dir / chunk
                 if not chunk_path.is_dir():
                     continue
                 file_paths.extend(
-                    chunk_path / fname
-                    for fname in sorted(os.listdir(chunk_path))
-                    if fname.endswith(".parquet")
+                    chunk_path / fname for fname in sorted(os.listdir(chunk_path)) if fname.endswith(".parquet")
                 )
         if not file_paths:
             if trim_enabled:
@@ -523,11 +393,6 @@ def compute_stats_for_robot_type(
 
         for fpath, file_start, file_end, present in file_entries:
             try:
-
-
-
-
-
                 has_grip = all(c in present for c in _GRIP_COLS)
                 cols = list(_NEEDED_COLS) if has_grip else list(_EEF_COLS)
                 if layout is not None:
@@ -562,13 +427,10 @@ def compute_stats_for_robot_type(
                 state_20d = _eef14_to_eef20(eef_s, grip_s)
                 acc.update_batch(np.concatenate([action_20d, state_20d], axis=0))
 
-
                 if layout is not None:
                     act_arr = np.stack(df["action"].values).astype(np.float32)
                     state_arr = np.stack(df["observation.state"].values).astype(np.float32)
-                    fingers = np.concatenate(
-                        [act_arr[:, idx_act_lr], state_arr[:, idx_state_lr]], axis=0
-                    )
+                    fingers = np.concatenate([act_arr[:, idx_act_lr], state_arr[:, idx_state_lr]], axis=0)
                     hand_acc.update_batch(fingers)
             except Exception as e:
                 if trim_enabled:
@@ -580,21 +442,12 @@ def compute_stats_for_robot_type(
 
     stats = acc.finalize()
     if rot6d_identity:
-
         pin_rot6d_identity(stats, ROT6D_DIMS_EEF20)
     stats["num_timesteps"] = int(acc.count)
     stats["num_datasets"] = len(dataset_dirs)
     stats["num_files"] = total_files
     stats["robot_type"] = rtype
     stats["pool"] = "action+state"
-
-
-
-
-
-
-
-
 
     stats["grip_present"] = total_files > 0 and grip_files == total_files
 
@@ -619,9 +472,7 @@ def compute_stats_for_robot_type(
             "datasets": dict(sorted(population_datasets.items())),
         }
         result["trim_provenance"] = trim_snapshot.provenance
-        result["excluded_episodes_provenance"] = _excluded_episodes_provenance(
-            exclusion_snapshots
-        )
+        result["excluded_episodes_provenance"] = _excluded_episodes_provenance(exclusion_snapshots)
         _assert_trim_snapshot_current(trim_snapshot, context=f"stats scan for robot_type {rtype!r}")
         for snapshot in exclusion_snapshots.values():
             assert_excluded_episodes_snapshot_current(

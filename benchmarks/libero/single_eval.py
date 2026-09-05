@@ -36,9 +36,7 @@ def _repo_root() -> Path:
 def _write_libero_config() -> None:
     repo_root = _repo_root()
     benchmark_root = repo_root / "libero" / "libero"
-    config_root = Path(
-        os.environ.get("LIBERO_CONFIG_ROOT", Path.home() / ".libero-openwam")
-    ).expanduser()
+    config_root = Path(os.environ.get("LIBERO_CONFIG_ROOT", Path.home() / ".libero-openwam")).expanduser()
     config_root.mkdir(parents=True, exist_ok=True)
     config = {
         "benchmark_root": str(benchmark_root),

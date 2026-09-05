@@ -90,24 +90,18 @@ def test_multiview_requires_three_camera_layout():
 
 def test_state_any_dim_passes_through():
     # State-dim validation was removed: a state of any width is accepted and flattened.
-    obs = _single_view().preprocess(
-        {"images": {"head_camera": _jpeg_b64()}, "prompt": "x", "state": list(range(14))}
-    )
+    obs = _single_view().preprocess({"images": {"head_camera": _jpeg_b64()}, "prompt": "x", "state": list(range(14))})
     assert isinstance(obs["state"], np.ndarray) and obs["state"].shape == (14,)
 
 
 def test_state_passthrough():
-    obs = _single_view().preprocess(
-        {"images": {"head_camera": _jpeg_b64()}, "prompt": "x", "state": list(range(20))}
-    )
+    obs = _single_view().preprocess({"images": {"head_camera": _jpeg_b64()}, "prompt": "x", "state": list(range(20))})
     assert isinstance(obs["state"], np.ndarray) and obs["state"].shape == (20,)
 
 
 def test_requires_proprio_but_no_state_raises():
     with pytest.raises(ObsValidationError, match="requires obs"):
-        _single_view(requires_proprio=True).preprocess(
-            {"images": {"head_camera": _jpeg_b64()}, "prompt": "x"}
-        )
+        _single_view(requires_proprio=True).preprocess({"images": {"head_camera": _jpeg_b64()}, "prompt": "x"})
 
 
 def test_from_cfg_resolves_view_config():

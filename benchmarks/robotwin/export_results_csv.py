@@ -21,8 +21,19 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 CSV_FIELDNAMES = [
-    "run_id", "policy_name", "requested_mode", "task", "mode", "node", "worker",
-    "status", "exit_code", "success_rate", "episodes", "step_limit_hits", "log_path",
+    "run_id",
+    "policy_name",
+    "requested_mode",
+    "task",
+    "mode",
+    "node",
+    "worker",
+    "status",
+    "exit_code",
+    "success_rate",
+    "episodes",
+    "step_limit_hits",
+    "log_path",
 ]
 
 
@@ -45,9 +56,7 @@ EPISODE_VERDICT_RE = re.compile(r"\b(Success|Fail)!")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Export RoboTwin evaluation logs to a CSV summary."
-    )
+    parser = argparse.ArgumentParser(description="Export RoboTwin evaluation logs to a CSV summary.")
     parser.add_argument(
         "log_dir",
         type=Path,
@@ -193,9 +202,7 @@ def format_job_keys(keys: Sequence[Tuple[str, str]], limit: int = 8) -> str:
     return ", ".join(items)
 
 
-def export_from_results_jsonl(
-    log_dir: Path, output_csv: Path, run_env: Dict[str, str], strict: bool
-) -> int:
+def export_from_results_jsonl(log_dir: Path, output_csv: Path, run_env: Dict[str, str], strict: bool) -> int:
     """Export from the episode-level dispatcher's ``results.jsonl`` (one line per
     completed episode). Success rate / episode counts / step-limit hits are
     aggregated per ``(task, mode)`` straight from the authoritative per-episode
@@ -236,7 +243,7 @@ def export_from_results_jsonl(
     target_n = int(target) if target.isdigit() else None
 
     rows: List[Dict[str, str]] = []
-    for (task, mode) in sorted(agg):
+    for task, mode in sorted(agg):
         a = agg[(task, mode)]
         eps = a["episodes"]
         rate = (a["successes"] / eps) if eps else 0.0
@@ -310,17 +317,12 @@ def main() -> int:
     failures: List[str] = []
     exported_rows: List[Dict[str, str]] = []
     row_key_counts = Counter(
-        (row.get("task", ""), row.get("mode", ""))
-        for row in raw_rows
-        if row.get("task") and row.get("mode")
+        (row.get("task", ""), row.get("mode", "")) for row in raw_rows if row.get("task") and row.get("mode")
     )
 
     duplicate_keys = sorted(key for key, count in row_key_counts.items() if count > 1)
     if duplicate_keys:
-        failures.append(
-            "duplicate task/mode rows: "
-            + format_job_keys(duplicate_keys)
-        )
+        failures.append("duplicate task/mode rows: " + format_job_keys(duplicate_keys))
 
     expected_keys = expected_job_keys(run_env)
     if expected_keys is not None:
@@ -328,23 +330,15 @@ def main() -> int:
         missing_keys = sorted(expected_keys - seen_keys)
         extra_keys = sorted(seen_keys - expected_keys)
         if len(raw_rows) != len(expected_keys):
-            failures.append(
-                f"summary row count mismatch: expected {len(expected_keys)}, got {len(raw_rows)}"
-            )
+            failures.append(f"summary row count mismatch: expected {len(expected_keys)}, got {len(raw_rows)}")
         if missing_keys:
-            failures.append(
-                f"missing task/mode rows: {format_job_keys(missing_keys)}"
-            )
+            failures.append(f"missing task/mode rows: {format_job_keys(missing_keys)}")
         if extra_keys:
-            failures.append(
-                f"unexpected task/mode rows: {format_job_keys(extra_keys)}"
-            )
+            failures.append(f"unexpected task/mode rows: {format_job_keys(extra_keys)}")
     else:
         expected_total_jobs = run_env.get("total_jobs", "").strip()
         if expected_total_jobs.isdigit() and len(raw_rows) != int(expected_total_jobs):
-            failures.append(
-                f"summary row count mismatch: expected {expected_total_jobs}, got {len(raw_rows)}"
-            )
+            failures.append(f"summary row count mismatch: expected {expected_total_jobs}, got {len(raw_rows)}")
 
     for row in raw_rows:
         log_path = Path(row.get("log", ""))
@@ -360,9 +354,7 @@ def main() -> int:
                 log_text = None
 
         success_rate = parse_success_rate_from_text(log_text) if log_text is not None else None
-        episodes, step_limit_hits = (
-            parse_episode_stats_from_text(log_text) if log_text is not None else (0, 0)
-        )
+        episodes, step_limit_hits = parse_episode_stats_from_text(log_text) if log_text is not None else (0, 0)
 
         if not log_exists:
             failures.append(f"missing log: {log_path}")
@@ -412,9 +404,7 @@ def main() -> int:
 
     ok_rows = sum(1 for row in exported_rows if row["status"] in ("", "ok"))
     parsed_rows = sum(1 for row in exported_rows if row["success_rate"] != "")
-    total_step_limit_hits = sum(
-        int(row["step_limit_hits"]) for row in exported_rows if row["step_limit_hits"]
-    )
+    total_step_limit_hits = sum(int(row["step_limit_hits"]) for row in exported_rows if row["step_limit_hits"])
     print(f"[INFO] wrote CSV: {output_csv}")
     print(f"[INFO] rows={len(exported_rows)} parsed_success_rate={parsed_rows} ok_or_unknown={ok_rows}")
     print(

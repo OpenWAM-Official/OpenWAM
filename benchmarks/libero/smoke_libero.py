@@ -165,9 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", choices=["import", "task", "env"], default="import")
     parser.add_argument("--suite", default=os.environ.get("LIBERO_SMOKE_SUITE", "libero_spatial"))
     parser.add_argument("--task-id", type=int, default=int(os.environ.get("LIBERO_SMOKE_TASK_ID", "0")))
-    parser.add_argument(
-        "--camera-size", type=int, default=int(os.environ.get("LIBERO_SMOKE_CAMERA_SIZE", "128"))
-    )
+    parser.add_argument("--camera-size", type=int, default=int(os.environ.get("LIBERO_SMOKE_CAMERA_SIZE", "128")))
     parser.add_argument("--steps", type=int, default=int(os.environ.get("LIBERO_SMOKE_STEPS", "1")))
     args = parser.parse_args(argv)
 

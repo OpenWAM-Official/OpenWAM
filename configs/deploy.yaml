@@ -11,7 +11,7 @@ server:
 # an async-tuned yaml can be run as the sync baseline with a single flag.
 inference:
   denoise_steps: 10
-  
+
   denoise_mode: sync          # trajectory: sync | async; separate from inference_mode
   lead_modality: video        # denoise_mode=async: action | video
   variance_shift_alpha: 1.0   # denoise_mode=async: lead curve shift; >= 1

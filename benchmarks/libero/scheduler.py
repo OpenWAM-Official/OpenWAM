@@ -61,6 +61,7 @@ SUITE_ALIASES = {
     "libero_10": "libero_10",
 }
 
+
 @dataclass(frozen=True)
 class TaskJob:
     suite: str
@@ -593,9 +594,7 @@ def _run_client(
     command = _client_command(args, job, trial_run, slot.port, run_dir)
     log_handle = log_path.open("a", encoding="utf-8")
     log_handle.write(f"command: {shlex.join(command)}\n")
-    log_handle.write(
-        f"policy_gpu: {slot.gpu}\nrender_gpu: {_render_device_for_slot(args, slot)}\n"
-    )
+    log_handle.write(f"policy_gpu: {slot.gpu}\nrender_gpu: {_render_device_for_slot(args, slot)}\n")
     log_handle.flush()
     env = _client_env(
         os.environ,
@@ -731,8 +730,7 @@ def _dynamic_worker(
                         return failed
                     consecutive_failures = 0
                     print(
-                        f"[recovered] gpu={slot.gpu} replica={slot.replica} "
-                        f"port={slot.port} pulling from shared queue",
+                        f"[recovered] gpu={slot.gpu} replica={slot.replica} port={slot.port} pulling from shared queue",
                         flush=True,
                     )
                 continue
@@ -758,8 +756,7 @@ def _dynamic_worker(
                     return failed
                 consecutive_failures = 0
                 print(
-                    f"[recovered] gpu={slot.gpu} replica={slot.replica} "
-                    f"port={slot.port} pulling from shared queue",
+                    f"[recovered] gpu={slot.gpu} replica={slot.replica} port={slot.port} pulling from shared queue",
                     flush=True,
                 )
         finally:
@@ -799,8 +796,7 @@ def _wait_for_dynamic_queue(
                 work_queue.task_done()
         drained.wait(max(poll_interval, 0.1))
         raise RuntimeError(
-            f"all {len(futures)} dynamic worker(s) exited with "
-            f"{abandoned} queued request(s) still pending"
+            f"all {len(futures)} dynamic worker(s) exited with {abandoned} queued request(s) still pending"
         )
 
 
@@ -1072,10 +1068,7 @@ def _print_plan(
     print(f"seed       : {args.seed if args.seed is not None else 'from policy config'}")
     if args.task_sample_ratio is not None:
         sampled_by_suite = {suite: sum(job.suite == suite for job in jobs) for suite in args.suites}
-        print(
-            f"sampling   : ratio={args.task_sample_ratio:g}, "
-            f"seed={args.task_sample_seed}, tasks={sampled_by_suite}"
-        )
+        print(f"sampling   : ratio={args.task_sample_ratio:g}, seed={args.task_sample_seed}, tasks={sampled_by_suite}")
     print(f"trials     : {trial_run.trial_start}:{trial_run.trial_stop} continuous in one environment per task")
     print(f"scheduler  : dynamic shared queue ({len(pending_jobs)} pending request(s))")
     print(

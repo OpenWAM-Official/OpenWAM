@@ -122,9 +122,7 @@ def _stats_block_is_compatible(block: Any) -> bool:
             return False
         try:
             arr = np.asarray(block[key])
-            is_real_numeric = np.issubdtype(arr.dtype, np.number) and not np.issubdtype(
-                arr.dtype, np.complexfloating
-            )
+            is_real_numeric = np.issubdtype(arr.dtype, np.number) and not np.issubdtype(arr.dtype, np.complexfloating)
             finite = bool(np.isfinite(arr).all()) if is_real_numeric else False
         except (TypeError, ValueError):
             return False
@@ -254,7 +252,6 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
         self._resolved_stats_path: Optional[str] = None  # set by _load_stats when normalization is on
         self._state_normalization_stats: Optional[dict] = None
-
 
         self._action_column = "eef_action"
         self._state_column = "observation.eef_state"

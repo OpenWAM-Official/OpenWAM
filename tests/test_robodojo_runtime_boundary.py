@@ -31,11 +31,7 @@ _BENCHMARKS_IMPORT = ("benchmarks", "benchmarks.")
 
 def _production_py_files(relative: str) -> list[Path]:
     root = _REPO_ROOT / relative
-    return sorted(
-        path
-        for path in root.rglob("*.py")
-        if path.is_file() and "__pycache__" not in path.parts
-    )
+    return sorted(path for path in root.rglob("*.py") if path.is_file() and "__pycache__" not in path.parts)
 
 
 def _imported_roots(path: Path) -> set[str]:
@@ -129,12 +125,8 @@ def test_base_transform_round_trip_and_pose_at_base_match():
         train_base = train_poses.env_relative_world_to_robot_base(pose, base_pos, base_quat)
         eval_base = eval_frames.env_relative_world_to_robot_base(pose, base_pos, base_quat)
         np.testing.assert_allclose(train_base, eval_base, atol=1e-12)
-        train_world = train_poses.robot_base_to_env_relative_world(
-            train_base, base_pos, base_quat
-        )
-        eval_world = eval_frames.robot_base_to_env_relative_world(
-            eval_base, base_pos, base_quat
-        )
+        train_world = train_poses.robot_base_to_env_relative_world(train_base, base_pos, base_quat)
+        eval_world = eval_frames.robot_base_to_env_relative_world(eval_base, base_pos, base_quat)
         np.testing.assert_allclose(train_world[..., :3], pose[..., :3], atol=1e-12)
         np.testing.assert_allclose(eval_world[..., :3], pose[..., :3], atol=1e-12)
         at_base = np.concatenate((np.asarray(base_pos), np.asarray(base_quat)))

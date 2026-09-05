@@ -52,9 +52,7 @@ class TestRot6dToEulerXyz:
             )
             r6d = euler_xyz_to_rot6d(euler[None])[0]
             # Euler triples are not unique; compare through the rotation they encode.
-            np.testing.assert_allclose(
-                euler_xyz_to_rot6d(rot6d_to_euler_xyz(r6d)[None])[0], r6d, atol=1e-6
-            )
+            np.testing.assert_allclose(euler_xyz_to_rot6d(rot6d_to_euler_xyz(r6d)[None])[0], r6d, atol=1e-6)
 
     def test_identity_rotation(self):
         r6d = euler_xyz_to_rot6d(np.zeros((1, 3)))[0]
@@ -83,9 +81,7 @@ class TestObsToEef10:
         euler = np.array([0.4, -0.21, 1.7])
         gripper = 1.0
 
-        client_eef10 = vlabench_obs_to_eef10(
-            np.concatenate([world_pos, _euler_to_quat_wxyz(euler), [gripper]]), base
-        )
+        client_eef10 = vlabench_obs_to_eef10(np.concatenate([world_pos, _euler_to_quat_wxyz(euler), [gripper]]), base)
         dataset_euler7 = np.concatenate([world_pos - base, euler, [gripper]])[None]
         reader_eef10 = euler7_action_to_arm10(dataset_euler7.astype(np.float32))[0]
 
@@ -94,9 +90,7 @@ class TestObsToEef10:
     def test_subtracts_robot_base(self):
         base = np.array([0.0, -0.4, 0.78])
         world_pos = np.array([0.2, 0.1, 1.0])
-        eef10 = vlabench_obs_to_eef10(
-            np.concatenate([world_pos, [1.0, 0.0, 0.0, 0.0], [0.0]]), base
-        )
+        eef10 = vlabench_obs_to_eef10(np.concatenate([world_pos, [1.0, 0.0, 0.0, 0.0], [0.0]]), base)
         np.testing.assert_allclose(eef10[0:3], world_pos - base, atol=1e-6)
 
     def test_gripper_forwarded_verbatim(self):
@@ -151,17 +145,13 @@ class TestEef10ToVlabenchEe:
         """
         eef10 = np.concatenate([np.zeros(3), euler_xyz_to_rot6d(np.zeros((1, 3)))[0], [grip]])
         _pos, _euler, gripper_state = eef10_to_vlabench_ee(eef10, np.zeros(3))
-        expected = (
-            np.full(2, VLABENCH_GRIPPER_OPEN_WIDTH) if expect_open else np.zeros(2)
-        )
+        expected = np.full(2, VLABENCH_GRIPPER_OPEN_WIDTH) if expect_open else np.zeros(2)
         np.testing.assert_allclose(gripper_state, expected)
         assert gripper_state.shape == (2,)
 
     def test_custom_gripper_threshold_and_width(self):
         eef10 = np.concatenate([np.zeros(3), euler_xyz_to_rot6d(np.zeros((1, 3)))[0], [0.2]])
-        _p, _e, grip = eef10_to_vlabench_ee(
-            eef10, np.zeros(3), gripper_open_threshold=0.1, gripper_open_width=0.07
-        )
+        _p, _e, grip = eef10_to_vlabench_ee(eef10, np.zeros(3), gripper_open_threshold=0.1, gripper_open_width=0.07)
         np.testing.assert_allclose(grip, np.full(2, 0.07))
 
     def test_rejects_wrong_action_dim(self):

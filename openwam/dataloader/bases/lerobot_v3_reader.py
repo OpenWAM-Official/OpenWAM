@@ -437,9 +437,7 @@ class LeRobotV3Reader(BaseDataset):
             if proprio_raw_mask is None:
                 self._unify_proprio_dim_mask[self._unify_state_dst_index] = True
             else:
-                self._unify_proprio_dim_mask[self._unify_state_dst_index] = np.asarray(
-                    proprio_raw_mask, dtype=bool
-                )
+                self._unify_proprio_dim_mask[self._unify_state_dst_index] = np.asarray(proprio_raw_mask, dtype=bool)
 
         logger.info(
             "%s(%s, %s): %d eps, %d windows, fps=%.1f, multiview=%s, normalize=%s",
@@ -479,8 +477,7 @@ class LeRobotV3Reader(BaseDataset):
         )
         if len(self._eps_df) == 0:
             raise ValueError(
-                f"{self.DATASET_NAME}({self._dataset_id}): subsampling to max_hours="
-                f"{self._max_hours}h left 0 episodes."
+                f"{self.DATASET_NAME}({self._dataset_id}): subsampling to max_hours={self._max_hours}h left 0 episodes."
             )
         logger.info(
             "%s(%s): subsampled %d/%d episodes (max_hours=%.3f effective h, seed=%d)",

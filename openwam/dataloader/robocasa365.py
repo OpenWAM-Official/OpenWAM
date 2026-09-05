@@ -360,9 +360,7 @@ class RoboCasa365Dataset(BaseDataset):
             for camera in VIDEO_CAMERAS:
                 chunk, file_index = metadata["vcf"][camera]
                 slot_h, slot_w = (
-                    (_HEAD_SLOT_H, _HEAD_SLOT_W)
-                    if camera == HEAD_CAMERA
-                    else (_WRIST_SLOT_H, _WRIST_SLOT_W)
+                    (_HEAD_SLOT_H, _HEAD_SLOT_W) if camera == HEAD_CAMERA else (_WRIST_SLOT_H, _WRIST_SLOT_W)
                 )
                 camera_frames[camera] = decode_video_frames(
                     self._video_path(camera, chunk, file_index),
@@ -503,9 +501,7 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             raise FileNotFoundError(f"No RoboCasa365 tasks found under {dataset_dir}")
         if normalize_mode is not None and normalization_stats_path is None:
             if isinstance(dataset_dir, str):
-                normalization_stats_path = self._ensure_pooled_stats(
-                    dataset_dir, sorted({repo for _, repo in roots})
-                )
+                normalization_stats_path = self._ensure_pooled_stats(dataset_dir, sorted({repo for _, repo in roots}))
             elif len({repo for _, repo in roots}) > 1:
                 raise ValueError(
                     "list-form dataset_dir requires an explicit normalization_stats_path; "

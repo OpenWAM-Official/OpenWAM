@@ -371,9 +371,7 @@ def test_infer_raw_dim():
 
 def test_build_normalizer_unify_off_returns_plain_inner(tmp_path):
     _write_stats_file(tmp_path, mode_key="eef")
-    cfg = OmegaConf.create(
-        {"dataloader": {"normalize_mode": "min-max", "action_mode": "eef", "unify_action": False}}
-    )
+    cfg = OmegaConf.create({"dataloader": {"normalize_mode": "min-max", "action_mode": "eef", "unify_action": False}})
     norm = _build_normalizer(cfg, str(tmp_path))
     assert isinstance(norm, Normalizer) and not isinstance(norm, _UnifyAwareNormalizer)
 
@@ -401,9 +399,7 @@ def test_build_normalizer_unify_on_wraps_and_roundtrips(tmp_path):
 def test_build_normalizer_unify_identity_map_fallback(tmp_path):
     """unify on but no unify_action_map: raw dim inferred from stats (20) -> identity map 0..19."""
     _write_stats_file(tmp_path, mode_key="eef")
-    cfg = OmegaConf.create(
-        {"dataloader": {"normalize_mode": "min-max", "action_mode": "eef", "unify_action": True}}
-    )
+    cfg = OmegaConf.create({"dataloader": {"normalize_mode": "min-max", "action_mode": "eef", "unify_action": True}})
     norm = _build_normalizer(cfg, str(tmp_path))
     assert isinstance(norm, _UnifyAwareNormalizer)
     assert norm._dst_index.tolist() == list(range(20))
@@ -411,9 +407,7 @@ def test_build_normalizer_unify_identity_map_fallback(tmp_path):
 
 def test_build_normalizer_unify_no_map_no_stats_raises(tmp_path):
     """unify on, no map, normalize disabled (no stats to infer raw dim) -> ValueError."""
-    cfg = OmegaConf.create(
-        {"dataloader": {"normalize_mode": None, "action_mode": "eef", "unify_action": True}}
-    )
+    cfg = OmegaConf.create({"dataloader": {"normalize_mode": None, "action_mode": "eef", "unify_action": True}})
     with pytest.raises(ValueError, match="unify_action_map is missing"):
         _build_normalizer(cfg, str(tmp_path))
 
@@ -551,15 +545,21 @@ def test_command_aware_binary_snap(tmp_path):
     uncertain mid-range output still lands on the safe side (open / arm mode)."""
     stats = {"eef_base": _eef_base_stats_25d(), "num_timesteps": 10}
     np.save(str(tmp_path / "normalization_stats.npy"), stats, allow_pickle=True)
-    cfg = OmegaConf.create({"dataloader": {
-        "normalize_mode": "min-max", "action_mode": "eef_base", "binary_action_dims": [9, 24],
-    }})
+    cfg = OmegaConf.create(
+        {
+            "dataloader": {
+                "normalize_mode": "min-max",
+                "action_mode": "eef_base",
+                "binary_action_dims": [9, 24],
+            }
+        }
+    )
     normalizer = _build_normalizer(cfg, str(tmp_path))
     x = np.zeros(25, dtype=np.float32)
-    x[9], x[24] = 0.6, 0.4          # gripper leaning close; mode below threshold
+    x[9], x[24] = 0.6, 0.4  # gripper leaning close; mode below threshold
     out = normalizer.unnormalize(x)
     assert out[9] == 1.0 and out[24] == -1.0
-    x[9], x[24] = 0.5, 0.51         # 0.5 exactly is NOT confident -> -1 (strict >)
+    x[9], x[24] = 0.5, 0.51  # 0.5 exactly is NOT confident -> -1 (strict >)
     out = normalizer.unnormalize(x)
     assert out[9] == -1.0 and out[24] == 1.0
     # non-binary dims untouched by the snap
@@ -569,13 +569,18 @@ def test_command_aware_binary_snap(tmp_path):
 def test_command_aware_global_pose_split_stats(tmp_path):
     """base_proprio='global_pose': proprio normalizes with the 'eef_base_pose_proprio' block (pose
     range), actions keep un-normalizing with the 'eef_base' command block."""
-    pose_block = _eef_base_stats_25d(base_lo=[-10.0, -10.0, -1.0, -1.0, 0.0],
-                                     base_hi=[10.0, 10.0, 1.0, 1.0, 1.0])
+    pose_block = _eef_base_stats_25d(base_lo=[-10.0, -10.0, -1.0, -1.0, 0.0], base_hi=[10.0, 10.0, 1.0, 1.0, 1.0])
     stats = {"eef_base": _eef_base_stats_25d(), "eef_base_pose_proprio": pose_block, "num_timesteps": 10}
     np.save(str(tmp_path / "normalization_stats.npy"), stats, allow_pickle=True)
-    cfg = OmegaConf.create({"dataloader": {
-        "normalize_mode": "min-max", "action_mode": "eef_base", "base_proprio": "global_pose",
-    }})
+    cfg = OmegaConf.create(
+        {
+            "dataloader": {
+                "normalize_mode": "min-max",
+                "action_mode": "eef_base",
+                "base_proprio": "global_pose",
+            }
+        }
+    )
     normalizer = _build_normalizer(cfg, str(tmp_path))
     raw = np.zeros(25, dtype=np.float32)
     raw[20] = 5.0  # x = 5 m -> min-max over [-10, 10] -> 0.5 under the POSE block
@@ -589,9 +594,15 @@ def test_command_aware_global_pose_split_stats(tmp_path):
 def test_command_aware_missing_pose_block_raises(tmp_path):
     stats = {"eef_base": _eef_base_stats_25d(), "num_timesteps": 10}
     np.save(str(tmp_path / "normalization_stats.npy"), stats, allow_pickle=True)
-    cfg = OmegaConf.create({"dataloader": {
-        "normalize_mode": "min-max", "action_mode": "eef_base", "base_proprio": "global_pose",
-    }})
+    cfg = OmegaConf.create(
+        {
+            "dataloader": {
+                "normalize_mode": "min-max",
+                "action_mode": "eef_base",
+                "base_proprio": "global_pose",
+            }
+        }
+    )
     with pytest.raises(KeyError, match="eef_base_pose_proprio"):
         _build_normalizer(cfg, str(tmp_path))
 
@@ -601,10 +612,16 @@ def test_command_aware_null_normalize_is_supported(tmp_path):
     dim serves in raw space (binary targets are raw ±1 by construction, pose proprio is raw meters)
     and the legality projection lives in WAMPolicy, independent of the normalizer. Deploy must
     return None, not raise — a trainable config must be deployable."""
-    cfg = OmegaConf.create({"dataloader": {
-        "normalize_mode": None, "action_mode": "eef_base", "binary_action_dims": [9, 24],
-        "base_proprio": "global_pose",
-    }})
+    cfg = OmegaConf.create(
+        {
+            "dataloader": {
+                "normalize_mode": None,
+                "action_mode": "eef_base",
+                "binary_action_dims": [9, 24],
+                "base_proprio": "global_pose",
+            }
+        }
+    )
     assert _build_normalizer(cfg, str(tmp_path)) is None  # no stats file needed either
 
 
@@ -617,14 +634,20 @@ def test_command_aware_binary_survives_nonneutral_zscore(tmp_path):
     for d in (9, 24):
         stats["mean"][d], stats["std"][d] = -0.86, 0.51
     np.save(str(tmp_path / "normalization_stats.npy"), {"eef_base": stats, "num_timesteps": 10}, allow_pickle=True)
-    cfg = OmegaConf.create({"dataloader": {
-        "normalize_mode": "z-score", "action_mode": "eef_base", "binary_action_dims": [9, 24],
-    }})
+    cfg = OmegaConf.create(
+        {
+            "dataloader": {
+                "normalize_mode": "z-score",
+                "action_mode": "eef_base",
+                "binary_action_dims": [9, 24],
+            }
+        }
+    )
     normalizer = _build_normalizer(cfg, str(tmp_path))
     x = np.zeros(25, dtype=np.float32)
     x[9], x[24] = 1.0, 1.0
     out = normalizer.unnormalize(x)
-    assert out[9] == 1.0 and out[24] == 1.0        # class preserved (old code: -1)
+    assert out[9] == 1.0 and out[24] == 1.0  # class preserved (old code: -1)
     x[9], x[24] = -1.0, -1.0
     out = normalizer.unnormalize(x)
     assert out[9] == -1.0 and out[24] == -1.0
@@ -643,13 +666,20 @@ def test_command_aware_binary_zscore_under_unify(tmp_path):
     for d in (9, 24):
         stats["mean"][d], stats["std"][d] = -0.86, 0.51
     np.save(str(tmp_path / "normalization_stats.npy"), {"eef_base": stats, "num_timesteps": 10}, allow_pickle=True)
-    cfg = OmegaConf.create({"dataloader": {
-        "normalize_mode": "z-score", "action_mode": "eef_base", "binary_action_dims": [9, 24],
-        "unify_action": True, "unify_action_map": ["0-9", "34-43", "68-72"],
-    }})
+    cfg = OmegaConf.create(
+        {
+            "dataloader": {
+                "normalize_mode": "z-score",
+                "action_mode": "eef_base",
+                "binary_action_dims": [9, 24],
+                "unify_action": True,
+                "unify_action_map": ["0-9", "34-43", "68-72"],
+            }
+        }
+    )
     normalizer = _build_normalizer(cfg, str(tmp_path))
     u = np.zeros(80, dtype=np.float32)
-    u[9], u[72] = 1.0, -1.0           # unified: l_grip at 9, control_mode at 72
+    u[9], u[72] = 1.0, -1.0  # unified: l_grip at 9, control_mode at 72
     out = normalizer.unnormalize(u)
     assert out.shape[-1] == 25
     assert out[9] == 1.0 and out[24] == -1.0

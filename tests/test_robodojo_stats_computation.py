@@ -67,9 +67,7 @@ def test_real_stats_preserve_native_pose_and_load_for_each_embodiment(
         tmp_path,
         T=5,
         embodiment=embodiment,
-        mutate=lambda arrays: arrays["state/left_ee_joint_states"].__setitem__(
-            (0, 0), -0.04
-        ),
+        mutate=lambda arrays: arrays["state/left_ee_joint_states"].__setitem__((0, 0), -0.04),
     )
     output = tmp_path / f"{embodiment}_stats.npy"
     payload = compute_robodojo_stats(
@@ -83,13 +81,9 @@ def test_real_stats_preserve_native_pose_and_load_for_each_embodiment(
     metadata = payload["metadata"]
     assert metadata["variant"] == "real"
     assert metadata["embodiment"] == embodiment
-    assert metadata["source_frame"] == (
-        "per_arm_robot_base_position_and_orientation_wxyz"
-    )
+    assert metadata["source_frame"] == ("per_arm_robot_base_position_and_orientation_wxyz")
     assert metadata["target_frame"] == "per_arm_robot_base"
-    assert metadata["pose_transform"] == (
-        "identity_before_quaternion_to_rot6d"
-    )
+    assert metadata["pose_transform"] == ("identity_before_quaternion_to_rot6d")
     assert metadata["contract_id"] == "robodojo-real-native-eef20-v1"
     assert "frame_contract_fingerprint" in metadata
     assert "calibration_fingerprint" not in metadata
@@ -140,12 +134,8 @@ def test_pools_all_states_and_only_real_next_state_targets_without_crossing_epis
     assert metadata["action_rows"] == 5
     assert metadata["num_timesteps"] == 12
     assert metadata["tasks"] == ["task_a"]
-    assert metadata["calibration_fingerprint"] == calibration_fingerprint(
-        valid_calibration()
-    )
-    assert metadata["source_frame"] == (
-        "env_origin_relative_position_world_orientation_wxyz"
-    )
+    assert metadata["calibration_fingerprint"] == calibration_fingerprint(valid_calibration())
+    assert metadata["source_frame"] == ("env_origin_relative_position_world_orientation_wxyz")
     assert metadata["endpoint"] == "link6"
     assert metadata["embodiment"] == "arx_x5"
     assert metadata["contract_id"] == "robodojo-eef20-v1"
@@ -153,9 +143,7 @@ def test_pools_all_states_and_only_real_next_state_targets_without_crossing_epis
 
     episode_0 = expected_raw_eef20(4)
     episode_1 = expected_raw_eef20(3)
-    expected_pool = np.concatenate(
-        [episode_0, episode_0[1:], episode_1, episode_1[1:]], axis=0
-    )
+    expected_pool = np.concatenate([episode_0, episode_0[1:], episode_1, episode_1[1:]], axis=0)
     ordinary_dims = np.setdiff1d(np.arange(20), ROT6D_DIMS_EEF20)
     np.testing.assert_allclose(
         np.asarray(eef["mean"])[ordinary_dims],
@@ -237,9 +225,7 @@ def test_atomic_build_writes_deploy_payload_and_leaves_no_partial_file(
 
     direct = tmp_path / "direct.npy"
     atomic_save_stats_npy(direct, loaded)
-    assert np.load(direct, allow_pickle=True).item()["metadata"] == loaded[
-        "metadata"
-    ]
+    assert np.load(direct, allow_pickle=True).item()["metadata"] == loaded["metadata"]
 
 
 def test_generated_stats_are_compatible_with_generic_deploy_normalizer(

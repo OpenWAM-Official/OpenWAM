@@ -258,7 +258,9 @@ def test_summary_cache_stays_rejected_for_quantile(bucket):
     cache = root / "meta" / "ebench_normalization_stats.npy"
     ebench_mod._atomic_save_npy(cache, ebench_mod._stats_cache_payload(summary, N_EPS * EP_LEN, fingerprint, "ebench"))
     with pytest.raises(ValueError, match="q01"):
-        _load_or_build_stats([bucket], DELTA_KEYS, action_mode="ebench", dataset_dir=str(root), normalize_mode="quantile")
+        _load_or_build_stats(
+            [bucket], DELTA_KEYS, action_mode="ebench", dataset_dir=str(root), normalize_mode="quantile"
+        )
 
 
 def test_quantile_train_deploy_round_trip(bucket):

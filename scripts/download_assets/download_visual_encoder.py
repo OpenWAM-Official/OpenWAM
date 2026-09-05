@@ -80,16 +80,16 @@ def red(t: str) -> str:
 @dataclass(frozen=True)
 class Model:
     name: str
-    config: str                        # yaml under configs/model/video_backbone/encoder/
-    subdir: str                        # directory name under the storage root
-    approx_gb: float                   # fallback size when the live query fails
-    repo_id: str | None = None         # HuggingFace repo id (None = direct URL model)
-    ms_id: str | None = None           # ModelScope id (defaults to repo_id)
+    config: str  # yaml under configs/model/video_backbone/encoder/
+    subdir: str  # directory name under the storage root
+    approx_gb: float  # fallback size when the live query fails
+    repo_id: str | None = None  # HuggingFace repo id (None = direct URL model)
+    ms_id: str | None = None  # ModelScope id (defaults to repo_id)
     allow_patterns: tuple[str, ...] | None = None  # partial hub download
-    direct_url: str | None = None      # direct-download models (no HF/MS hosting)
-    manifest: dict | None = None       # written as <subdir>/manifest.json after download
-    config_subpath: str = ""           # appended to the target dir in the yaml path
-    hf_gated: str | None = None        # gate note shown when huggingface is selected
+    direct_url: str | None = None  # direct-download models (no HF/MS hosting)
+    manifest: dict | None = None  # written as <subdir>/manifest.json after download
+    config_subpath: str = ""  # appended to the target dir in the yaml path
+    hf_gated: str | None = None  # gate note shown when huggingface is selected
 
 
 MODELS: dict[str, Model] = {
@@ -189,8 +189,12 @@ def choose_model() -> Model:
 def choose_source(model: Model) -> str:
     if model.direct_url:
         print()
-        print(yellow(f"{model.name} is not hosted on HuggingFace/ModelScope; it is downloaded "
-                     f"from the official release URL:\n  {model.direct_url}"))
+        print(
+            yellow(
+                f"{model.name} is not hosted on HuggingFace/ModelScope; it is downloaded "
+                f"from the official release URL:\n  {model.direct_url}"
+            )
+        )
         return "direct"
     key = ask_choice(
         "Select the download source",

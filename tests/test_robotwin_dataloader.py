@@ -1136,9 +1136,7 @@ def test_discover_robotwin_roots_loads_every_task_directory(tmp_path):
 
     for task in ("task_b", "task_a", "custom_task"):
         (tmp_path / task / "test-robot_clean_50" / "data").mkdir(parents=True)
-    (tmp_path / "wrong_variant" / "test-robot_randomized_500" / "data").mkdir(
-        parents=True
-    )
+    (tmp_path / "wrong_variant" / "test-robot_randomized_500" / "data").mkdir(parents=True)
     (tmp_path / "not_a_task").mkdir()
 
     roots = discover_robotwin_roots(

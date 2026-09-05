@@ -10,6 +10,7 @@ Deliberately dependency-free (no ``openwam`` / torch imports) so it loads inside
 the thin RoboCasa365 eval environment.
 """
 
+
 def format_prompt_for_inference(base_prompt: str) -> str:
     """Return the native RoboCasa365 instruction unchanged."""
     return base_prompt

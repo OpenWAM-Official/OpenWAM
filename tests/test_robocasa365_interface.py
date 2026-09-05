@@ -78,6 +78,4 @@ def test_state19_keeps_xyzw_base_and_eef_quaternion_conversion():
 
 def test_representation_handshake_rejects_wrong_contract():
     with pytest.raises(RuntimeError, match="representation mismatch"):
-        adapter.OpenWAMRoboCasa365Policy(
-            _client=_Client(_action15(), representation="wrong_contract")
-        )
+        adapter.OpenWAMRoboCasa365Policy(_client=_Client(_action15(), representation="wrong_contract"))

@@ -97,9 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     from benchmarks.libero import scheduler
 
     scheduler.SCRIPT_DIR = BENCHMARK_DIR
-    scheduler.DEFAULT_CKPT_DIR = Path(
-        "/path/to/openwam_checkpoints/new-openwam-libero-sft-10epoch-final"
-    )
+    scheduler.DEFAULT_CKPT_DIR = Path("/path/to/openwam_checkpoints/new-openwam-libero-sft-10epoch-final")
     scheduler.DEFAULT_CKPT_NAME = "checkpoint_step_10690.safetensors"
     scheduler.DEFAULT_POLICY_CONFIG = BENCHMARK_DIR / "policy_config.yml"
     scheduler.DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs" / "libero"
@@ -128,22 +126,24 @@ def main(argv: list[str] | None = None) -> int:
     if "--policy-config" not in args:
         args.extend(("--policy-config", str(BENCHMARK_DIR / "policy_config.yml")))
     # Require the canonical action mode before launching any workers.
-    config_index = args.index("--policy-config") if "--policy-config" in args else next(
-        (i for i, value in enumerate(args) if value.startswith("--policy-config=")), -1
+    config_index = (
+        args.index("--policy-config")
+        if "--policy-config" in args
+        else next((i for i, value in enumerate(args) if value.startswith("--policy-config=")), -1)
     )
     config_path = (
         Path(args[config_index + 1])
         if config_index >= 0 and args[config_index] == "--policy-config"
-        else Path(args[config_index].split("=", 1)[1]) if config_index >= 0 else None
+        else Path(args[config_index].split("=", 1)[1])
+        if config_index >= 0
+        else None
     )
     if config_path is not None:
         import yaml
 
         config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         if str(config.get("action_mode", "")).strip().lower() != "eef":
-            raise ValueError(
-                f"{config_path} is not a canonical LIBERO config; expected action_mode: eef"
-            )
+            raise ValueError(f"{config_path} is not a canonical LIBERO config; expected action_mode: eef")
     return scheduler.main(args)
 
 

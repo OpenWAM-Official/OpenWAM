@@ -153,11 +153,7 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
         if ab is None:
             raise RuntimeError("action_backbone is None — cannot predict cross-attn actions.")
         compiled_forward = getattr(self, "_compiled_action_forward", None)
-        if (
-            compiled_forward is not None
-            and not use_gradient_checkpointing
-            and not use_gradient_checkpointing_offload
-        ):
+        if compiled_forward is not None and not use_gradient_checkpointing and not use_gradient_checkpointing_offload:
             bridge_tuple = ab.bridge_tuple_from_dict(bridges)
             try:
                 torch.compiler.cudagraph_mark_step_begin()

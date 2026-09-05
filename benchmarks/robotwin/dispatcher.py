@@ -184,7 +184,9 @@ class Scheduler:
                 f"[dispatcher] refusing to append to non-empty {results_path} (would double-count on restart). "
                 "Use a fresh --results path / run id, or pass --append-results to override."
             )
-        self._results_fh = open(results_path, "a" if append_results else "w", encoding="utf-8") if results_path else None
+        self._results_fh = (
+            open(results_path, "a" if append_results else "w", encoding="utf-8") if results_path else None
+        )
 
     def _max_attempts_for(self, job: Job) -> Optional[int]:
         if self._max_attempt_factor <= 0:
@@ -231,8 +233,7 @@ class Scheduler:
             self._quarantine_poison_locked()  # drop un-bootable jobs before RESCUE feeds them workers
 
             rescue = [
-                j for j in self._jobs.values()
-                if j.started and not j.exhausted and j.remaining > 0 and j.live_envs == 0
+                j for j in self._jobs.values() if j.started and not j.exhausted and j.remaining > 0 and j.live_envs == 0
             ]
             if rescue:
                 job = min(rescue, key=lambda j: (-j.remaining, j.order))
@@ -288,8 +289,14 @@ class Scheduler:
         if cap <= 0:
             return
         for j in self._jobs.values():
-            if (not j.exhausted and not j.complete and j.attempts == 0
-                    and j.done == 0 and j.live_envs == 0 and j.boot_failures >= cap):
+            if (
+                not j.exhausted
+                and not j.complete
+                and j.attempts == 0
+                and j.done == 0
+                and j.live_envs == 0
+                and j.boot_failures >= cap
+            ):
                 j.exhausted = True
 
     # -- seed / commit / report --------------------------------------------
@@ -541,9 +548,7 @@ class Scheduler:
             for j in self._jobs.values():
                 rate = (j.suc / j.done) if j.done else 0.0
                 status = "ok" if j.complete else ("exhausted" if j.exhausted else "incomplete")
-                lines.append(
-                    f"{j.task}\t{j.mode}\t{j.suc}\t{j.done}\t{rate:.4f}\t{j.step_limit_hits}\t{status}"
-                )
+                lines.append(f"{j.task}\t{j.mode}\t{j.suc}\t{j.done}\t{rate:.4f}\t{j.step_limit_hits}\t{status}")
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
@@ -770,9 +775,7 @@ def _render_status_html(snap: dict) -> str:
         f"<h3>episodes {done}/{total} &nbsp; live envs {live} &nbsp; "
         f"{'COMPLETE' if snap['complete'] else 'running'}</h3>"
         "<table><tr><th>task</th><th>mode</th><th>done</th><th>%</th>"
-        "<th>live_envs</th><th>committed</th><th>remaining</th><th>suc</th></tr>"
-        + "".join(rows)
-        + "</table>"
+        "<th>live_envs</th><th>committed</th><th>remaining</th><th>suc</th></tr>" + "".join(rows) + "</table>"
     )
 
 
@@ -935,18 +938,45 @@ def _run_self_test() -> int:
     """Representative fleet scenarios. Each runs with dup ON vs OFF so the tail
     speedup is visible; asserts exact counts + zero duplicate seeds in both."""
     scenarios = [
-        dict(name="64 slots / 100 jobs (the motivating case)", num_slots=64,
-             tasks=[f"task{i:02d}" for i in range(50)], modes=["demo_clean", "demo_randomized"],
-             test_num=100, boot_cost=30.0, episode_time=5.0, expert_time=1.0,
-             valid_prob=0.8, success_prob=0.5, theta=8),
-        dict(name="8 slots / 3 jobs (slots >> jobs, extreme tail)", num_slots=8,
-             tasks=["a", "b", "c"], modes=["demo_clean"],
-             test_num=50, boot_cost=20.0, episode_time=4.0, expert_time=0.5,
-             valid_prob=0.7, success_prob=0.6, theta=6),
-        dict(name="64 slots / 1 job (worst case: 63 would idle)", num_slots=64,
-             tasks=["only"], modes=["demo_clean"],
-             test_num=200, boot_cost=30.0, episode_time=5.0, expert_time=1.0,
-             valid_prob=0.8, success_prob=0.5, theta=8),
+        dict(
+            name="64 slots / 100 jobs (the motivating case)",
+            num_slots=64,
+            tasks=[f"task{i:02d}" for i in range(50)],
+            modes=["demo_clean", "demo_randomized"],
+            test_num=100,
+            boot_cost=30.0,
+            episode_time=5.0,
+            expert_time=1.0,
+            valid_prob=0.8,
+            success_prob=0.5,
+            theta=8,
+        ),
+        dict(
+            name="8 slots / 3 jobs (slots >> jobs, extreme tail)",
+            num_slots=8,
+            tasks=["a", "b", "c"],
+            modes=["demo_clean"],
+            test_num=50,
+            boot_cost=20.0,
+            episode_time=4.0,
+            expert_time=0.5,
+            valid_prob=0.7,
+            success_prob=0.6,
+            theta=6,
+        ),
+        dict(
+            name="64 slots / 1 job (worst case: 63 would idle)",
+            num_slots=64,
+            tasks=["only"],
+            modes=["demo_clean"],
+            test_num=200,
+            boot_cost=30.0,
+            episode_time=5.0,
+            expert_time=1.0,
+            valid_prob=0.8,
+            success_prob=0.5,
+            theta=8,
+        ),
     ]
     failed = 0
     for sc in scenarios:
@@ -960,8 +990,8 @@ def _run_self_test() -> int:
         print(
             f"[{'PASS' if ok else 'FAIL'}] {name}\n"
             f"    episodes={dup['episodes']}  jobs={dup['jobs']}\n"
-            f"    no-dup : makespan={nod['makespan']:8.0f}s util={nod['utilization']*100:3.0f}% boots={nod['total_boots']}\n"
-            f"    dup    : makespan={dup['makespan']:8.0f}s util={dup['utilization']*100:3.0f}% boots={dup['total_boots']}\n"
+            f"    no-dup : makespan={nod['makespan']:8.0f}s util={nod['utilization'] * 100:3.0f}% boots={nod['total_boots']}\n"
+            f"    dup    : makespan={dup['makespan']:8.0f}s util={dup['utilization'] * 100:3.0f}% boots={dup['total_boots']}\n"
             f"    speedup: {speedup:.1f}x"
         )
         for p in dup["problems"] + nod["problems"]:
@@ -1001,19 +1031,39 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     ap.add_argument("--http-port", type=int, default=0, help="serve live status HTML/JSON (0=off)")
     ap.add_argument("--state-file", default=None, help="periodically write snapshot JSON here")
-    ap.add_argument("--done-file", default=None,
-                    help="touch this on exit (complete/stall) so all nodes can tear down local workers")
+    ap.add_argument(
+        "--done-file", default=None, help="touch this on exit (complete/stall) so all nodes can tear down local workers"
+    )
     # Liveness / watchdog (H1/H2/H3): keep the dispatcher from ever hanging silently.
-    ap.add_argument("--stall-timeout", type=float, default=1800.0,
-                    help="exit (incomplete) if no RPC of any kind for this many seconds (0=off)")
-    ap.add_argument("--worker-timeout", type=float, default=1200.0,
-                    help="reclaim a worker's in-flight seed if it is silent this long — must exceed one rollout (0=off)")
-    ap.add_argument("--idle-grace", type=float, default=120.0,
-                    help="exit (incomplete) if zero workers are connected for this long while jobs remain")
-    ap.add_argument("--max-attempt-factor", type=float, default=50.0,
-                    help="give up on a task after target*factor seed attempts (0=unlimited)")
-    ap.add_argument("--append-results", action="store_true",
-                    help="append to an existing results.jsonl instead of refusing (risks double-count)")
+    ap.add_argument(
+        "--stall-timeout",
+        type=float,
+        default=1800.0,
+        help="exit (incomplete) if no RPC of any kind for this many seconds (0=off)",
+    )
+    ap.add_argument(
+        "--worker-timeout",
+        type=float,
+        default=1200.0,
+        help="reclaim a worker's in-flight seed if it is silent this long — must exceed one rollout (0=off)",
+    )
+    ap.add_argument(
+        "--idle-grace",
+        type=float,
+        default=120.0,
+        help="exit (incomplete) if zero workers are connected for this long while jobs remain",
+    )
+    ap.add_argument(
+        "--max-attempt-factor",
+        type=float,
+        default=50.0,
+        help="give up on a task after target*factor seed attempts (0=unlimited)",
+    )
+    ap.add_argument(
+        "--append-results",
+        action="store_true",
+        help="append to an existing results.jsonl instead of refusing (risks double-count)",
+    )
     args = ap.parse_args(argv)
 
     if args.self_test:
@@ -1061,6 +1111,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # KeyboardInterrupt path Ctrl+C already takes so teardown always runs.
     def _raise_kbint(*_a):
         raise KeyboardInterrupt
+
     signal.signal(signal.SIGTERM, _raise_kbint)  # TERM -> same graceful teardown as Ctrl+C
 
     stalled: Optional[str] = None

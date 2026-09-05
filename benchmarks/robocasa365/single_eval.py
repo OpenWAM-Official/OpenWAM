@@ -117,12 +117,8 @@ def _build_policy(cfg: dict) -> OpenWAMRoboCasa365Policy:
         port=int(cfg.get("port", 8848)),
         request_timeout=int(cfg.get("request_timeout", 300)),
         head_camera_key=cfg.get("head_camera_key", DEFAULT_HEAD_CAMERA_KEY),
-        left_wrist_camera_key=_normalize_optional(
-            cfg.get("left_wrist_camera_key", DEFAULT_LEFT_WRIST_CAMERA_KEY)
-        ),
-        right_wrist_camera_key=_normalize_optional(
-            cfg.get("right_wrist_camera_key", DEFAULT_RIGHT_CAMERA_KEY)
-        ),
+        left_wrist_camera_key=_normalize_optional(cfg.get("left_wrist_camera_key", DEFAULT_LEFT_WRIST_CAMERA_KEY)),
+        right_wrist_camera_key=_normalize_optional(cfg.get("right_wrist_camera_key", DEFAULT_RIGHT_CAMERA_KEY)),
         image_transform=cfg.get("image_transform", "none"),
         state_keys=list(cfg.get("state_keys") or DEFAULT_STATE_KEYS),
         # Default None selects the compact 19-D state contract.
@@ -168,7 +164,9 @@ def run_eval(cfg: dict) -> int:
     num_trials = int(cfg.get("num_trials", 5))
     max_steps = _resolve_max_steps(cfg)
     seed = int(cfg.get("seed", 0))
-    source = "max_steps_override" if _normalize_optional(cfg.get("max_steps_override")) is not None else "RoboCasa registry"
+    source = (
+        "max_steps_override" if _normalize_optional(cfg.get("max_steps_override")) is not None else "RoboCasa registry"
+    )
     print(f"[eval] task={cfg.get('task')} max_steps={max_steps} (source={source})")
 
     # Nested try/finally so the already-connected policy is closed even if

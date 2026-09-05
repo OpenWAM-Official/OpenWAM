@@ -96,8 +96,7 @@ def droid_pose6_closedness_to_arm10(pose: np.ndarray, closedness: np.ndarray) ->
         raise ValueError(f"DROID closedness must have width 1, got shape {closedness.shape}")
     if pose.shape[:-1] != closedness.shape[:-1]:
         raise ValueError(
-            "DROID pose and closedness leading shapes must match, got "
-            f"{pose.shape} and {closedness.shape}"
+            f"DROID pose and closedness leading shapes must match, got {pose.shape} and {closedness.shape}"
         )
     return droid_euler7_to_arm10(np.concatenate([pose, closedness], axis=-1))
 

@@ -54,8 +54,15 @@ def test_run_block_3d_matches_5d_video_only():
     lora = s3.extras["adaln_lora_B_T_3D"]
     block = backbone.dit.blocks[0]
     out_3d = shared_block.run_block_3d(
-        block, x3d, emb, lora, s3.extras["rope_emb_L_1_1_D"], s3.context, None,
-        grid_frames=T, tokens_per_frame=tpf,
+        block,
+        x3d,
+        emb,
+        lora,
+        s3.extras["rope_emb_L_1_1_D"],
+        s3.context,
+        None,
+        grid_frames=T,
+        tokens_per_frame=tpf,
     )
 
     assert torch.allclose(out_5d_flat, out_3d, atol=1e-5, rtol=1e-5), (

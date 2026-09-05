@@ -157,17 +157,13 @@ class TestWholeBucketExclusion:
         )
         assert result["eef"]["num_datasets"] == 1
         assert result["eef"]["num_timesteps"] == 20  # action + state
-        assert result["whole_bucket_exclusions_provenance"] == (
-            robocoin_bucket_exclusions_provenance("airbot_mmk2")
-        )
+        assert result["whole_bucket_exclusions_provenance"] == (robocoin_bucket_exclusions_provenance("airbot_mmk2"))
 
     def test_affected_robot_type_rejects_stats_without_exclusion_provenance(self, tmp_path):
         root = tmp_path / "root"
         bucket = _make_bucket(root / "kept-airbot", [40])
         _set_robot_type(bucket, "airbot_mmk2")
-        payload = compute_stats_for_robot_type(
-            "airbot_mmk2", [str(bucket)], rot6d_identity=False
-        )
+        payload = compute_stats_for_robot_type("airbot_mmk2", [str(bucket)], rot6d_identity=False)
         payload.pop("whole_bucket_exclusions_provenance")
         meta = root / "meta"
         meta.mkdir(exist_ok=True)
@@ -269,9 +265,7 @@ class TestTrimmedPopulationStats:
         assert result["eef"]["num_timesteps"] == 12
         assert result["eef"]["min"][0] == pytest.approx(2.0)
         assert result["eef"]["max"][0] == pytest.approx(7.0)
-        assert result["excluded_episodes_provenance"]["datasets"] == {
-            "bucket": {"episode_indices": [1]}
-        }
+        assert result["excluded_episodes_provenance"]["datasets"] == {"bucket": {"episode_indices": [1]}}
 
     @pytest.mark.parametrize(
         ("episode_index", "total_frames"),

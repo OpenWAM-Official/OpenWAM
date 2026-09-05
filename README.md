@@ -221,7 +221,7 @@ python scripts/download_assets/download_visual_encoder.py
 Unlike steps 1-4, which fetch the components for training your own model,
 this downloader fetches a **finished OpenWAM checkpoint** from our public
 [collections](https://huggingface.co/OpenWAM) — the OpenWAM-Alpha releases or
-the OpenWAM-Study ablations. 
+the OpenWAM-Study ablations.
 
 If you just want to test or finetune from a
 released checkpoint, you can skip the component downloads above entirely:

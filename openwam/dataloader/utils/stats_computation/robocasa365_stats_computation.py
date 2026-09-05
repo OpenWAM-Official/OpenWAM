@@ -243,9 +243,7 @@ def main() -> int:
         output = args.output
         payload = compute_normalization_stats(args.data_root[0], args.task)
     else:
-        output = args.output or os.path.join(
-            args.data_root[0], "meta", "robocasa365_normalization_stats.npy"
-        )
+        output = args.output or os.path.join(args.data_root[0], "meta", "robocasa365_normalization_stats.npy")
         payload = compute_multitask_stats([(None, root) for root in args.data_root])
     os.makedirs(os.path.dirname(str(output)) or ".", exist_ok=True)
     if ACTION_STATS_KEY not in payload or STATE_STATS_KEY not in payload:

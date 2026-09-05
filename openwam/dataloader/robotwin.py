@@ -328,9 +328,7 @@ class RoboTwinDataset(BaseDataset):
         self.action_mode = action_mode
         self._unify_action = bool(unify_action)
         self._unify_action_map = unify_action_map
-        if unify_state_map is not None and list(unify_state_map) != list(
-            self._unify_action_map or ()
-        ):
+        if unify_state_map is not None and list(unify_state_map) != list(self._unify_action_map or ()):
             raise ValueError(
                 "unify_state_map must be null or equal to unify_action_map here: "
                 "this reader's state shares the action's raw layout"
@@ -616,7 +614,6 @@ class RoboTwinDataset(BaseDataset):
                         pass
             if self._instructions:
                 print(f"  Loaded {len(self._instructions)} instruction files")
-
 
     @property
     def action_dim(self) -> int:
@@ -996,8 +993,7 @@ class MultiTaskRoboTwinDataset(BaseDataset):
 
         if not all_roots:
             raise FileNotFoundError(
-                f"No task data found in {dataset_dir} for embodiment={embodiment}, "
-                f"variant={variant}."
+                f"No task data found in {dataset_dir} for embodiment={embodiment}, variant={variant}."
             )
 
         print(

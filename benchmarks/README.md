@@ -88,10 +88,10 @@ Client helpers live under `benchmarks/utils/client.py` and can be imported direc
 
 ```python
 from benchmarks.utils import (
-    build_payload,      # assemble the {"images": {...}, "prompt": ...} dict
-    encode_path_b64,    # PNG path -> base64 str
-    WSPolicyClient,     # WebSocket transport — predict() / reset() / ping()
-    ServerError,        # structured server error: .status / .code / .message
+    build_payload,  # assemble the {"images": {...}, "prompt": ...} dict
+    encode_path_b64,  # PNG path -> base64 str
+    WSPolicyClient,  # WebSocket transport — predict() / reset() / ping()
+    ServerError,  # structured server error: .status / .code / .message
 )
 
 ws_url = "ws://127.0.0.1:8848"
@@ -99,16 +99,16 @@ ws_url = "ws://127.0.0.1:8848"
 # One persistent connection; obs/reset auto-reconnect once on a dropped socket,
 # ping fails fast. open_timeout caps connection setup; timeout caps a round-trip.
 with WSPolicyClient(ws_url, timeout=300.0, open_timeout=10.0) as client:
-    client.ping()        # verify / wait for the server to be up (raises if unreachable)
+    client.ping()  # verify / wait for the server to be up (raises if unreachable)
 
     # --- start of episode ---
     client.reset()
 
     # --- per-step ---
-    head_b64  = encode_path_b64("/path/to/head.png")
-    left_b64  = encode_path_b64("/path/to/left.png")   # or None
+    head_b64 = encode_path_b64("/path/to/head.png")
+    left_b64 = encode_path_b64("/path/to/left.png")  # or None
     right_b64 = encode_path_b64("/path/to/right.png")  # or None
-    current_state = [0.0] * 20                         # replace with your raw proprio vector
+    current_state = [0.0] * 20  # replace with your raw proprio vector
 
     payload = build_payload(
         head=head_b64,
@@ -118,7 +118,7 @@ with WSPolicyClient(ws_url, timeout=300.0, open_timeout=10.0) as client:
         state=current_state,  # optional raw proprio; required for proprio-conditioned checkpoints
     )
     try:
-        action = client.predict(payload)["action"]   # already in physical units — feed to controller
+        action = client.predict(payload)["action"]  # already in physical units — feed to controller
     except ServerError as e:
         print(f"server rejected the request [{e.status} {e.code}]: {e.message}")
         raise

@@ -30,9 +30,7 @@ REAL_FRAME_SCHEMA_VERSION = 1
 ENDPOINT_LINK_NAME = "link6"
 ENDPOINT_POSE_FRAME_CONTRACT = "rigid_terminal_arm_frame_independent_of_gripper_motion"
 REAL_ENDPOINT_NAME = "recorded_ee_pose"
-ROBODOJO_SIM_SOURCE_FRAME = (
-    "env_origin_relative_position_world_orientation_wxyz"
-)
+ROBODOJO_SIM_SOURCE_FRAME = "env_origin_relative_position_world_orientation_wxyz"
 ROBODOJO_REAL_SOURCE_FRAME = "per_arm_robot_base_position_and_orientation_wxyz"
 ROBODOJO_TARGET_FRAME = "per_arm_robot_base"
 ARM_NAMES = ("left", "right")
@@ -72,10 +70,7 @@ _QUATERNION_ATOL = 1e-6
 def validate_dataset_variant(variant: str) -> None:
     """Validate the explicit simulation/real dataset release selector."""
     if variant not in ROBODOJO_DATASET_VARIANTS:
-        raise ValueError(
-            "RoboDojo variant must be one of "
-            f"{list(ROBODOJO_DATASET_VARIANTS)}, got {variant!r}"
-        )
+        raise ValueError(f"RoboDojo variant must be one of {list(ROBODOJO_DATASET_VARIANTS)}, got {variant!r}")
 
 
 def validate_embodiment(
@@ -85,20 +80,14 @@ def validate_embodiment(
 ) -> None:
     """Validate an embodiment against the selected RoboDojo release."""
     validate_dataset_variant(variant)
-    supported = (
-        (ROBODOJO_EMBODIMENT,)
-        if variant == ROBODOJO_SIM_VARIANT
-        else ROBODOJO_REAL_EMBODIMENTS
-    )
+    supported = (ROBODOJO_EMBODIMENT,) if variant == ROBODOJO_SIM_VARIANT else ROBODOJO_REAL_EMBODIMENTS
     if embodiment not in supported:
         if variant == ROBODOJO_SIM_VARIANT:
             raise ValueError(
-                "RoboDojo sim's only supported OpenWAM embodiment is "
-                f"'{ROBODOJO_EMBODIMENT}', got {embodiment!r}"
+                f"RoboDojo sim's only supported OpenWAM embodiment is '{ROBODOJO_EMBODIMENT}', got {embodiment!r}"
             )
         raise ValueError(
-            f"RoboDojo {variant}'s supported OpenWAM embodiments are "
-            f"{list(supported)}, got {embodiment!r}"
+            f"RoboDojo {variant}'s supported OpenWAM embodiments are {list(supported)}, got {embodiment!r}"
         )
 
 
@@ -121,16 +110,8 @@ def robodojo_real_frame_contract(embodiment: str) -> dict[str, Any]:
 
 
 def _validate_task_name(task: str) -> None:
-    if (
-        not isinstance(task, str)
-        or not task
-        or task in {".", ".."}
-        or "/" in task
-        or "\\" in task
-    ):
-        raise ValueError(
-            f"RoboDojo task must be a non-empty single path component, got {task!r}"
-        )
+    if not isinstance(task, str) or not task or task in {".", ".."} or "/" in task or "\\" in task:
+        raise ValueError(f"RoboDojo task must be a non-empty single path component, got {task!r}")
 
 
 def discover_episodes(
@@ -161,14 +142,10 @@ def discover_episodes(
                 "flat RoboDojo demo layout '<dataset_root>/arx_x5/data' is not supported; "
                 "use '<dataset_root>/<task>/arx_x5/data'"
             )
-        raise FileNotFoundError(
-            f"formal RoboDojo data directory does not exist: {data_dir}"
-        )
+        raise FileNotFoundError(f"formal RoboDojo data directory does not exist: {data_dir}")
     episodes = sorted(path for path in data_dir.glob(FORMAL_EPISODE_GLOB) if path.is_file())
     if not episodes:
-        raise FileNotFoundError(
-            f"no RoboDojo episodes matching {FORMAL_EPISODE_GLOB!r} in {data_dir}"
-        )
+        raise FileNotFoundError(f"no RoboDojo episodes matching {FORMAL_EPISODE_GLOB!r} in {data_dir}")
     return episodes
 
 
@@ -227,8 +204,7 @@ def _validate_arm_calibration(value: Any, arm_name: str) -> dict[str, list[float
     norm = float(np.linalg.norm(quaternion))
     if not np.isclose(norm, 1.0, rtol=0.0, atol=_QUATERNION_ATOL):
         raise ValueError(
-            f"calibration arms.{arm_name}.base_quat_wxyz must be a unit "
-            f"wxyz quaternion; norm is {norm:.8g}"
+            f"calibration arms.{arm_name}.base_quat_wxyz must be a unit wxyz quaternion; norm is {norm:.8g}"
         )
     quaternion = quaternion / norm
     return {
@@ -295,24 +271,17 @@ def validate_calibration(value: Any) -> dict[str, Any]:
         or not isinstance(schema_version, int)
         or schema_version != CALIBRATION_SCHEMA_VERSION
     ):
-        raise ValueError(
-            "calibration schema_version must be "
-            f"{CALIBRATION_SCHEMA_VERSION}, got {schema_version!r}"
-        )
+        raise ValueError(f"calibration schema_version must be {CALIBRATION_SCHEMA_VERSION}, got {schema_version!r}")
 
     embodiment = calibration["embodiment"]
     if embodiment != ROBODOJO_EMBODIMENT:
-        raise ValueError(
-            f"calibration embodiment must be {ROBODOJO_EMBODIMENT!r}, "
-            f"got {embodiment!r}"
-        )
+        raise ValueError(f"calibration embodiment must be {ROBODOJO_EMBODIMENT!r}, got {embodiment!r}")
 
     endpoint = _require_mapping(calibration["endpoint"], "calibration endpoint")
     _require_exact_keys(endpoint, _ENDPOINT_KEYS, "calibration endpoint")
     if endpoint["link_name"] != ENDPOINT_LINK_NAME:
         raise ValueError(
-            f"calibration endpoint link_name must be {ENDPOINT_LINK_NAME!r}, "
-            f"got {endpoint['link_name']!r}"
+            f"calibration endpoint link_name must be {ENDPOINT_LINK_NAME!r}, got {endpoint['link_name']!r}"
         )
     if endpoint["pose_frame_contract"] != ENDPOINT_POSE_FRAME_CONTRACT:
         raise ValueError(
@@ -325,10 +294,7 @@ def validate_calibration(value: Any) -> dict[str, Any]:
     if set(arms) != set(ARM_NAMES):
         missing = sorted(set(ARM_NAMES) - set(arms))
         extra = sorted(set(arms) - set(ARM_NAMES))
-        raise ValueError(
-            "calibration arms must contain exactly left and right; "
-            f"missing={missing}, extra={extra}"
-        )
+        raise ValueError(f"calibration arms must contain exactly left and right; missing={missing}, extra={extra}")
 
     return {
         "schema_version": CALIBRATION_SCHEMA_VERSION,
@@ -337,10 +303,7 @@ def validate_calibration(value: Any) -> dict[str, Any]:
             "link_name": ENDPOINT_LINK_NAME,
             "pose_frame_contract": ENDPOINT_POSE_FRAME_CONTRACT,
         },
-        "arms": {
-            arm_name: _validate_arm_calibration(arms[arm_name], arm_name)
-            for arm_name in ARM_NAMES
-        },
+        "arms": {arm_name: _validate_arm_calibration(arms[arm_name], arm_name) for arm_name in ARM_NAMES},
     }
 
 
@@ -350,9 +313,7 @@ def load_calibration(path: str | Path) -> dict[str, Any]:
     try:
         value = json.loads(calibration_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
-        raise ValueError(
-            f"invalid calibration JSON in {calibration_path}: {error.msg}"
-        ) from error
+        raise ValueError(f"invalid calibration JSON in {calibration_path}: {error.msg}") from error
     return validate_calibration(value)
 
 

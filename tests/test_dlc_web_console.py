@@ -78,8 +78,7 @@ def test_dlc_snapshot_merges_summary_queue_and_success_rates(tmp_path):
     )
     (root / "node0" / "worker0" / "worker.log").write_text("started\n", encoding="utf-8")
     (root / "summary.tsv").write_text(
-        "task\tmode\tnode\tworker\tstatus\texit_code\tlog\n"
-        f"adjust_bottle\tdemo_clean\t0\t0\tok\t0\t{task_log}\n",
+        f"task\tmode\tnode\tworker\tstatus\texit_code\tlog\nadjust_bottle\tdemo_clean\t0\t0\tok\t0\t{task_log}\n",
         encoding="utf-8",
     )
 
@@ -95,7 +94,10 @@ def test_dlc_snapshot_merges_summary_queue_and_success_rates(tmp_path):
     assert metric_by_id(snapshot, "robotwin_demo_clean_success_rate")["raw_value"] == 65.0
     assert metric_by_id(snapshot, "robotwin_demo_randomized_success_rate")["raw_value"] is None
     assert len(snapshot["jobs"]) == 3
-    assert any(job["status"] == "running" and job["log"].endswith("beat_block_hammer_demo_randomized.log") for job in snapshot["jobs"])
+    assert any(
+        job["status"] == "running" and job["log"].endswith("beat_block_hammer_demo_randomized.log")
+        for job in snapshot["jobs"]
+    )
     assert snapshot["nodes"][0]["workers"][0]["running"] == 1
 
 
@@ -105,8 +107,7 @@ def test_dlc_snapshot_exposes_robotwin_mode_custom_metrics(tmp_path):
     worker_dir = root / "node0" / "worker0"
     worker_dir.mkdir(parents=True)
     (root / "run.env").write_text(
-        "run_id=modes\npolicy_name=openwam\nmode=all\ntotal_jobs=4\n"
-        "tasks=clean_a clean_b random_a random_b\n",
+        "run_id=modes\npolicy_name=openwam\nmode=all\ntotal_jobs=4\ntasks=clean_a clean_b random_a random_b\n",
         encoding="utf-8",
     )
     logs = {
@@ -184,8 +185,7 @@ def test_dlc_snapshot_collects_failure_snippets_and_csv_rows(tmp_path):
         encoding="utf-8",
     )
     (root / "summary.tsv").write_text(
-        "task\tmode\tnode\tworker\tstatus\texit_code\tlog\n"
-        f"bad_task\tdemo_clean\t0\t0\tfailed\t137\t{task_log}\n",
+        f"task\tmode\tnode\tworker\tstatus\texit_code\tlog\nbad_task\tdemo_clean\t0\t0\tfailed\t137\t{task_log}\n",
         encoding="utf-8",
     )
 
@@ -234,8 +234,7 @@ def test_results_csv_derives_all_columns_from_full_log_not_tail(tmp_path):
         encoding="utf-8",
     )
     (root / "summary.tsv").write_text(
-        "task\tmode\tnode\tworker\tstatus\texit_code\tlog\n"
-        f"bad_step_limit\tdemo_clean\t0\t0\tok\t0\t{task_log}\n",
+        f"task\tmode\tnode\tworker\tstatus\texit_code\tlog\nbad_step_limit\tdemo_clean\t0\t0\tok\t0\t{task_log}\n",
         encoding="utf-8",
     )
 
@@ -272,8 +271,7 @@ def test_results_csv_reports_zero_episodes_not_blank_when_log_is_readable(tmp_pa
     task_log = worker_dir / "bad_task_demo_clean.log"
     task_log.write_text("booting policy server...\nstep: 1 / 160\r", encoding="utf-8")
     (root / "summary.tsv").write_text(
-        "task\tmode\tnode\tworker\tstatus\texit_code\tlog\n"
-        f"bad_task\tdemo_clean\t0\t0\tfailed\t1\t{task_log}\n",
+        f"task\tmode\tnode\tworker\tstatus\texit_code\tlog\nbad_task\tdemo_clean\t0\t0\tfailed\t1\t{task_log}\n",
         encoding="utf-8",
     )
 
@@ -297,8 +295,7 @@ def test_dlc_snapshot_does_not_read_failure_snippet_outside_root(tmp_path):
         encoding="utf-8",
     )
     (root / "summary.tsv").write_text(
-        "task\tmode\tnode\tworker\tstatus\texit_code\tlog\n"
-        f"bad_task\tdemo_clean\t0\t0\tfailed\t1\t{outside}\n",
+        f"task\tmode\tnode\tworker\tstatus\texit_code\tlog\nbad_task\tdemo_clean\t0\t0\tfailed\t1\t{outside}\n",
         encoding="utf-8",
     )
 

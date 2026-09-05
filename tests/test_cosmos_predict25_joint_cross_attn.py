@@ -165,9 +165,7 @@ def test_video_only_path_matches_full_forward_video():
     assert a_none is None
     assert v_only.ndim == 5 and v_only.shape == latents.shape
 
-    v_full, _ = arch.forward(
-        noisy_actions, a_ts, input_latents=latents, context=context, timestep=torch.tensor([0.5])
-    )
+    v_full, _ = arch.forward(noisy_actions, a_ts, input_latents=latents, context=context, timestep=torch.tensor([0.5]))
     assert torch.allclose(v_only, v_full, atol=1e-6)
 
 

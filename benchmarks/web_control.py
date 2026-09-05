@@ -74,7 +74,9 @@ def format_duration(seconds: float | None) -> str:
 
 
 def mode_list(requested_mode: str) -> tuple[str, ...]:
-    return ("demo_clean", "demo_randomized") if requested_mode == "all" else ((requested_mode,) if requested_mode else ())
+    return (
+        ("demo_clean", "demo_randomized") if requested_mode == "all" else ((requested_mode,) if requested_mode else ())
+    )
 
 
 def expected_job_keys(run_env: dict[str, str]) -> set[tuple[str, str]]:
@@ -109,8 +111,8 @@ def csv_bytes(rows: list[dict[str, Any]], fieldnames: list[str]) -> bytes:
 def html_response_bytes(text: str) -> bytes:
     body = html.escape(text)
     return (
-        "<!doctype html><html><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        '<!doctype html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
         "<title>Benchmark Control Error</title>"
         "<style>body{font-family:sans-serif;margin:2rem;background:#f1eee7;color:#17211e}"
         "pre{white-space:pre-wrap;background:#fffaf0;border:1px solid #ddd;padding:1rem;border-radius:.75rem}</style>"
@@ -119,9 +121,7 @@ def html_response_bytes(text: str) -> bytes:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Start a real-time web control console for a benchmark log directory."
-    )
+    parser = argparse.ArgumentParser(description="Start a real-time web control console for a benchmark log directory.")
     parser.add_argument(
         "log_dir",
         type=Path,
@@ -710,6 +710,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
     benchmark = "robotwin"
     title = "RoboTwin Control"
     csv_filename = "robotwin_results.csv"
+
     def build(self) -> dict[str, Any]:
         # Episode-level dispatcher runs (parallel_eval.sh / dlc_parallel_eval.sh)
         # publish a live `state.json` (and per-episode `results.jsonl`) to the
@@ -819,9 +820,19 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                 a["suc"] += 1 if rec.get("success") else 0
                 a["slh"] += 1 if rec.get("step_limit_hit") else 0
             raw_jobs = [
-                {"task": t, "mode": m, "done": a["done"], "suc": a["suc"], "target": target_default,
-                 "committed": 0, "probing": 0, "live_envs": 0, "started": True,
-                 "step_limit_hits": a["slh"], "remaining": max(0, target_default - a["done"])}
+                {
+                    "task": t,
+                    "mode": m,
+                    "done": a["done"],
+                    "suc": a["suc"],
+                    "target": target_default,
+                    "committed": 0,
+                    "probing": 0,
+                    "live_envs": 0,
+                    "started": True,
+                    "step_limit_hits": a["slh"],
+                    "remaining": max(0, target_default - a["done"]),
+                }
                 for (t, m), a in agg.items()
             ]
 
@@ -871,7 +882,13 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                 }
             )
         priority = {"failed": 0, "exhausted": 0, "running": 1, "pending": 2, "ok": 3, "done": 4}
-        jobs.sort(key=lambda it: (priority.get(str(it.get("status", "")), 9), str(it.get("task", "")), str(it.get("mode", ""))))
+        jobs.sort(
+            key=lambda it: (
+                priority.get(str(it.get("status", "")), 9),
+                str(it.get("task", "")),
+                str(it.get("mode", "")),
+            )
+        )
         meta = {
             "active_workers": snap.get("active_workers") if isinstance(snap, dict) else None,
             "complete": snap.get("complete") if isinstance(snap, dict) else None,
@@ -880,9 +897,14 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
 
     @staticmethod
     def _dispatcher_queue(jobs: list[dict[str, Any]]) -> dict[str, Any]:
-        running = [{"task": j["task"], "mode": j["mode"], "node": "", "worker": "", "live_envs": j.get("live_envs", 0)}
-                   for j in jobs if j["status"] == "running"]
-        pending = [{"task": j["task"], "mode": j["mode"], "node": "", "worker": ""} for j in jobs if j["status"] == "pending"]
+        running = [
+            {"task": j["task"], "mode": j["mode"], "node": "", "worker": "", "live_envs": j.get("live_envs", 0)}
+            for j in jobs
+            if j["status"] == "running"
+        ]
+        pending = [
+            {"task": j["task"], "mode": j["mode"], "node": "", "worker": ""} for j in jobs if j["status"] == "pending"
+        ]
         return {
             "pending_count": len(pending),
             "claimed_count": len(running),
@@ -899,8 +921,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
         jobs, source_mtime, snap_meta = self._dispatcher_jobs(run_env)
         queue = self._dispatcher_queue(jobs)
         logs = self._collect_logs()
-        summary_stub = {"rows": [], "ok": sum(1 for j in jobs if j["status"] == "ok"),
-                        "failed": 0, "duplicates": []}
+        summary_stub = {"rows": [], "ok": sum(1 for j in jobs if j["status"] == "ok"), "failed": 0, "duplicates": []}
         nodes = self._collect_nodes(queue, summary_stub)
         expected_keys = expected_job_keys(run_env)
         validation = self._validate(run_env, expected_keys, jobs, summary_stub)
@@ -910,8 +931,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
         rates = self._success_aggregate(jobs)
 
         newest_mtime = max(
-            [source_mtime, path_mtime(self.root / "run.env")]
-            + [float(item.get("mtime", 0.0)) for item in logs],
+            [source_mtime, path_mtime(self.root / "run.env")] + [float(item.get("mtime", 0.0)) for item in logs],
             default=0.0,
         )
         state = {
@@ -959,51 +979,61 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
 
         cards: list[dict[str, Any]] = []
         if active_workers is not None:
-            cards.append({
-                "id": "dispatcher_active_workers",
-                "label": "Active workers",
-                "value": str(active_workers),
-                "raw_value": active_workers,
+            cards.append(
+                {
+                    "id": "dispatcher_active_workers",
+                    "label": "Active workers",
+                    "value": str(active_workers),
+                    "raw_value": active_workers,
+                    "kind": "count",
+                    "class": "" if active_workers else "warning",
+                    "description": "Worker connections currently held by the dispatcher.",
+                }
+            )
+        cards.append(
+            {
+                "id": "dispatcher_live_envs",
+                "label": "Live envs",
+                "value": str(live_total),
+                "raw_value": live_total,
                 "kind": "count",
-                "class": "" if active_workers else "warning",
-                "description": "Worker connections currently held by the dispatcher.",
-            })
-        cards.append({
-            "id": "dispatcher_live_envs",
-            "label": "Live envs",
-            "value": str(live_total),
-            "raw_value": live_total,
-            "kind": "count",
-            "class": "",
-            "description": "RoboTwin envs rolling out right now across all jobs (dup parallelism).",
-        })
+                "class": "",
+                "description": "RoboTwin envs rolling out right now across all jobs (dup parallelism).",
+            }
+        )
         state["custom_metrics"] = list(state.get("custom_metrics") or []) + cards
         state["active_workers"] = active_workers
 
         issues = state.setdefault("validation", {}).setdefault("issues", [])
         for j in exhausted:
-            issues.append({
-                "level": "warn",
-                "message": (
-                    f"{j.get('task')}:{j.get('mode')} gave up (exhausted) at "
-                    f"{j.get('success')}/{j.get('target')} — raise --max-attempt-factor "
-                    "or check the task's expert"
-                ),
-            })
+            issues.append(
+                {
+                    "level": "warn",
+                    "message": (
+                        f"{j.get('task')}:{j.get('mode')} gave up (exhausted) at "
+                        f"{j.get('success')}/{j.get('target')} — raise --max-attempt-factor "
+                        "or check the task's expert"
+                    ),
+                }
+            )
         if complete and exhausted:
-            issues.append({
-                "level": "warn",
-                "message": f"run ended with {len(exhausted)} exhausted job(s) below target",
-            })
+            issues.append(
+                {
+                    "level": "warn",
+                    "message": f"run ended with {len(exhausted)} exhausted job(s) below target",
+                }
+            )
         if (
             active_workers == 0
             and not complete
             and any(j.get("status") in ("running", "pending", "exhausted") for j in jobs)
         ):
-            issues.append({
-                "level": "warn",
-                "message": "no active workers but jobs remain — dispatcher may be waiting/stalled",
-            })
+            issues.append(
+                {
+                    "level": "warn",
+                    "message": "no active workers but jobs remain — dispatcher may be waiting/stalled",
+                }
+            )
         state["validation"]["issue_count"] = len(issues)
         state["validation"]["ok"] = not any(i.get("level") == "error" for i in issues)
 
@@ -1034,14 +1064,10 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                     "worker": job.get("worker", ""),
                     "status": job.get("status", ""),
                     "exit_code": job.get("exit_code", ""),
-                    "success_rate": (
-                        "" if full_log["success_rate"] is None else f"{full_log['success_rate']:.6f}"
-                    ),
+                    "success_rate": ("" if full_log["success_rate"] is None else f"{full_log['success_rate']:.6f}"),
                     "success": "" if full_log["success"] is None else full_log["success"],
                     "episodes": "" if full_log["episodes"] is None else full_log["episodes"],
-                    "step_limit_hits": (
-                        "" if full_log["step_limit_hits"] is None else full_log["step_limit_hits"]
-                    ),
+                    "step_limit_hits": ("" if full_log["step_limit_hits"] is None else full_log["step_limit_hits"]),
                     "duration_sec": "" if job.get("duration_sec") is None else f"{float(job['duration_sec']):.3f}",
                     "duration": job.get("duration", ""),
                     "log_path": job.get("log", ""),
@@ -1222,8 +1248,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                 description = f"{live_success}/{live_total} successful episodes for {mode}"
                 if running_tasks:
                     completed_rate = (
-                        f"{100.0 * weighted_success / weighted_total:.2f}%"
-                        f" ({weighted_success}/{weighted_total})"
+                        f"{100.0 * weighted_success / weighted_total:.2f}% ({weighted_success}/{weighted_total})"
                         if weighted_total
                         else "n/a"
                     )
@@ -1338,8 +1363,12 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                         "mtime_iso": utc_iso(finished_at) if finished_at else "",
                         "started_at": started_at,
                         "started_at_iso": utc_iso(started_at) if started_at else "",
-                        "duration_sec": (finished_at - started_at) if started_at and finished_at >= started_at else None,
-                        "duration": format_duration((finished_at - started_at) if started_at and finished_at >= started_at else None),
+                        "duration_sec": (finished_at - started_at)
+                        if started_at and finished_at >= started_at
+                        else None,
+                        "duration": format_duration(
+                            (finished_at - started_at) if started_at and finished_at >= started_at else None
+                        ),
                         "source": "summary",
                     }
                     rows.append(item)
@@ -1378,29 +1407,17 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
 
         if pending_dir.is_dir() or claimed_dir.is_dir():
             pending = [
-                self._job_file_item(path, "pending")
-                for path in sorted(pending_dir.glob("*.job"))
-                if path.is_file()
+                self._job_file_item(path, "pending") for path in sorted(pending_dir.glob("*.job")) if path.is_file()
             ]
             claimed = [
-                self._job_file_item(path, "claimed")
-                for path in sorted(claimed_dir.glob("*.job*"))
-                if path.is_file()
+                self._job_file_item(path, "claimed") for path in sorted(claimed_dir.glob("*.job*")) if path.is_file()
             ]
         else:
             pending = self._legacy_queue_items(completed_keys)
             claimed = []
 
-        running = [
-            item
-            for item in claimed
-            if unique_job_key(item) not in completed_keys
-        ]
-        pending_open = [
-            item
-            for item in pending
-            if unique_job_key(item) not in completed_keys
-        ]
+        running = [item for item in claimed if unique_job_key(item) not in completed_keys]
+        pending_open = [item for item in pending if unique_job_key(item) not in completed_keys]
         return {
             "pending_count": len(pending_open),
             "claimed_count": len(claimed),
@@ -1409,11 +1426,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
             "claimed": claimed,
             "running": running,
             "ready": (self.root / ".queue_ready").is_file(),
-            "done_nodes": sorted(
-                path.name
-                for path in self.root.glob(".node*_done")
-                if path.is_file()
-            ),
+            "done_nodes": sorted(path.name for path in self.root.glob(".node*_done") if path.is_file()),
         }
 
     def _legacy_queue_items(self, completed_keys: set[tuple[str, str]]) -> list[dict[str, Any]]:
@@ -1519,7 +1532,9 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                     "started_at": started_at,
                     "started_at_iso": utc_iso(started_at) if started_at else "",
                     "duration_sec": (finished_at - started_at) if started_at and finished_at >= started_at else None,
-                    "duration": format_duration((finished_at - started_at) if started_at and finished_at >= started_at else None),
+                    "duration": format_duration(
+                        (finished_at - started_at) if started_at and finished_at >= started_at else None
+                    ),
                     "source": file_name,
                 }
             )
@@ -1762,20 +1777,25 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
             expected_total_str = run_env.get("total_jobs", "")
             expected_total = int(expected_total_str) if expected_total_str.isdigit() else 0
         if expected_total and len(jobs) != expected_total:
-            issues.append({"level": "warn", "message": f"job count mismatch: expected {expected_total}, observed {len(jobs)}"})
+            issues.append(
+                {"level": "warn", "message": f"job count mismatch: expected {expected_total}, observed {len(jobs)}"}
+            )
         duplicates = [key for key, count in seen_counts.items() if count > 1]
         if duplicates:
             issues.append({"level": "error", "message": f"duplicate jobs: {self._format_keys(sorted(duplicates))}"})
         for item in summary.get("duplicates", []):
             issues.append({"level": "error", "message": f"duplicate summary row: {item}"})
         stale_claims = [
-            item for item in jobs
+            item
+            for item in jobs
             if item.get("status") == "running"
             and item.get("started_at")
             and time.time() - float(item["started_at"]) > 24 * 3600
         ]
         if stale_claims:
-            issues.append({"level": "warn", "message": f"{len(stale_claims)} running job(s) have been claimed for more than 24h"})
+            issues.append(
+                {"level": "warn", "message": f"{len(stale_claims)} running job(s) have been claimed for more than 24h"}
+            )
         return {
             "ok": not any(issue["level"] == "error" for issue in issues),
             "issue_count": len(issues),
@@ -1883,7 +1903,9 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
         denominator = max(total, completed + running + pending, 1)
         percent = min(100.0, 100.0 * completed / denominator)
         eta_sec = None
-        running_started = [float(item["started_at"]) for item in jobs if item.get("status") == "running" and item.get("started_at")]
+        running_started = [
+            float(item["started_at"]) for item in jobs if item.get("status") == "running" and item.get("started_at")
+        ]
         completed_durations = [
             float(item["duration_sec"])
             for item in jobs
@@ -1912,6 +1934,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
         if len(keys) > limit:
             labels.append(f"... (+{len(keys) - limit} more)")
         return ", ".join(labels)
+
 
 def json_bytes(data: Any) -> bytes:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

@@ -6,67 +6,6 @@ all strategies preserve each source's native sample semantics and expose the
 selected source name with every item.
 """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import copy
 import logging
 from typing import Dict, List, Optional, Sequence
@@ -106,30 +45,6 @@ class MixtureDataset(BaseDataset):
                               sub-source dims; smaller actions are zero-padded.
     """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     def __init__(
         self,
         datasets: Sequence[BaseDataset],
@@ -166,10 +81,6 @@ class MixtureDataset(BaseDataset):
                 )
             self._action_dim = dims[0]
         else:
-
-
-
-
             if action_dim_override is not None:
                 self._action_dim = action_dim_override
             elif len(set(dims)) == 1:
@@ -245,44 +156,6 @@ class MixtureDataset(BaseDataset):
         Safe to skip; default behavior is identical to the previous releases.
         """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         new_seed = self._base_seed + int(epoch) * 7919
         if new_seed == self._seed:
             return
@@ -297,21 +170,11 @@ class MixtureDataset(BaseDataset):
         indices to reach the requested virtual weight.
         """
 
-
-
-
-
-
-
         total_real = sum(len(d) for d in self._datasets)
         parts: List[np.ndarray] = []
         for di, (ds, w) in enumerate(zip(self._datasets, self._weights)):
             n_real = len(ds)
             if n_real == 0 or w <= 0.0:
-
-
-
-
                 logger.warning(
                     "MixtureDataset: skipping source '%s' (len=%d, weight=%.4f) — not sampled.",
                     self._names[di],
@@ -334,10 +197,6 @@ class MixtureDataset(BaseDataset):
         di, si = self._index_map[idx]
         di, si = int(di), int(si)
         sample = self._datasets[di][si]
-
-
-
-
 
         if not self._strict_action_dim:
             action_traj = sample.get("action")
@@ -362,11 +221,6 @@ class MixtureDataset(BaseDataset):
 
     @property
     def normalization_stats(self) -> Optional[dict]:
-
-
-
-
-
         return None
 
     @property
@@ -386,8 +240,6 @@ class MixtureDataset(BaseDataset):
 
         Raises ``KeyError`` with a helpful list when ``name`` is unknown.
         """
-
-
 
         try:
             idx = self._names.index(name)
@@ -453,53 +305,6 @@ class MixtureDataset(BaseDataset):
                            epoch (full coverage, no waste, no duplication).
         """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         from concurrent.futures import ThreadPoolExecutor
 
         from openwam.dataloader.registry import build_dataset
@@ -524,13 +329,8 @@ class MixtureDataset(BaseDataset):
             ``type`` field with index fallback.
             """
 
-
-
-
-
             if datasets_cfg is None:
                 return []
-
 
             if hasattr(datasets_cfg, "items") and hasattr(datasets_cfg, "keys") and not isinstance(datasets_cfg, list):
                 return [(str(name), c) for name, c in datasets_cfg.items()]
@@ -548,15 +348,7 @@ class MixtureDataset(BaseDataset):
         weight_strategy = _get(config, "weight_strategy", "proportional")
         split_manifest = _get(config, "split_manifest")
 
-
-
-
-
-
-
         mixture_seed = int(_get(config, "seed", 42))
-
-
 
         all_entries = _normalize_entries(_get(config, "datasets"))
         enabled_entries = []
@@ -575,19 +367,12 @@ class MixtureDataset(BaseDataset):
         enabled_names = [n for n, _ in enabled_entries]
         enabled_cfgs = [c for _, c in enabled_entries]
 
-
-
-
         shape_fields = ("num_frames", "video_stride", "height", "width")
         for key in shape_fields:
             present = [(n, _get(c, key)) for n, c in zip(enabled_names, enabled_cfgs) if _get(c, key) is not None]
             uniq = set(v for _, v in present)
             if len(uniq) > 1:
                 raise ValueError(f"MixtureDataset: enabled sub-sources must share the same '{key}', got {present}")
-
-
-
-
 
         if not enabled_cfgs:
             raise RuntimeError("MixtureDataset: all sub-datasets are disabled or failed to load")
@@ -602,14 +387,9 @@ class MixtureDataset(BaseDataset):
             )
 
         if weight_strategy == "uniform":
-
             weights = [1.0] * len(sub_datasets)
             logger.info("MixtureDataset: weight_strategy=uniform, all weights set to 1.0")
         elif weight_strategy == "inverse_size":
-
-
-
-
             weights = []
             for ds, sub_cfg in zip(sub_datasets, enabled_cfgs):
                 nf = float(_get(sub_cfg, "num_frames", 49))
@@ -619,19 +399,11 @@ class MixtureDataset(BaseDataset):
                 [f"{w:.2e}" for w in weights],
             )
         elif weight_strategy == "proportional":
-
-
             weights = [float(len(ds)) for ds in sub_datasets]
             logger.info("MixtureDataset: weight_strategy=proportional, raw weights=%s (= sub-source sizes)", weights)
         else:
             weights = [float(_get(sub_cfg, "weight", 1.0)) for sub_cfg in enabled_cfgs]
             logger.info("MixtureDataset: weight_strategy=manual, weights=%s", weights)
-
-
-
-
-
-
 
         try:
             has_override_field = "action_dim_override" in config

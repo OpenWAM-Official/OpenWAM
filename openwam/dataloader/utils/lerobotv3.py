@@ -553,8 +553,7 @@ def effective_episode_frames(eps_df: pd.DataFrame, length_col: str = "length") -
     if np.any(invalid):
         bad_pos = np.flatnonzero(invalid)[:5]
         preview = ", ".join(
-            f"row {int(i)}: [{int(valid_start[i])}, {int(valid_end[i])}) / length {int(nominal[i])}"
-            for i in bad_pos
+            f"row {int(i)}: [{int(valid_start[i])}, {int(valid_end[i])}) / length {int(nominal[i])}" for i in bad_pos
         )
         raise ValueError(f"episode valid ranges must satisfy 0 <= start <= end <= length ({preview})")
     return valid_end - valid_start
@@ -794,8 +793,7 @@ def build_multibucket(
                 reader._apply_effective_hour_budget(allocation, base_seed + original_i * 7919)
             realized = sum(float(reader.effective_hours) for _, _, reader in loaded if len(reader) > 0)
             logger.info(
-                "%s total_hours=%.3f → allocated %.3f effective h across %d buckets; "
-                "whole-episode realization %.3fh.",
+                "%s total_hours=%.3f → allocated %.3f effective h across %d buckets; whole-episode realization %.3fh.",
                 source_name,
                 total_hours,
                 sum(allocations),

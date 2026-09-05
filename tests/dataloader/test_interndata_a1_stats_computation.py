@@ -449,7 +449,6 @@ class TestStatsTrimMatchesReader:
         assert rows.shape[0] == 2 * 20
 
 
-
 class TestDirectBucketParity:
     """`--dataset_dir` pointed straight at a bucket is a supported mode, and it
     is the one where the generator and the reader can silently disagree.
@@ -475,10 +474,23 @@ class TestDirectBucketParity:
     def _run(self, monkeypatch, d, trim, out):
         import sys
 
-        monkeypatch.setattr(sys, "argv", [
-            "prog", "--dataset_dir", str(d), "--stats_root", str(out),
-            "--trim_csv", str(trim), "--workers", "1", "--min_keep", "2",
-        ])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "prog",
+                "--dataset_dir",
+                str(d),
+                "--stats_root",
+                str(out),
+                "--trim_csv",
+                str(trim),
+                "--workers",
+                "1",
+                "--min_keep",
+                "2",
+            ],
+        )
         a1s.main()
         return json.load(open(out / "meta" / "stats_split_aloha.json"))
 
@@ -494,8 +506,12 @@ class TestDirectBucketParity:
         out = tmp_path / "stats"
         self._run(monkeypatch, d, trim, out)
         ds = InternDataA1Dataset(  # no dataset_id: id is the bare bucket name
-            str(d), a1_stats_root=str(out), trim_csv=str(trim),
-            normalize_mode="quantile", num_frames=9, video_stride=4,
+            str(d),
+            a1_stats_root=str(out),
+            trim_csv=str(trim),
+            normalize_mode="quantile",
+            num_frames=9,
+            video_stride=4,
         )
         assert ds._normalization_stats is not None
         assert ds._eps_df["episode_index"].tolist() == [1]
@@ -516,14 +532,15 @@ class TestDirectBucketParity:
         # Keep the same path and bucket key, but change the effective span after
         # the stats were generated.  A path-only or trim-enabled boolean check
         # would accept the stale normalizer.
-        trim.write_text(
-            "dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n"
-            "task,1,40,5,30\n"
-        )
+        trim.write_text("dataset,episode_index,total_frames,trim_head_to,trim_tail_from\ntask,1,40,5,30\n")
         with pytest.raises(DataContractError, match="trim provenance"):
             InternDataA1Dataset(
-                str(d), a1_stats_root=str(out), trim_csv=str(trim),
-                normalize_mode="quantile", num_frames=9, video_stride=4,
+                str(d),
+                a1_stats_root=str(out),
+                trim_csv=str(trim),
+                normalize_mode="quantile",
+                num_frames=9,
+                video_stride=4,
             )
 
     def test_reader_rejects_stats_after_exclusions_change(self, tmp_path, monkeypatch):
@@ -533,22 +550,21 @@ class TestDirectBucketParity:
 
         # The old stats exclude episode 0.  Removing that exclusion changes the
         # population without changing the shared stats path or trim artifact.
-        (d / "meta" / "excluded_episodes.json").write_text(
-            json.dumps({"episode_indices": []})
-        )
+        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": []}))
         with pytest.raises(DataContractError, match="excluded_episodes.json changed"):
             InternDataA1Dataset(
-                str(d), a1_stats_root=str(out), trim_csv=str(trim),
-                normalize_mode="quantile", num_frames=9, video_stride=4,
+                str(d),
+                a1_stats_root=str(out),
+                trim_csv=str(trim),
+                normalize_mode="quantile",
+                num_frames=9,
+                video_stride=4,
             )
 
     def test_capped_reader_still_checks_the_full_train_population(self, tmp_path, monkeypatch):
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=3, ep_len=40)
         trim = tmp_path / "trim.csv"
-        trim.write_text(
-            "dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n"
-            "task,1,40,5,30\n"
-        )
+        trim.write_text("dataset,episode_index,total_frames,trim_head_to,trim_tail_from\ntask,1,40,5,30\n")
         out = tmp_path / "stats"
         self._run(monkeypatch, d, trim, out)
 
@@ -561,8 +577,12 @@ class TestDirectBucketParity:
         info_path.write_text(json.dumps(info))
         with pytest.raises(DataContractError, match="effective.*population changed"):
             InternDataA1Dataset(
-                str(d), a1_stats_root=str(out), trim_csv=str(trim),
-                normalize_mode="quantile", num_frames=9, video_stride=4,
+                str(d),
+                a1_stats_root=str(out),
+                trim_csv=str(trim),
+                normalize_mode="quantile",
+                num_frames=9,
+                video_stride=4,
                 max_hours=1.0,
             )
 
@@ -582,13 +602,13 @@ class TestFailClosedCoverage:
 
         with pytest.raises(RuntimeError, match="Refusing to write partial.*cat/emb/bad"):
             a1s.compute_stats_for_embodiment(
-                "split_aloha", _group([good, bad], "bimanual", "AgileX Split Aloha"),
-                workers=1, root=tmp_path,
+                "split_aloha",
+                _group([good, bad], "bimanual", "AgileX Split Aloha"),
+                workers=1,
+                root=tmp_path,
             )
 
-    def test_cli_publishes_no_embodiment_when_a_later_one_fails(
-        self, tmp_path, monkeypatch, inline_pool
-    ):
+    def test_cli_publishes_no_embodiment_when_a_later_one_fails(self, tmp_path, monkeypatch, inline_pool):
         """The CLI is transactional across its requested embodiment set."""
         _make_bucket(
             tmp_path,
@@ -631,7 +651,7 @@ class TestFailClosedCoverage:
 
 
 class TestSplitFailuresDoNotFailOpen:
-    """"Cannot determine the population" must never degrade into "use every row".
+    """ "Cannot determine the population" must never degrade into "use every row".
 
     The reader raises on the same metadata and refuses the bucket, so pooling it
     here would put rows into the normalizer that training can never load.
@@ -657,8 +677,8 @@ class TestSplitFailuresDoNotFailOpen:
         info = json.loads((d / "meta" / "info.json").read_text())
         info.pop("splits", None)
         (d / "meta" / "info.json").write_text(json.dumps(info))
-        assert a1s._split_episodes(d, "train") is None      # unrestricted
-        assert a1s._split_episodes(d, "val") == set()       # not "everything"
+        assert a1s._split_episodes(d, "train") is None  # unrestricted
+        assert a1s._split_episodes(d, "val") == set()  # not "everything"
 
 
 class TestScannerRefusesWhatTheReaderRefuses:
@@ -672,15 +692,17 @@ class TestScannerRefusesWhatTheReaderRefuses:
     """
 
     def _scan(self, d, **kw):
-        return a1s._scan_bucket((str(d), "bimanual", "split_aloha", kw.pop("dsid", "task")),
-                                **kw) if kw else a1s._scan_bucket(
-            (str(d), "bimanual", "split_aloha"))
+        return (
+            a1s._scan_bucket((str(d), "bimanual", "split_aloha", kw.pop("dsid", "task")), **kw)
+            if kw
+            else a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+        )
 
     def test_a_truncated_shard_is_refused_like_the_reader_refuses_it(self, tmp_path):
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=4)
         p = d / "data" / "chunk-000" / "file-000.parquet"
         t = pq.read_table(p)
-        pq.write_table(t.slice(0, t.num_rows - 1), p)   # manifest says 8, shard holds 7
+        pq.write_table(t.slice(0, t.num_rows - 1), p)  # manifest says 8, shard holds 7
 
         with pytest.raises(ValueError, match="manifest ends at 8"):
             InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
@@ -705,6 +727,7 @@ class TestScannerRefusesWhatTheReaderRefuses:
         m["dataset_from_index"], m["dataset_to_index"] = [0, 2, 8], [4, 6, 12]
         m["length"] = [4, 4, 4]
         import pyarrow as pa
+
         pq.write_table(pa.Table.from_pydict(m), man)
         with pytest.raises(ValueError, match="Overlapping manifest ranges"):
             a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
@@ -712,8 +735,7 @@ class TestScannerRefusesWhatTheReaderRefuses:
     def test_quoted_exclusion_indices_are_refused_on_both_sides(self, tmp_path):
         """`["0"]` excluded episode 0 here and nothing in the reader."""
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=4)
-        (d / "meta" / "excluded_episodes.json").write_text(
-            json.dumps({"episode_indices": ["0"]}))
+        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": ["0"]}))
         with pytest.raises(ValueError, match="must be JSON integers"):
             a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
 
@@ -728,8 +750,10 @@ class TestPopulationContractEndToEnd:
 
     def _run(self, monkeypatch, d, out, *extra):
         import sys
-        monkeypatch.setattr(sys, "argv", [
-            "prog", "--dataset_dir", str(d), "--stats_root", str(out), "--workers", "1", *extra])
+
+        monkeypatch.setattr(
+            sys, "argv", ["prog", "--dataset_dir", str(d), "--stats_root", str(out), "--workers", "1", *extra]
+        )
         a1s.main()
         return json.load(open(out / "meta" / "stats_split_aloha.json"))
 
@@ -738,8 +762,12 @@ class TestPopulationContractEndToEnd:
         res = self._run(monkeypatch, d, tmp_path / "stats")
         pop = res["population"]
         assert {key: pop[key] for key in ("split", "trim_active", "min_keep", "buckets", "empty_buckets")} == {
-            "split": "train", "trim_active": False, "min_keep": 2,
-            "buckets": ["task"], "empty_buckets": []}
+            "split": "train",
+            "trim_active": False,
+            "min_keep": 2,
+            "buckets": ["task"],
+            "empty_buckets": [],
+        }
         assert pop["schema_version"] == 2
         assert pop["trim_provenance"] is None
         assert pop["bucket_provenance"]["task"]["excluded_episode_indices"] == []
@@ -756,26 +784,30 @@ class TestPopulationContractEndToEnd:
         res = self._run(monkeypatch, d, out, "--split", "val")
         assert res["population"]["split"] == "val"
         with pytest.raises(DataContractError, match="computed over the 'val' split"):
-            InternDataA1Dataset(str(d), a1_stats_root=str(out), normalize_mode="quantile",
-                                num_frames=2, video_stride=1)
+            InternDataA1Dataset(str(d), a1_stats_root=str(out), normalize_mode="quantile", num_frames=2, video_stride=1)
 
     def test_untrimmed_stats_are_refused_by_a_trimming_reader(self, tmp_path, monkeypatch):
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=8)
         out = tmp_path / "stats"
-        self._run(monkeypatch, d, out)                      # generated WITHOUT --trim_csv
+        self._run(monkeypatch, d, out)  # generated WITHOUT --trim_csv
         trim = tmp_path / "trim.csv"
-        trim.write_text("dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n"
-                        "task,0,8,2,6\n")
+        trim.write_text("dataset,episode_index,total_frames,trim_head_to,trim_tail_from\ntask,0,8,2,6\n")
         with pytest.raises(DataContractError, match="without a trim list but this reader is"):
-            InternDataA1Dataset(str(d), a1_stats_root=str(out), trim_csv=str(trim),
-                                normalize_mode="quantile", num_frames=2, video_stride=1)
+            InternDataA1Dataset(
+                str(d),
+                a1_stats_root=str(out),
+                trim_csv=str(trim),
+                normalize_mode="quantile",
+                num_frames=2,
+                video_stride=1,
+            )
 
     def test_cli_refuses_to_publish_when_one_bucket_scan_fails(self, tmp_path, monkeypatch):
         """One good bucket must not turn a failed embodiment into partial stats."""
         _make_bucket(tmp_path, "cat/emb/good", n_eps=2, ep_len=8)
         bad = _make_bucket(tmp_path, "cat/emb/bad", n_eps=2, ep_len=8)
         p = bad / "data" / "chunk-000" / "file-000.parquet"
-        pq.write_table(pq.read_table(p).slice(0, 15), p)     # truncated: scan raises
+        pq.write_table(pq.read_table(p).slice(0, 15), p)  # truncated: scan raises
 
         out = tmp_path / "stats"
         with pytest.raises(RuntimeError, match="Refusing to write partial.*cat/emb/bad"):
@@ -804,8 +836,10 @@ class TestValOnlyBucketReusesTrainStats:
 
     def _generate(self, monkeypatch, root, out):
         import sys
-        monkeypatch.setattr(sys, "argv", [
-            "prog", "--dataset_dir", str(root), "--stats_root", str(out), "--workers", "1"])
+
+        monkeypatch.setattr(
+            sys, "argv", ["prog", "--dataset_dir", str(root), "--stats_root", str(out), "--workers", "1"]
+        )
         a1s.main()
         return json.load(open(out / "meta" / "stats_split_aloha.json"))
 
@@ -818,17 +852,24 @@ class TestValOnlyBucketReusesTrainStats:
     def test_the_val_only_bucket_has_windows_without_normalization(self, tmp_path):
         """Pins the premise: B is a real bucket, not an empty one."""
         _, b = self._two_buckets(tmp_path)
-        r = InternDataA1Dataset(str(b), dataset_id="cat/emb/b", normalize_mode=None,
-                                num_frames=2, video_stride=1, split="val")
+        r = InternDataA1Dataset(
+            str(b), dataset_id="cat/emb/b", normalize_mode=None, num_frames=2, video_stride=1, split="val"
+        )
         assert len(r) > 0
 
     def test_the_val_only_bucket_loads_the_train_stats(self, tmp_path, monkeypatch):
         _, b = self._two_buckets(tmp_path)
         out = tmp_path / "stats"
         self._generate(monkeypatch, tmp_path, out)
-        r = InternDataA1Dataset(str(b), dataset_id="cat/emb/b", a1_stats_root=str(out),
-                                normalize_mode="quantile", num_frames=2, video_stride=1,
-                                split="val")
+        r = InternDataA1Dataset(
+            str(b),
+            dataset_id="cat/emb/b",
+            a1_stats_root=str(out),
+            normalize_mode="quantile",
+            num_frames=2,
+            video_stride=1,
+            split="val",
+        )
         assert r._normalization_stats is not None
         assert len(r) > 0
 
@@ -836,7 +877,7 @@ class TestValOnlyBucketReusesTrainStats:
         """Empty-by-split is allowed only when the bucket itself validates."""
         _, b = self._two_buckets(tmp_path)
         p = b / "data" / "chunk-000" / "file-000.parquet"
-        pq.write_table(pq.read_table(p).slice(0, 15), p)   # truncated -> scan raises
+        pq.write_table(pq.read_table(p).slice(0, 15), p)  # truncated -> scan raises
         out = tmp_path / "stats"
         with pytest.raises(RuntimeError, match="Refusing to write partial.*cat/emb/b"):
             self._generate(monkeypatch, tmp_path, out)
@@ -857,6 +898,7 @@ class TestZeroRowsIsNotProofOfAnEmptyPopulation:
     def _substituted(self, tmp_path):
         """3 episodes x 4 rows, split train=1:2, rows [4:8] replaced by ep2's."""
         import pyarrow as pa
+
         d = _make_bucket(tmp_path, "cat/emb/bad", n_eps=3, ep_len=4)
         info = json.loads((d / "meta" / "info.json").read_text())
         info["splits"] = {"train": "1:2"}
@@ -864,7 +906,7 @@ class TestZeroRowsIsNotProofOfAnEmptyPopulation:
         p = d / "data" / "chunk-000" / "file-000.parquet"
         t = pq.read_table(p).to_pydict()
         for k, v in t.items():
-            t[k] = v[:4] + v[8:12] + v[8:12]      # ep0, ep2, ep2 — total and envelope intact
+            t[k] = v[:4] + v[8:12] + v[8:12]  # ep0, ep2, ep2 — total and envelope intact
         pq.write_table(pa.Table.from_pydict(t), p)
         return d
 
@@ -883,11 +925,13 @@ class TestZeroRowsIsNotProofOfAnEmptyPopulation:
 
     def test_substituted_rows_abort_generation(self, tmp_path, monkeypatch):
         import sys
+
         _make_bucket(tmp_path, "cat/emb/good", n_eps=2, ep_len=8)
         self._substituted(tmp_path)
         out = tmp_path / "stats"
-        monkeypatch.setattr(sys, "argv", [
-            "prog", "--dataset_dir", str(tmp_path), "--stats_root", str(out), "--workers", "1"])
+        monkeypatch.setattr(
+            sys, "argv", ["prog", "--dataset_dir", str(tmp_path), "--stats_root", str(out), "--workers", "1"]
+        )
         with pytest.raises(RuntimeError, match="Refusing to write partial.*cat/emb/bad"):
             a1s.main()
         assert not (out / "meta" / "stats_split_aloha.json").exists()
@@ -898,6 +942,5 @@ class TestZeroRowsIsNotProofOfAnEmptyPopulation:
         info = json.loads((d / "meta" / "info.json").read_text())
         info["splits"] = {"train": "0:0", "val": "0:2"}
         (d / "meta" / "info.json").write_text(json.dumps(info))
-        _, rows, population_empty, _ = a1s._scan_bucket(
-            (str(d), "bimanual", "split_aloha", "cat/emb/valonly"))
+        _, rows, population_empty, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/valonly"))
         assert len(rows) == 0 and population_empty is True

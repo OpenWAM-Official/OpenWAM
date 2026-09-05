@@ -638,11 +638,7 @@ def _load_or_build_stats(
 def discover_ebench_buckets(dataset_dir: str) -> list[Path]:
     """Discover every EBench task bucket (``<group>/<task>/meta/info.json``)."""
     root = Path(dataset_dir)
-    resolved = sorted(
-        candidate.parent.parent
-        for candidate in root.glob("*/*/meta/info.json")
-        if candidate.is_file()
-    )
+    resolved = sorted(candidate.parent.parent for candidate in root.glob("*/*/meta/info.json") if candidate.is_file())
     if not resolved:
         raise FileNotFoundError(f"No EBench buckets with meta/info.json under {root}")
     return resolved

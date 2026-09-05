@@ -424,9 +424,7 @@ def test_root_mode_trim_csv_with_no_bucket_key_overlap_fails_fast(tmp_path):
     )
 
     with pytest.raises(ValueError):
-        RoboCOINDataset.from_config(
-            {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
-        )
+        RoboCOINDataset.from_config({"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None})
 
 
 def test_root_mode_trim_csv_with_partial_bucket_key_overlap_is_allowed(tmp_path):
@@ -441,13 +439,8 @@ def test_root_mode_trim_csv_with_partial_bucket_key_overlap_is_allowed(tmp_path)
         ],
     )
 
-    ds = RoboCOINDataset.from_config(
-        {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
-    )
-    lengths_by_bucket = {
-        bucket._dataset_id: bucket._eps_df["length"].tolist()
-        for bucket in ds._buckets
-    }
+    ds = RoboCOINDataset.from_config({"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None})
+    lengths_by_bucket = {bucket._dataset_id: bucket._eps_df["length"].tolist() for bucket in ds._buckets}
     assert lengths_by_bucket == {"bucket-a": [6], "bucket-b": [8]}
 
 
@@ -457,9 +450,7 @@ def test_root_mode_drops_whole_bucket_exclusion_before_fanout(tmp_path):
     excluded_name = next(iter(ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS))
     _make_bucket(root / excluded_name, [40])
 
-    ds = RoboCOINDataset.from_config(
-        {"dataset_dir": str(root), "normalize_mode": None}
-    )
+    ds = RoboCOINDataset.from_config({"dataset_dir": str(root), "normalize_mode": None})
 
     assert [bucket._dataset_dir for bucket in ds._buckets] == [kept]
 
@@ -490,9 +481,7 @@ def test_excluded_bucket_does_not_count_as_trim_csv_overlap(tmp_path):
     )
 
     with pytest.raises(ValueError, match="silently no-op"):
-        RoboCOINDataset.from_config(
-            {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
-        )
+        RoboCOINDataset.from_config({"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None})
 
 
 def test_reader_rejects_noncanonical_numeric_data_shard(tmp_path):
@@ -545,9 +534,7 @@ def test_root_mode_pins_one_snapshot_for_all_bucket_constructors(tmp_path, monke
         return snapshot
 
     monkeypatch.setattr(robocoin, "_load_trim_snapshot", record_load)
-    ds = RoboCOINDataset.from_config(
-        {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
-    )
+    ds = RoboCOINDataset.from_config({"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None})
 
     assert len(loads) == 1
     assert {bucket._dataset_id: bucket._eps_df["length"].tolist() for bucket in ds._buckets} == {
@@ -573,9 +560,7 @@ def test_root_mode_rejects_csv_change_during_fanout_without_normalization(tmp_pa
 
     monkeypatch.setattr(RoboCOINDataset, "_add_data_offsets", add_offsets_then_replace)
     with pytest.raises(DataContractError, match="changed while from_config reader construction"):
-        RoboCOINDataset.from_config(
-            {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
-        )
+        RoboCOINDataset.from_config({"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None})
 
 
 def test_root_mode_unknown_episode_id_fails_closed_against_full_manifest(tmp_path):
@@ -596,9 +581,7 @@ def test_root_mode_unknown_episode_id_fails_closed_against_full_manifest(tmp_pat
     )
 
     with pytest.raises(DataContractError, match="[Uu]nknown.*episode"):
-        RoboCOINDataset.from_config(
-            {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
-        )
+        RoboCOINDataset.from_config({"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None})
 
 
 def test_root_mode_trim_entry_outside_selected_split_is_not_unknown(tmp_path):
@@ -618,9 +601,7 @@ def test_root_mode_trim_entry_outside_selected_split_is_not_unknown(tmp_path):
         ],
     )
 
-    ds = RoboCOINDataset.from_config(
-        {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
-    )
+    ds = RoboCOINDataset.from_config({"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None})
     assert [bucket._dataset_id for bucket in ds._buckets] == ["bucket"]
     assert ds._buckets[0]._eps_df["episode_index"].tolist() == [0]
     assert ds._buckets[0]._eps_df["length"].tolist() == [8]
@@ -644,9 +625,7 @@ def test_root_mode_stale_trim_entry_outside_selected_split_fails_closed(tmp_path
     )
 
     with pytest.raises(DataContractError, match="[Ss][Tt][Aa][Ll][Ee]"):
-        RoboCOINDataset.from_config(
-            {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
-        )
+        RoboCOINDataset.from_config({"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None})
 
 
 def test_root_mode_stale_bucket_fails_closed_globally(tmp_path):
@@ -667,9 +646,7 @@ def test_root_mode_stale_bucket_fails_closed_globally(tmp_path):
     )
 
     with pytest.raises(DataContractError, match="[Ss][Tt][Aa][Ll][Ee]"):
-        RoboCOINDataset.from_config(
-            {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
-        )
+        RoboCOINDataset.from_config({"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None})
 
 
 def test_trimmed_video_and_action_remain_aligned_end_to_end(tmp_path, patch_decode):

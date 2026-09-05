@@ -220,19 +220,12 @@ def validate_server_endpoint(
         address = ipaddress.ip_address(ip_candidate)
     except ValueError:
         labels = candidate.split(".")
-        valid_hostname = (
-            len(candidate) <= 253
-            and all(
-                label
-                and len(label) <= 63
-                and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
-                for label in labels
-            )
+        valid_hostname = len(candidate) <= 253 and all(
+            label and len(label) <= 63 and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
+            for label in labels
         )
         if not valid_hostname:
-            raise ValueError(
-                f"host must be a hostname or IP without scheme/path, got {host!r}"
-            ) from None
+            raise ValueError(f"host must be a hostname or IP without scheme/path, got {host!r}") from None
     else:
         candidate = f"[{address}]" if address.version == 6 else str(address)
 
@@ -260,16 +253,12 @@ def validate_runner_config(config: dict[str, Any]) -> dict[str, Any]:
 
     env_config = normalized.get("env_config", "arx_x5")
     if env_config != "arx_x5":
-        raise ValueError(
-            f"OpenWAM RoboDojo evaluation requires env_config 'arx_x5', got {env_config!r}"
-        )
+        raise ValueError(f"OpenWAM RoboDojo evaluation requires env_config 'arx_x5', got {env_config!r}")
     normalized["env_config"] = env_config
 
     num_envs = _integer(normalized.get("num_envs", 1), "num_envs")
     if num_envs != 1:
-        raise ValueError(
-            f"OpenWAM RoboDojo evaluation supports exactly one environment, got {num_envs}"
-        )
+        raise ValueError(f"OpenWAM RoboDojo evaluation supports exactly one environment, got {num_envs}")
     normalized["num_envs"] = num_envs
 
     eval_batch = _as_bool(normalized.get("eval_batch", False), "eval_batch")
@@ -297,30 +286,16 @@ def validate_runner_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized["eval_count"] = eval_count
 
     max_steps = normalized.get("max_steps")
-    normalized["max_steps"] = (
-        None if max_steps is None else _positive_integer(max_steps, "max_steps")
-    )
+    normalized["max_steps"] = None if max_steps is None else _positive_integer(max_steps, "max_steps")
 
     task = normalized.get("task")
-    if (
-        not isinstance(task, str)
-        or not task.strip()
-        or task != task.strip()
-        or "/" in task
-        or "\\" in task
-    ):
-        raise ValueError(
-            f"task must be a non-empty RoboDojo task name, got {task!r}"
-        )
+    if not isinstance(task, str) or not task.strip() or task != task.strip() or "/" in task or "\\" in task:
+        raise ValueError(f"task must be a non-empty RoboDojo task name, got {task!r}")
     normalized["task"] = task
     normalized["seed"] = _integer(normalized.get("seed", 0), "seed")
-    normalized["headless"] = _as_bool(
-        normalized.get("headless", True), "headless"
-    )
+    normalized["headless"] = _as_bool(normalized.get("headless", True), "headless")
     normalized["debug"] = _as_bool(normalized.get("debug", False), "debug")
-    normalized["additional_info"] = str(
-        normalized.get("additional_info", "openwam")
-    )
+    normalized["additional_info"] = str(normalized.get("additional_info", "openwam"))
 
     calibration_output = normalized.get("calibration_output")
     if isinstance(calibration_output, str) and calibration_output.strip().lower() in {
@@ -347,34 +322,26 @@ def configure_runtime_import_paths(
         openwam_path,
         robodojo_path,
         robodojo_path / "XPolicyLab",
-        *(
-            robodojo_path / "third_party" / "IsaacLab" / "source" / package
-            for package in _ISAACLAB_SOURCE_PACKAGES
-        ),
+        *(robodojo_path / "third_party" / "IsaacLab" / "source" / package for package in _ISAACLAB_SOURCE_PACKAGES),
         robodojo_path / "third_party" / "curobo",
     ]
     configured = {str(path.resolve()) for path in configured_paths}
 
     def removable_editable_hook(entry: Any) -> bool:
         value = str(entry)
-        return value.endswith(".finder.__path_hook__") and value.startswith(
-            _REMOVABLE_EDITABLE_NAMESPACE_HOOKS
-        )
+        return value.endswith(".finder.__path_hook__") and value.startswith(_REMOVABLE_EDITABLE_NAMESPACE_HOOKS)
 
     retained = [
         entry
         for entry in sys.path
-        if not removable_editable_hook(entry)
-        and str(Path(entry or os.curdir).resolve()) not in configured
+        if not removable_editable_hook(entry) and str(Path(entry or os.curdir).resolve()) not in configured
     ]
     sys.path[:] = [*(str(path.resolve()) for path in configured_paths), *retained]
 
 
 def _is_editable_namespace_hook(location: Any) -> bool:
     value = str(location)
-    return value.endswith(".finder.__path_hook__") and value.startswith(
-        _REMOVABLE_EDITABLE_NAMESPACE_HOOKS
-    )
+    return value.endswith(".finder.__path_hook__") and value.startswith(_REMOVABLE_EDITABLE_NAMESPACE_HOOKS)
 
 
 def _module_locations(module_or_spec: Any) -> list[Path]:
@@ -390,9 +357,7 @@ def _module_locations(module_or_spec: Any) -> list[Path]:
         search_locations = getattr(module_or_spec, "submodule_search_locations", None)
     if search_locations is not None:
         locations.extend(
-            Path(location).resolve()
-            for location in search_locations
-            if not _is_editable_namespace_hook(location)
+            Path(location).resolve() for location in search_locations if not _is_editable_namespace_hook(location)
         )
     return list(dict.fromkeys(locations))
 
@@ -410,12 +375,8 @@ def _verify_module_locations(
             f"{name} has no inspectable {source} origin; expected it under "
             f"configured {checkout_name} checkout {expected_root}"
         )
-    inside = [
-        location for location in locations if location.is_relative_to(expected_root)
-    ]
-    outside = [
-        location for location in locations if not location.is_relative_to(expected_root)
-    ]
+    inside = [location for location in locations if location.is_relative_to(expected_root)]
+    outside = [location for location in locations if not location.is_relative_to(expected_root)]
     if inside and outside:
         rendered = ", ".join(str(location) for location in outside)
         raise RuntimeError(
@@ -425,8 +386,7 @@ def _verify_module_locations(
     if outside:
         rendered = ", ".join(str(location) for location in outside)
         raise RuntimeError(
-            f"{name} {source} origin is outside the configured {checkout_name} "
-            f"checkout {expected_root}: {rendered}"
+            f"{name} {source} origin is outside the configured {checkout_name} checkout {expected_root}: {rendered}"
         )
     return str(inside[0])
 
@@ -440,9 +400,7 @@ def verify_runtime_import_provenance(
     openwam = Path(openwam_root).expanduser().resolve()
     robodojo = Path(robodojo_root).expanduser().resolve()
     if not sys.path or Path(sys.path[0] or os.curdir).resolve() != openwam:
-        raise RuntimeError(
-            f"OpenWAM checkout must be first on sys.path, expected {openwam}"
-        )
+        raise RuntimeError(f"OpenWAM checkout must be first on sys.path, expected {openwam}")
 
     verified: dict[str, str] = {}
     groups = (
@@ -454,10 +412,7 @@ def verify_runtime_import_provenance(
             expected = (checkout_root / relative_root).resolve()
             spec = PathFinder.find_spec(name, sys.path)
             if spec is None:
-                raise RuntimeError(
-                    f"cannot resolve {name} from configured {checkout_name} "
-                    f"checkout {expected}"
-                )
+                raise RuntimeError(f"cannot resolve {name} from configured {checkout_name} checkout {expected}")
             verified[name] = _verify_module_locations(
                 name,
                 _module_locations(spec),
@@ -490,9 +445,7 @@ def prepare_launcher_runtime(
         raise ValueError(f"device_id must be non-negative, got {device_id}")
     headless = _as_bool(config.get("headless", True), "headless")
     environment["CUDA_VISIBLE_DEVICES"] = str(device_id)
-    kit_args = " ".join(
-        f"--enable {extension}" for extension in _NATIVE_KIT_EXTENSIONS
-    )
+    kit_args = " ".join(f"--enable {extension}" for extension in _NATIVE_KIT_EXTENSIONS)
     return {
         "headless": headless,
         "enable_cameras": True,
@@ -542,9 +495,7 @@ class _PreservedStdioFDs:
                     except Exception:
                         pass
                 self._saved.clear()
-                raise RuntimeError(
-                    f"failed to preserve stdio fd {target}: {error}"
-                ) from error
+                raise RuntimeError(f"failed to preserve stdio fd {target}: {error}") from error
             self._saved.append((target, saved))
         return self
 
@@ -563,9 +514,7 @@ class _PreservedStdioFDs:
         self._saved.clear()
         if failures and exc_type is None:
             operation, target, error = failures[0]
-            raise RuntimeError(
-                f"failed to {operation} stdio fd {target}: {error}"
-            ) from error
+            raise RuntimeError(f"failed to {operation} stdio fd {target}: {error}") from error
         return False
 
 
@@ -647,18 +596,13 @@ def _physx_runtime_session(
     except BaseException:
         if cleanup_error is not None:
             try:
-                print(
-                    "[OpenWAM RoboDojo] PhysX monitor cleanup failed: "
-                    f"{cleanup_error}"
-                )
+                print(f"[OpenWAM RoboDojo] PhysX monitor cleanup failed: {cleanup_error}")
             except Exception:
                 pass
         raise
     if cleanup_error is not None:
         try:
-            print(
-                f"[OpenWAM RoboDojo] PhysX monitor cleanup failed: {cleanup_error}"
-            )
+            print(f"[OpenWAM RoboDojo] PhysX monitor cleanup failed: {cleanup_error}")
         except Exception:
             pass
 
@@ -756,10 +700,7 @@ def load_resume_manifest(path: str | os.PathLike[str]) -> dict[str, Any] | None:
         if not isinstance(data, dict):
             raise ValueError("resume manifest must contain a JSON object")
     except Exception as error:
-        print(
-            f"[OpenWAM RoboDojo] failed to load resume manifest "
-            f"{manifest_path}: {error}; ignoring"
-        )
+        print(f"[OpenWAM RoboDojo] failed to load resume manifest {manifest_path}: {error}; ignoring")
         return None
     print(
         f"[OpenWAM RoboDojo] resuming from {manifest_path} "
@@ -783,9 +724,7 @@ def delete_resume_manifest(env: Any) -> bool:
         print(f"[OpenWAM RoboDojo] removed completed resume manifest {path}")
         return True
     except Exception as error:
-        print(
-            f"[OpenWAM RoboDojo] failed to remove resume manifest {path}: {error}"
-        )
+        print(f"[OpenWAM RoboDojo] failed to remove resume manifest {path}: {error}")
         return False
 
 
@@ -822,9 +761,7 @@ def _task_runtime_metadata(task_name: str) -> tuple[str, Path]:
 
     task_registry = importlib.import_module(f"task.{BENCHMARK}.task_registry")
     config_root = Path(ROOT_DIR) / "task" / BENCHMARK / "config"
-    return BENCHMARK, Path(
-        task_registry.task_config_path(str(config_root), task_name)
-    ).resolve()
+    return BENCHMARK, Path(task_registry.task_config_path(str(config_root), task_name)).resolve()
 
 
 def _assemble_env_config(
@@ -841,9 +778,7 @@ def _assemble_env_config(
 
     task_registry = importlib.import_module(f"task.{BENCHMARK}.task_registry")
     env_config_path = Path(ENV_CONFIG_PATH)
-    eval_cfg = load_yaml(
-        str(env_config_path / f"{config['env_config']}.yml")
-    )
+    eval_cfg = load_yaml(str(env_config_path / f"{config['env_config']}.yml"))
     eval_cfg.update(
         build_eval_config_overrides(
             config,
@@ -873,11 +808,7 @@ def _assemble_env_config(
             "scene": configured_yaml("scene"),
             "camera": configured_yaml("camera"),
             "robot": configured_yaml("robot"),
-            "task_env": load_yaml(
-                task_registry.task_config_path(
-                    str(benchmark_path / "config"), config["task"]
-                )
-            ),
+            "task_env": load_yaml(task_registry.task_config_path(str(benchmark_path / "config"), config["task"])),
             "eval_cfg": eval_cfg,
             "deploy_cfg": deploy_cfg,
         }
@@ -885,13 +816,9 @@ def _assemble_env_config(
     OmegaConf.update(env_cfg, "sim.scene.num_envs", 1, force_add=True)
     OmegaConf.update(env_cfg, "eval_cfg.num_envs", 1, force_add=True)
     env_cfg = process_randomization(env_cfg)
-    env_cfg, _native_eval_count = process_config(
-        env_cfg, task_name=config["task"]
-    )
+    env_cfg, _native_eval_count = process_config(env_cfg, task_name=config["task"])
     apply_max_steps_override(env_cfg, config.get("max_steps"))
-    OmegaConf.update(
-        env_cfg, "eval_cfg.eval_num", config["eval_count"], force_add=True
-    )
+    OmegaConf.update(env_cfg, "eval_cfg.eval_num", config["eval_count"], force_add=True)
     OmegaConf.update(
         env_cfg,
         "camera.default_frequency",
@@ -923,11 +850,7 @@ def _abandon_current_physx_seed(
     *,
     broken_envs: set[int] | None = None,
 ) -> None:
-    broken_envs = (
-        set(getattr(error, "broken_envs", {0}))
-        if broken_envs is None
-        else set(broken_envs)
-    ) or {0}
+    broken_envs = (set(getattr(error, "broken_envs", {0})) if broken_envs is None else set(broken_envs)) or {0}
     abandoned: set[int] = set()
     get_seeds = getattr(env, "get_seeds_for_envs", None)
     if callable(get_seeds):
@@ -935,10 +858,7 @@ def _abandon_current_physx_seed(
     if not abandoned and seeds is not None and len(seeds) > 0:
         abandoned.add(int(seeds[0]))
     env.abandoned_seeds.update(abandoned)
-    print(
-        f"[OpenWAM RoboDojo] PhysX broke single env; abandoning "
-        f"seed(s) {sorted(abandoned)}"
-    )
+    print(f"[OpenWAM RoboDojo] PhysX broke single env; abandoning seed(s) {sorted(abandoned)}")
 
 
 def _raise_physx_restart(
@@ -952,13 +872,8 @@ def _raise_physx_restart(
     try:
         env.persist_resume_manifest(restart_count=restart_count)
     except Exception as persist_error:
-        print(
-            "[OpenWAM RoboDojo] failed to persist fatal resume manifest: "
-            f"{persist_error}"
-        )
-    shell_restart = bool(
-        monitor is not None and monitor.requires_shell_restart()
-    )
+        print(f"[OpenWAM RoboDojo] failed to persist fatal resume manifest: {persist_error}")
+    shell_restart = bool(monitor is not None and monitor.requires_shell_restart())
     raise PhysXRestartRequired(
         str(error) if message is None else message,
         restart_count=restart_count,
@@ -988,11 +903,7 @@ def _recover_generic_physx_exception(
         )
 
     num_envs = int(getattr(env, "num_envs", 1))
-    broken_envs = {
-        int(index)
-        for index in monitor.get_broken_envs()
-        if 0 <= int(index) < num_envs
-    }
+    broken_envs = {int(index) for index in monitor.get_broken_envs() if 0 <= int(index) < num_envs}
     if not broken_envs:
         return False
     _abandon_current_physx_seed(
@@ -1023,8 +934,7 @@ def _run_native_episodes(
         seeds = env.seed_manager.get_seeds(max_count=remaining)
         if seeds is None:
             raise RuntimeError(
-                "RoboDojo seed manager exhausted before the requested "
-                f"{eval_count} evaluation episode(s) completed"
+                f"RoboDojo seed manager exhausted before the requested {eval_count} evaluation episode(s) completed"
             )
         env.env_seeds = seeds
         if monitor is not None:
@@ -1091,10 +1001,7 @@ def _run_native_episodes(
 
         env.seed_manager.eval_step()
         completed = int(env.success_nums) + int(env.fail_nums)
-        print(
-            f"[OpenWAM RoboDojo] completed={completed}/{eval_count} "
-            f"success={env.success_nums} fail={env.fail_nums}"
-        )
+        print(f"[OpenWAM RoboDojo] completed={completed}/{eval_count} success={env.success_nums} fail={env.fail_nums}")
         if completed < target_completed:
             env.close()
 
@@ -1156,9 +1063,7 @@ def run_eval(config: dict[str, Any]) -> int:
     configure_runtime_import_paths(_OPENWAM_ROOT, config["robodojo_root"])
     verify_runtime_import_provenance(_OPENWAM_ROOT, config["robodojo_root"])
     launcher_kwargs = prepare_launcher_runtime(config)
-    os.environ.setdefault(
-        "ROBODOJO_RUN_ID", datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    )
+    os.environ.setdefault("ROBODOJO_RUN_ID", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
     run_id = os.environ["ROBODOJO_RUN_ID"]
 
     with runtime_working_directory(config["robodojo_root"]):
@@ -1204,9 +1109,7 @@ def run_eval(config: dict[str, Any]) -> int:
                         physx_monitor_enabled=physx_runtime.enabled,
                     )
                     _stage("importing eval_env")
-                    eval_env_module = importlib.import_module(
-                        "src.eval_client.eval_env"
-                    )
+                    eval_env_module = importlib.import_module("src.eval_client.eval_env")
                     _stage("constructing EvalEnv")
                     env = construct_eval_env_with_resume(
                         eval_env_module,
@@ -1244,16 +1147,10 @@ def run_eval(config: dict[str, Any]) -> int:
                                         config["calibration_output"],
                                         env_idx=0,
                                     )
-                                    _stage(
-                                        "wrote live calibration to "
-                                        f"{config['calibration_output']}"
-                                    )
+                                    _stage(f"wrote live calibration to {config['calibration_output']}")
 
                             _install_openwam_policy_alias()
-                            _stage(
-                                f"starting native episodes "
-                                f"eval_count={config['eval_count']}"
-                            )
+                            _stage(f"starting native episodes eval_count={config['eval_count']}")
                             _run_native_episodes(
                                 env,
                                 config["eval_count"],
@@ -1270,15 +1167,9 @@ def run_eval(config: dict[str, Any]) -> int:
                             try:
                                 policy_client.close()
                             except Exception as error:
-                                _stage(
-                                    "policy client cleanup failed: "
-                                    f"{error}"
-                                )
+                                _stage(f"policy client cleanup failed: {error}")
                             finally:
-                                if (
-                                    getattr(env, "model_client", None)
-                                    is policy_client
-                                ):
+                                if getattr(env, "model_client", None) is policy_client:
                                     env.model_client = None
                     finally:
                         try:
@@ -1288,10 +1179,7 @@ def run_eval(config: dict[str, Any]) -> int:
                 except BaseException as error:
                     import traceback
 
-                    _stage(
-                        "eval body failed: "
-                        f"{type(error).__name__}: {error}"
-                    )
+                    _stage(f"eval body failed: {type(error).__name__}: {error}")
                     try:
                         with stage_log.open("a", encoding="utf-8") as handle:
                             traceback.print_exc(file=handle)

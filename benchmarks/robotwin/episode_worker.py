@@ -120,10 +120,26 @@ def _make_dispatcher_eval_policy(module, client: "D.DispatcherClient", heartbeat
             if TASK_ENV.eval_video_path is not None:
                 ffmpeg = subprocess.Popen(
                     [
-                        "ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo",
-                        "-pixel_format", "rgb24", "-video_size", video_size,
-                        "-framerate", "10", "-i", "-", "-pix_fmt", "yuv420p",
-                        "-vcodec", "libx264", "-crf", "23",
+                        "ffmpeg",
+                        "-y",
+                        "-loglevel",
+                        "error",
+                        "-f",
+                        "rawvideo",
+                        "-pixel_format",
+                        "rgb24",
+                        "-video_size",
+                        video_size,
+                        "-framerate",
+                        "10",
+                        "-i",
+                        "-",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-vcodec",
+                        "libx264",
+                        "-crf",
+                        "23",
                         f"{TASK_ENV.eval_video_path}/episode{TASK_ENV.test_num}.mp4",
                     ],
                     stdin=subprocess.PIPE,
@@ -236,7 +252,9 @@ def main(argv: Optional[list] = None) -> int:
     # Dry-run: simulate episodes without RoboTwin (protocol/scheduling smoke).
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--dry-run-sleep", type=float, default=0.2, help="simulated rollout seconds")
-    ap.add_argument("--dry-run-heartbeat", type=float, default=0.1, help="simulated heartbeat interval during the rollout sleep")
+    ap.add_argument(
+        "--dry-run-heartbeat", type=float, default=0.1, help="simulated heartbeat interval during the rollout sleep"
+    )
     ap.add_argument("--dry-run-expert", type=float, default=0.05, help="simulated expert-check seconds")
     ap.add_argument("--dry-run-valid-prob", type=float, default=0.8)
     ap.add_argument("--dry-run-success-prob", type=float, default=0.5)

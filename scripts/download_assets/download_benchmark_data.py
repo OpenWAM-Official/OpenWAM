@@ -64,16 +64,16 @@ def red(t: str) -> str:
 # ── benchmark registry ───────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Benchmark:
-    name: str                # display name
-    repo_id: str             # HuggingFace dataset repo
-    subdir: str              # folder under the storage root = benchmark name
-    approx_gb: float         # fallback size when the live metadata query fails
-    config: str              # yaml under configs/dataloader/ pointed at the download
-    allow_patterns: tuple[str, ...] | None = None   # partial download
+    name: str  # display name
+    repo_id: str  # HuggingFace dataset repo
+    subdir: str  # folder under the storage root = benchmark name
+    approx_gb: float  # fallback size when the live metadata query fails
+    config: str  # yaml under configs/dataloader/ pointed at the download
+    allow_patterns: tuple[str, ...] | None = None  # partial download
     ignore_patterns: tuple[str, ...] | None = None
     strip_prefix: str | None = None  # repo subpath relocated to the folder root
     dataset_subpath: str | None = None  # dataset_dir points below the folder root
-    config_note: str | None = None      # extra fields the user must still set
+    config_note: str | None = None  # extra fields the user must still set
 
 
 BENCHMARKS: dict[str, Benchmark] = {
@@ -129,9 +129,7 @@ BENCHMARKS: dict[str, Benchmark] = {
         config="ebench.yaml",
         ignore_patterns=(".ipynb_checkpoints/**", "**/.ipynb_checkpoints/**"),
     ),
-    "7": Benchmark(
-        "RoboCasa365", "OpenWAM/RoboCasa365", "robocasa365", approx_gb=78.0, config="robocasa365.yaml"
-    ),
+    "7": Benchmark("RoboCasa365", "OpenWAM/RoboCasa365", "robocasa365", approx_gb=78.0, config="robocasa365.yaml"),
     "8": Benchmark(
         "RoboCasa_GR1",
         "OpenWAM/RoboCasa_GR1",
@@ -262,11 +260,7 @@ def _extracted_zip_ignores(target: Path) -> list[str]:
     dataset_dir = target / "dataset"
     if not dataset_dir.is_dir():
         return []
-    return [
-        f"dataset/{d.parent.name}/{d.name}.zip"
-        for d in sorted(dataset_dir.glob("*/aloha-agilex*"))
-        if d.is_dir()
-    ]
+    return [f"dataset/{d.parent.name}/{d.name}.zip" for d in sorted(dataset_dir.glob("*/aloha-agilex*")) if d.is_dir()]
 
 
 def _extract_zips(bench: Benchmark, target: Path) -> None:
@@ -390,10 +384,12 @@ def download(bench: Benchmark, root: Path, expected: int) -> Path:
     if target.is_dir() and any(target.iterdir()):
         print(yellow(f"{target} already has content — resuming/skipping finished files."))
     print(bold(f"Downloading {bench.repo_id} -> {target}"))
-    print(yellow(
-        "The repo file list is fetched first — for repos with many files "
-        "the bar can sit at 0% for minutes before bytes start landing."
-    ))
+    print(
+        yellow(
+            "The repo file list is fetched first — for repos with many files "
+            "the bar can sit at 0% for minutes before bytes start landing."
+        )
+    )
 
     # Archives already unpacked (and removed) by an earlier run must not be
     # re-downloaded just because the archive itself is gone.
@@ -536,9 +532,7 @@ def _stats_robocasa365(target: Path) -> None:
         build_and_save_robocasa365_stats,
     )
 
-    roots = sorted(
-        str(child) for child in target.iterdir() if (child / "meta" / "info.json").is_file()
-    )
+    roots = sorted(str(child) for child in target.iterdir() if (child / "meta" / "info.json").is_file())
     if not roots:
         raise FileNotFoundError(f"no compact repos (dirs with meta/info.json) under {target}")
     build_and_save_robocasa365_stats(roots, path)

@@ -142,8 +142,7 @@ def apply_execution_cli_overrides(root_cfg, args):
         effective_mode = str(_select(root_cfg, "inference.inference_mode", default="sync") or "sync").strip().lower()
         if effective_mode != "async":
             raise ValueError(
-                "--inference-delay-steps requires --inference-mode async "
-                "or inference.inference_mode=async"
+                "--inference-delay-steps requires --inference-mode async or inference.inference_mode=async"
             )
 
     if inference_horizon is not None:

@@ -62,9 +62,15 @@ def _compute_modulation_3d(block, emb_B_C_D: Tensor, adaln_lora_B_C_3D: Optional
         mca = block.adaln_modulation_cross_attn(emb_B_C_D).chunk(3, dim=-1)
         mmlp = block.adaln_modulation_mlp(emb_B_C_D).chunk(3, dim=-1)
     return {
-        "shift_self_attn": msa[0], "scale_self_attn": msa[1], "gate_self_attn": msa[2],
-        "shift_cross_attn": mca[0], "scale_cross_attn": mca[1], "gate_cross_attn": mca[2],
-        "shift_mlp": mmlp[0], "scale_mlp": mmlp[1], "gate_mlp": mmlp[2],
+        "shift_self_attn": msa[0],
+        "scale_self_attn": msa[1],
+        "gate_self_attn": msa[2],
+        "shift_cross_attn": mca[0],
+        "scale_cross_attn": mca[1],
+        "gate_cross_attn": mca[2],
+        "shift_mlp": mmlp[0],
+        "scale_mlp": mmlp[1],
+        "gate_mlp": mmlp[2],
     }
 
 
@@ -138,8 +144,12 @@ def run_block_3d(
     normed = _adaln_modulate(x_B_S_D, block.layer_norm_self_attn, mod["scale_self_attn"], mod["shift_self_attn"])
     q_4d, k_4d, v_4d = block.self_attn.compute_qkv(normed, None, rope_emb=rope_emb)
     attn = torch_sdpa(
-        q_4d, k_4d, v_4d,
-        q_pattern="b s n d", k_pattern="b s n d", v_pattern="b s n d",
+        q_4d,
+        k_4d,
+        v_4d,
+        q_pattern="b s n d",
+        k_pattern="b s n d",
+        v_pattern="b s n d",
         out_pattern="b s (n d)",
         attn_mask=attn_mask,
     )

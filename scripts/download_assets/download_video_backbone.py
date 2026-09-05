@@ -62,9 +62,9 @@ def red(t: str) -> str:
 # ── model registry ───────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Download:
-    repo_id: str            # HuggingFace repo id (also the ModelScope id unless ms_id is set)
-    subdir: str             # directory name under the storage root
-    approx_gb: float        # fallback size when the live metadata query fails
+    repo_id: str  # HuggingFace repo id (also the ModelScope id unless ms_id is set)
+    subdir: str  # directory name under the storage root
+    approx_gb: float  # fallback size when the live metadata query fails
     allow_patterns: tuple[str, ...] | None = None  # HF-only partial download
     ms_id: str | None = None
 
@@ -72,9 +72,9 @@ class Download:
 @dataclass(frozen=True)
 class Model:
     name: str
-    config: str                       # yaml under configs/model/video_backbone/
+    config: str  # yaml under configs/model/video_backbone/
     downloads: tuple[Download, ...]
-    config_fields: tuple[str, ...]    # yaml field per download, positionally matched
+    config_fields: tuple[str, ...]  # yaml field per download, positionally matched
     hf_only: bool = False
 
 
@@ -115,9 +115,7 @@ MODELS: dict[str, Model] = {
     "5": Model(
         name="Cosmos3-Edge",
         config="cosmos3_edge.yaml",
-        downloads=(
-            Download("nvidia/Cosmos3-Edge", "Cosmos3-Edge", approx_gb=9.2, ms_id="nv-community/Cosmos3-Edge"),
-        ),
+        downloads=(Download("nvidia/Cosmos3-Edge", "Cosmos3-Edge", approx_gb=9.2, ms_id="nv-community/Cosmos3-Edge"),),
         config_fields=("model_path",),
     ),
 }

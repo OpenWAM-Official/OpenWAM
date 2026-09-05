@@ -421,9 +421,7 @@ class TestPhysicalSemantics:
             normalize_mode=None,
         )
 
-    def test_command_only_base_motion_keeps_action_and_masks_proprio(
-        self, tmp_path, patch_decode
-    ):
+    def test_command_only_base_motion_keeps_action_and_masks_proprio(self, tmp_path, patch_decode):
         bucket = _make_bucket(
             tmp_path / "b",
             [{"length": 40, "flag": 0, "delta": 0}],

@@ -67,9 +67,9 @@ def red(t: str) -> str:
 # ── checkpoint registry (mirrors the OpenWAM collections on HuggingFace) ─────
 @dataclass(frozen=True)
 class Ckpt:
-    name: str                 # repo name under the OpenWAM org == download subdir
-    approx_gb: float          # fallback size when the live metadata query fails
-    note: str | None = None   # extra label shown in the menu, e.g. the backbone
+    name: str  # repo name under the OpenWAM org == download subdir
+    approx_gb: float  # fallback size when the live metadata query fails
+    note: str | None = None  # extra label shown in the menu, e.g. the backbone
     finetune_only: bool = False  # pretrain checkpoint: finetune it, don't deploy it
 
     @property
@@ -83,8 +83,8 @@ class Ckpt:
 
 @dataclass(frozen=True)
 class Group:
-    title: str                # collection name shown in the menu
-    subdir: str               # path under assets/openwam_ckpt/
+    title: str  # collection name shown in the menu
+    subdir: str  # path under assets/openwam_ckpt/
     ckpts: tuple[Ckpt, ...]
 
 
@@ -210,8 +210,10 @@ def ask_yes_no(prompt: str, default_yes: bool) -> bool:
 def choose_group() -> Group:
     key = ask_choice(
         "Select the checkpoint family",
-        ["(1) OpenWAM_Alpha — pretrained foundation model + finetuned variants",
-         "(2) OpenWAM_Study — ablation checkpoints from the design study"],
+        [
+            "(1) OpenWAM_Alpha — pretrained foundation model + finetuned variants",
+            "(2) OpenWAM_Study — ablation checkpoints from the design study",
+        ],
         "Family number: ",
     )
     if key == "1":

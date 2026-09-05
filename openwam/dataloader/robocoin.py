@@ -16,82 +16,6 @@ dimensions pinned to identity.  Optional episode trimming and exclusions are
 validated against the exact manifest population before stats are accepted.
 """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 from __future__ import annotations
 
 import csv
@@ -127,11 +51,6 @@ from openwam.dataloader.utils.normalization import apply_normalization, material
 logger = logging.getLogger(__name__)
 
 _STATE_DIM = _ACTION_DIM
-
-
-
-
-
 
 
 # One canonical denylist is shared by reader and stats discovery.
@@ -216,8 +135,7 @@ def _discover_data_parquets(dataset_dir: Path, data_path_template: str):
             )
         except (AttributeError, IndexError, KeyError, TypeError, ValueError) as e:
             raise DataContractError(
-                f"RoboCOIN({Path(dataset_dir).name}): invalid info.json data_path "
-                f"template {data_path_template!r}: {e}"
+                f"RoboCOIN({Path(dataset_dir).name}): invalid info.json data_path template {data_path_template!r}: {e}"
             ) from e
         if path != expected:
             raise DataContractError(
@@ -226,7 +144,6 @@ def _discover_data_parquets(dataset_dir: Path, data_path_template: str):
             )
         result.append((path, chunk_index, file_index))
     return result
-
 
 
 _NEEDED_COLS = (
@@ -238,16 +155,12 @@ _NEEDED_COLS = (
 )
 
 
-
 _BASE_COLS = (
     "task_index",
     "eef_sim_pose_action",
     "eef_sim_pose_state",
 )
 _GRIP_COLS = ("gripper_open_scale_action", "gripper_open_scale_state")
-
-
-
 
 
 _DEX_UNIFY_COLS = (
@@ -257,8 +170,6 @@ _DEX_UNIFY_COLS = (
     "action",
     "observation.state",
 )
-
-
 
 
 GRIP_EXCLUDED_DIM_MASK = np.ones(_ACTION_DIM, dtype=bool)
@@ -273,9 +184,6 @@ def _finger_indices(feature: dict):
     and returns ``(left_idx, right_idx)`` for ``*_hand_joint_*`` motors.
     """
 
-
-
-
     names = feature.get("names")
     if isinstance(names, dict):
         names = names.get("motors")
@@ -283,10 +191,6 @@ def _finger_indices(feature: dict):
     left = [i for i, x in enumerate(names) if str(x).startswith("left_hand_joint")]
     right = [i for i, x in enumerate(names) if str(x).startswith("right_hand_joint")]
     return left, right
-
-
-
-
 
 
 MAX_HAND_DOF = 24
@@ -305,16 +209,6 @@ def dex_finger_layout(features: dict):
     Single source of truth for the dex-bucket gate, shared by the reader
     (:meth:`RoboCOINDataset.__init__`) and the stats script so they cannot drift.
     """
-
-
-
-
-
-
-
-
-
-
 
     has_grip = all(c in features for c in _GRIP_COLS)
     if has_grip or "eef_sim_pose_action" not in features:
@@ -338,13 +232,6 @@ def _build_dex_unify_map(k_left: int, k_right: int):
     follows the hand width automatically (currently: R pose 34:43, R hand 44:68).
     """
 
-
-
-
-
-
-
-
     l_hand = 10
     r_pos = l_hand + MAX_HAND_DOF
     r_hand = r_pos + 10
@@ -358,12 +245,7 @@ def _build_dex_unify_map(k_left: int, k_right: int):
     )
 
 
-
 _eef14_to_eef20 = eef14_to_eef20
-
-
-
-
 
 
 HEAD_CAMERA_PRIORITY = [
@@ -375,14 +257,9 @@ HEAD_CAMERA_PRIORITY = [
     "observation.images.cam_high_left_rgb",
     "observation.images.cam_high_realsense_rgb",
     "observation.images.cam_front_rgb",
-
-
-
     "observation.images.cam_front_head_rgb",
     "observation.images.cam_front_chest_rgb",
     "observation.images.cam_chest_rgb",
-
-
     "observation.images.camera_head_rgb",
     "observation.images.cam_left_high",
     "observation.images.ego_view",
@@ -480,11 +357,7 @@ def _validate_excluded_episodes_provenance(
                 f"name {contributor!r} in excluded_episodes_provenance"
             )
         contributor_path = Path(contributor)
-        if (
-            contributor in (".", "..")
-            or contributor_path.is_absolute()
-            or len(contributor_path.parts) != 1
-        ):
+        if contributor in (".", "..") or contributor_path.is_absolute() or len(contributor_path.parts) != 1:
             raise DataContractError(
                 f"RoboCOIN bucket {dataset_id}: stats {stats_path} has invalid contributor "
                 f"name {contributor!r} in excluded_episodes_provenance"
@@ -495,11 +368,7 @@ def _validate_excluded_episodes_provenance(
                 f"RoboCOIN bucket {dataset_id}: stats {stats_path} references missing contributor "
                 f"directory {bucket_dir} in excluded_episodes_provenance"
             )
-        snapshot = (
-            current_snapshot
-            if contributor == dataset_id
-            else load_excluded_episodes_snapshot(bucket_dir)
-        )
+        snapshot = current_snapshot if contributor == dataset_id else load_excluded_episodes_snapshot(bucket_dir)
         snapshots[contributor] = snapshot
         expected_entry = {"episode_indices": list(snapshot.episode_indices)}
         if (
@@ -537,12 +406,6 @@ def _validate_stats_population_provenance(
     trim/exclusion snapshots already validated above.
     """
 
-
-
-
-
-
-
     expected_header = {
         "schema_version": _STATS_POPULATION_SCHEMA_VERSION,
         "split": "train",
@@ -561,11 +424,7 @@ def _validate_stats_population_provenance(
             "with --split train and the configured trim CSV."
         )
     datasets = actual["datasets"]
-    if (
-        type(num_datasets) is not int
-        or len(datasets) != num_datasets
-        or set(datasets) != set(exclusion_snapshots)
-    ):
+    if type(num_datasets) is not int or len(datasets) != num_datasets or set(datasets) != set(exclusion_snapshots):
         raise DataContractError(
             f"RoboCOIN bucket {current_dataset_id}: stats {stats_path} population datasets "
             "do not exactly match the pooled exclusion contributors; regenerate stats."
@@ -585,9 +444,6 @@ def _validate_stats_population_provenance(
             info=info,
         )
         return expected_entry
-
-
-
 
     current_expected = _expected(current_dataset_id, exclusion_snapshots[current_dataset_id])
     current_actual = datasets.get(current_dataset_id)
@@ -627,7 +483,6 @@ class _TrimSnapshot:
     path: str
     spec: dict
     sha256: str
-
 
     population_validation_cache: set[tuple[str, str]] = field(
         default_factory=set,
@@ -693,17 +548,6 @@ def _load_trim_snapshot(path) -> _TrimSnapshot:
     come from the same bytes, so a path replacement cannot pair old spans with
     new provenance inside one reader construction or stats scan.
     """
-
-
-
-
-
-
-
-
-
-
-
 
     key = str(path)
     try:
@@ -800,9 +644,7 @@ def _load_trim_snapshot(path) -> _TrimSnapshot:
         raise ValueError(f"RoboCOIN trim_csv {key}, line {line_number}: malformed CSV: {e}") from e
 
     logger.info("RoboCOIN: loaded %d trim entries across %d datasets from %s", n, len(spec), key)
-    immutable_spec = MappingProxyType(
-        {dataset: MappingProxyType(entries) for dataset, entries in spec.items()}
-    )
+    immutable_spec = MappingProxyType({dataset: MappingProxyType(entries) for dataset, entries in spec.items()})
     snapshot = _TrimSnapshot(path=key, spec=immutable_spec, sha256=hashlib.sha256(raw).hexdigest())
     _TRIM_SNAPSHOT_CACHE[key] = (signature, snapshot)
     return snapshot
@@ -810,10 +652,7 @@ def _load_trim_snapshot(path) -> _TrimSnapshot:
 
 def _load_trim_spec(path) -> dict:
     """Return the parsed spec from one cached immutable trim snapshot."""
-    return {
-        dataset: dict(entries)
-        for dataset, entries in _load_trim_snapshot(path).spec.items()
-    }
+    return {dataset: dict(entries) for dataset, entries in _load_trim_snapshot(path).spec.items()}
 
 
 def _assert_trim_snapshot_current(snapshot: _TrimSnapshot, *, context: str) -> None:
@@ -841,10 +680,6 @@ def _validate_trim_manifest(dataset_id: str, manifest, spec: dict) -> dict:
     every ``total_frames`` mismatch are data-contract failures, including rows
     outside the selected split or later excluded by the reader.
     """
-
-
-
-
 
     if not spec:
         return {}
@@ -881,8 +716,7 @@ def _validate_trim_manifest(dataset_id: str, manifest, spec: dict) -> dict:
         )
 
     return {
-        ep: (int(head), manifest_lengths[ep] if tail is None else int(tail))
-        for ep, (head, tail, _) in spec.items()
+        ep: (int(head), manifest_lengths[ep] if tail is None else int(tail)) for ep, (head, tail, _) in spec.items()
     }
 
 
@@ -904,13 +738,6 @@ def _stats_population_spans(
     be hidden by merely leaving a top-level ``split: train`` label in an old
     stats file.
     """
-
-
-
-
-
-
-
 
     root = Path(dataset_dir)
     manifest = load_episodes_parquet(root)
@@ -978,9 +805,6 @@ def _resolve_robocoin_cameras(features: dict) -> tuple:
         (head_cam, left_wrist_cam, right_wrist_cam) — each is a string or None.
     """
 
-
-
-
     feat_keys = set(features.keys())
     head = None
     for c in HEAD_CAMERA_PRIORITY:
@@ -1000,11 +824,6 @@ def _resolve_robocoin_cameras(features: dict) -> tuple:
     return head, left_wrist, right_wrist
 
 
-
-
-
-
-
 class RoboCOINDataset(LeRobotV3Reader):
     """Single-dataset reader for one RoboCOIN task bucket (LeRobot v3).
 
@@ -1014,28 +833,25 @@ class RoboCOINDataset(LeRobotV3Reader):
     overridden below.
     """
 
-
-
-
-
-
-
     DATASET_NAME = "RoboCOIN"
     NEEDED_COLS = _NEEDED_COLS
 
-
     PROMPT_FILE_REQUIRED = False
-
 
     CONFIG_KEYS = LeRobotV3Reader.CONFIG_KEYS + ("trim_csv", "_trim_snapshot")
 
-
     WRIST_DECODE_TOLERATED = (Exception,)
 
-
-
-    def __init__(self, dataset_dir, *, unify_action: bool = False, unify_action_map=None,
-                 trim_csv=None, _trim_snapshot=None, **kwargs):
+    def __init__(
+        self,
+        dataset_dir,
+        *,
+        unify_action: bool = False,
+        unify_action_map=None,
+        trim_csv=None,
+        _trim_snapshot=None,
+        **kwargs,
+    ):
         """Detect dexterous-hand + unify buckets and wire finger encoding.
 
         Default (unify off, or grippered bucket): byte-identical to the inherited
@@ -1051,23 +867,10 @@ class RoboCOINDataset(LeRobotV3Reader):
         reader stays byte-identical to before.
         """
 
-
-
-
-
-
-
-
-
-
-
-
-
         if is_robocoin_bucket_excluded(dataset_dir):
             exclusion = ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS[Path(dataset_dir).name]
             raise DataContractError(
-                f"RoboCOIN bucket {Path(dataset_dir).name!r} is excluded as a whole: "
-                f"{exclusion['reason']}"
+                f"RoboCOIN bucket {Path(dataset_dir).name!r} is excluded as a whole: {exclusion['reason']}"
             )
         self._trim_csv = trim_csv
         trim_snapshot_was_provided = _trim_snapshot is not None
@@ -1080,8 +883,6 @@ class RoboCOINDataset(LeRobotV3Reader):
                 )
         if _trim_snapshot is None and trim_csv is not None:
             _trim_snapshot = _load_trim_snapshot(trim_csv)
-
-
 
             _trim_snapshot.population_validation_cache.clear()
         self._trim_snapshot = _trim_snapshot
@@ -1103,21 +904,21 @@ class RoboCOINDataset(LeRobotV3Reader):
                 self._fidx_act = (np.asarray(aL, dtype=np.int64), np.asarray(aR, dtype=np.int64))
                 self._fidx_state = (np.asarray(sL, dtype=np.int64), np.asarray(sR, dtype=np.int64))
 
-
                 self.ACTION_DIM = 18 + kL + kR
                 unify_action_map = _build_dex_unify_map(kL, kR)
             elif "eef_sim_pose_action" in features and not all(c in features for c in _GRIP_COLS):
-
-
-
-
                 aL, aR = _finger_indices(features.get("action", {}))
                 sL, sR = _finger_indices(features.get("observation.state", {}))
                 logger.warning(
                     "RoboCOIN %s: dexterous-hand bucket (pose, no gripper) but finger layout "
                     "failed the gate (action L/R=%d/%d, state L/R=%d/%d, max=%d); falling back "
                     "to pose-only under unify_action (fingers dropped).",
-                    dataset_dir, len(aL), len(aR), len(sL), len(sR), MAX_HAND_DOF,
+                    dataset_dir,
+                    len(aL),
+                    len(aR),
+                    len(sL),
+                    len(sR),
+                    MAX_HAND_DOF,
                 )
         super().__init__(dataset_dir, unify_action=unify_action, unify_action_map=unify_action_map, **kwargs)
         if self._trim_snapshot is not None and not trim_snapshot_was_provided:
@@ -1136,7 +937,6 @@ class RoboCOINDataset(LeRobotV3Reader):
             if hasattr(self, "_stats_exclusion_snapshots"):
                 del self._stats_exclusion_snapshots
 
-
         self._trim_snapshot = None
 
     def _get_trim_snapshot(self):
@@ -1145,18 +945,13 @@ class RoboCOINDataset(LeRobotV3Reader):
             return None
         snapshot = getattr(self, "_trim_snapshot", None)
         if snapshot is None:
-
             snapshot = _load_trim_snapshot(self._trim_csv)
             self._trim_snapshot = snapshot
         return snapshot
 
-
-
     def _load_excluded_episode_indices(self) -> set[int]:
         """Pin the exact exclusion population consumed by filtering and stats."""
-        self._excluded_episodes_snapshot = load_excluded_episodes_snapshot(
-            self._dataset_dir
-        )
+        self._excluded_episodes_snapshot = load_excluded_episodes_snapshot(self._dataset_dir)
         return set(self._excluded_episodes_snapshot.episode_indices)
 
     def _resolve_cameras(self, info: dict):
@@ -1171,14 +966,6 @@ class RoboCOINDataset(LeRobotV3Reader):
         so setting it here is the supported extension point.
         """
 
-
-
-
-
-
-
-
-
         features = info.get("features", {})
         head, left_wrist, right_wrist = _resolve_robocoin_cameras(features)
         if head is None:
@@ -1188,12 +975,8 @@ class RoboCOINDataset(LeRobotV3Reader):
         if self._has_grip:
             self.NEEDED_COLS = _NEEDED_COLS
         elif self._dex_unify:
-
-
-
             self.NEEDED_COLS = _DEX_UNIFY_COLS
         else:
-
             self.NEEDED_COLS = _BASE_COLS
             self.ACTION_DIM_MASK = GRIP_EXCLUDED_DIM_MASK
         return head, left_wrist, right_wrist
@@ -1208,45 +991,6 @@ class RoboCOINDataset(LeRobotV3Reader):
         same retained-population contract is required by stats generation.
         """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         eps_df = super()._filter_episodes(eps_df)
         if self._trim_csv is None:
             return eps_df
@@ -1258,9 +1002,6 @@ class RoboCOINDataset(LeRobotV3Reader):
 
         trim_spans = getattr(self, "_trim_spans", None)
         if trim_spans is None:
-
-
-
             trim_spans = _validate_trim_manifest(self._dataset_id, eps_df, spec)
         else:
             del self._trim_spans
@@ -1270,20 +1011,8 @@ class RoboCOINDataset(LeRobotV3Reader):
 
         cam_cols = [c for c in eps_df.columns if c.startswith("_video_frame_offset/")]
 
-
         row_off = eps_df["_data_row_offset"].to_numpy().copy()
         cam_off = {c: eps_df[c].to_numpy().copy() for c in cam_cols}
-
-
-
-
-
-
-
-
-
-
-
 
         min_len = _TRIM_MIN_LEN
 
@@ -1340,13 +1069,9 @@ class RoboCOINDataset(LeRobotV3Reader):
         return eps_df
 
     def _add_data_offsets(self, eps) -> None:
-
-
-
         if self._trim_csv is not None:
             spec = self._get_trim_snapshot().spec.get(self._dataset_id, {})
             self._trim_spans = _validate_trim_manifest(self._dataset_id, eps, spec)
-
 
         self._add_data_offsets_from_files(eps)
 
@@ -1362,14 +1087,6 @@ class RoboCOINDataset(LeRobotV3Reader):
         when a bucket has many parquet shards.
         """
 
-
-
-
-
-
-
-
-
         paths = _discover_data_parquets(self._dataset_dir, self._data_path_template)
 
         def _read_meta(entry):
@@ -1378,7 +1095,6 @@ class RoboCOINDataset(LeRobotV3Reader):
 
         if not paths:
             raise FileNotFoundError(f"No data parquet files under {self._dataset_dir}/data")
-
 
         n_workers = min(len(paths), 4)
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
@@ -1460,10 +1176,6 @@ class RoboCOINDataset(LeRobotV3Reader):
             force_rot6d_identity=True,
         )
 
-
-
-
-
         for k in ("mean", "std", "min", "max", "q01", "q99"):
             if eef_stats[k].shape[0] != _ACTION_DIM:
                 raise ValueError(
@@ -1474,7 +1186,6 @@ class RoboCOINDataset(LeRobotV3Reader):
         if not self._dex_unify:
             return eef_stats
 
-
         hand_raw = raw.get("hand")
         if not hand_raw:
             raise FileNotFoundError(
@@ -1482,19 +1193,6 @@ class RoboCOINDataset(LeRobotV3Reader):
                 f"block in {stats_path}; re-run robocoin_stats_computation (it now emits hand stats)."
             )
         kL, kR = self._k_left, self._k_right
-
-
-
-
-
-
-
-
-
-
-
-
-
 
         dof_l, dof_r = hand_raw.get("dof_left"), hand_raw.get("dof_right")
         if dof_l is None or dof_r is None:
@@ -1514,8 +1212,6 @@ class RoboCOINDataset(LeRobotV3Reader):
         hand_stats = materialize_eef_stats(
             hand_raw, self._normalize_mode, dim=kL + kR, strict_minmax=False, source_hint=f"{stats_path}: hand.*"
         )
-
-
 
         for k in ("mean", "std", "min", "max", "q01", "q99"):
             if hand_stats[k].shape[0] != kL + kR:
@@ -1539,11 +1235,6 @@ class RoboCOINDataset(LeRobotV3Reader):
         were not loaded.
         """
 
-
-
-
-
-
         return apply_normalization(arr, self._normalization_stats, self._normalize_mode)
 
     def _grip_or_zeros(self, win, col: str, n: int) -> np.ndarray:
@@ -1553,10 +1244,6 @@ class RoboCOINDataset(LeRobotV3Reader):
         flows through ``eef14_to_eef20`` into the two grip slots, which are
         masked out of supervision by ``GRIP_EXCLUDED_DIM_MASK``.
         """
-
-
-
-
 
         if self._has_grip:
             return np.stack(win[col].values[:n]).astype(np.float32)
@@ -1570,11 +1257,6 @@ class RoboCOINDataset(LeRobotV3Reader):
         ``action`` / ``observation.state`` array. Width = 18 + kL + kR; the base
         unify scatter places these into the 80-D pose + hand slots.
         """
-
-
-
-
-
 
         pose20 = eef14_to_eef20(eef12, np.zeros((len(eef12), 2), dtype=np.float32))
         l_pose, r_pose = pose20[:, 0:9], pose20[:, 10:19]
@@ -1638,20 +1320,13 @@ class RoboCOINDataset(LeRobotV3Reader):
 
         root = Path(dataset_dir) if dataset_dir is not None else None
 
-
         if root is None or (root / "meta" / "info.json").is_file():
             dataset = super().from_config(config, split=split)
         else:
-
-
-
-
             if not root.is_dir():
                 raise FileNotFoundError(f"{cls.__name__}: {root} does not exist")
             discovered = sorted(
-                path
-                for path in root.iterdir()
-                if path.is_dir() and (path / "meta" / "info.json").is_file()
+                path for path in root.iterdir() if path.is_dir() and (path / "meta" / "info.json").is_file()
             )
             excluded = [path for path in discovered if is_robocoin_bucket_excluded(path)]
             sub_dirs = [path for path in discovered if not is_robocoin_bucket_excluded(path)]
@@ -1663,9 +1338,7 @@ class RoboCOINDataset(LeRobotV3Reader):
                     ", ".join(path.name for path in excluded),
                 )
             if not sub_dirs:
-                raise FileNotFoundError(
-                    f"{cls.__name__}: no non-excluded sub-buckets with meta/info.json under {root}"
-                )
+                raise FileNotFoundError(f"{cls.__name__}: no non-excluded sub-buckets with meta/info.json under {root}")
 
             missing = object()
             common = {"split": split}
@@ -1696,11 +1369,6 @@ class RoboCOINDataset(LeRobotV3Reader):
         return MultiRobotCOINDataset
 
 
-
-
-
-
-
 class MultiRobotCOINDataset(MultiLeRobotV3Reader):
     """Aggregate of N RoboCOIN per-task buckets across multiple robot types."""
 
@@ -1717,9 +1385,6 @@ class MultiRobotCOINDataset(MultiLeRobotV3Reader):
 
     @property
     def action_dim(self):
-
-
-
         return self._buckets[0].action_dim if self._buckets else _ACTION_DIM
 
     @classmethod

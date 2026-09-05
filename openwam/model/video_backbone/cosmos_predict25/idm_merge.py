@@ -43,9 +43,7 @@ def _tokens(state: BlockLoopState) -> int:
     return int(state.grid_frames) * int(state.grid_height) * int(state.grid_width)
 
 
-def merge_branches(
-    noisy: BlockLoopState, cond: BlockLoopState
-) -> Tuple[BlockLoopState, int, int]:
+def merge_branches(noisy: BlockLoopState, cond: BlockLoopState) -> Tuple[BlockLoopState, int, int]:
     """Concatenate the noisy + cond Cosmos video branches along the frame axis.
 
     Returns ``(merged, s_noisy_tokens, s_cond_tokens)`` with the two seq lengths
@@ -94,19 +92,12 @@ def merge_branches(
     for key in _FRAME_EXTRAS:
         merged_extras[key] = torch.cat([ex_n[key], ex_c[key]], dim=1)
     # Per-token RoPE: concat along the token axis (dim=0).
-    merged_extras["rope_emb_L_1_1_D"] = torch.cat(
-        [ex_n["rope_emb_L_1_1_D"], ex_c["rope_emb_L_1_1_D"]], dim=0
-    )
+    merged_extras["rope_emb_L_1_1_D"] = torch.cat([ex_n["rope_emb_L_1_1_D"], ex_c["rope_emb_L_1_1_D"]], dim=0)
     epe_n = ex_n.get("extra_per_block_pos_emb")
     epe_c = ex_c.get("extra_per_block_pos_emb")
     if (epe_n is None) != (epe_c is None):
-        raise ValueError(
-            "IDM teacher-forcing requires both branches to have or both lack "
-            "extra_per_block_pos_emb."
-        )
-    merged_extras["extra_per_block_pos_emb"] = (
-        None if epe_n is None else torch.cat([epe_n, epe_c], dim=1)
-    )
+        raise ValueError("IDM teacher-forcing requires both branches to have or both lack extra_per_block_pos_emb.")
+    merged_extras["extra_per_block_pos_emb"] = None if epe_n is None else torch.cat([epe_n, epe_c], dim=1)
     merged.extras = merged_extras
 
     # The merged frame axis spans both branches so ``block_split``'s

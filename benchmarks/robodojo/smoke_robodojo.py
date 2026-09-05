@@ -12,6 +12,16 @@ from typing import Any
 
 import numpy as np
 
+from benchmarks.robodojo.contract import (
+    arx_x5_calibration,
+    discover_episodes,
+    validate_calibration,
+)
+from benchmarks.robodojo.frames import (
+    arms_to_eef20,
+    env_relative_world_to_robot_base,
+    robot_base_to_env_relative_world,
+)
 from benchmarks.robodojo.openwam_model_client import OpenWAMRoboDojoModelClient
 from benchmarks.robodojo.single_eval import (
     PhysXRestartRequired,
@@ -25,16 +35,6 @@ from benchmarks.robodojo.single_eval import (
     verify_runtime_import_provenance,
 )
 from benchmarks.utils import WSPolicyClient
-from benchmarks.robodojo.contract import (
-    arx_x5_calibration,
-    discover_episodes,
-    validate_calibration,
-)
-from benchmarks.robodojo.frames import (
-    arms_to_eef20,
-    env_relative_world_to_robot_base,
-    robot_base_to_env_relative_world,
-)
 
 _OPENWAM_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_CONFIG = Path(__file__).with_name("policy_config.yml")
@@ -88,10 +88,7 @@ def contract_smoke(
         from benchmarks.robodojo.contract import load_calibration
 
         calibration = load_calibration(calibration_path)
-    print(
-        "contract=ok embodiment="
-        f"{calibration['embodiment']} endpoint={calibration['endpoint']['link_name']}"
-    )
+    print(f"contract=ok embodiment={calibration['embodiment']} endpoint={calibration['endpoint']['link_name']}")
     if (dataset_root is None) != (task is None):
         raise ValueError("dataset_root and task must be provided together")
     if dataset_root is None:
@@ -100,13 +97,8 @@ def contract_smoke(
     episodes = discover_episodes(dataset_root, task)
     raw = _read_formal_eef20(episodes[0], calibration)
     if raw.ndim != 2 or raw.shape[1] != 20 or not np.all(np.isfinite(raw)):
-        raise ValueError(
-            f"formal RoboDojo conversion must produce finite (T, 20), got {raw.shape}"
-        )
-    print(
-        f"formal_data=ok task={task} episodes={len(episodes)} "
-        f"first_shape={tuple(raw.shape)}"
-    )
+        raise ValueError(f"formal RoboDojo conversion must produce finite (T, 20), got {raw.shape}")
+    print(f"formal_data=ok task={task} episodes={len(episodes)} first_shape={tuple(raw.shape)}")
 
 
 def ping_smoke(
@@ -178,9 +170,7 @@ def run_debug_protocol_rollout(
         test_env.episode_step = 0
     completed = 0
     for _ in range(int(steps)):
-        observation = make_synthetic_debug_observation(
-            test_env.get_obs(), calibration, env_idx=0
-        )
+        observation = make_synthetic_debug_observation(test_env.get_obs(), calibration, env_idx=0)
         model_client.call(func_name="update_obs", obs=observation)
         actions = model_client.call(func_name="get_action")
         for action in actions:
@@ -228,9 +218,7 @@ def debug_smoke(
         "eval_batch": False,
         "obs_encoded": bool(obs_encoded),
     }
-    test_env = construct_with_no_network_client(
-        ws_module, lambda: debug_module.TestEnv(deploy_cfg)
-    )
+    test_env = construct_with_no_network_client(ws_module, lambda: debug_module.TestEnv(deploy_cfg))
     model_client = OpenWAMRoboDojoModelClient(
         task_env=None,
         host=config["host"],
@@ -245,9 +233,7 @@ def debug_smoke(
     )
     test_env.model_client = model_client
     try:
-        completed = run_debug_protocol_rollout(
-            test_env, model_client, calibration, steps=steps
-        )
+        completed = run_debug_protocol_rollout(test_env, model_client, calibration, steps=steps)
         print(f"debug=ok steps={completed} env_type={os.environ.get('EVAL_ENV_TYPE')}")
     finally:
         try:
@@ -264,8 +250,7 @@ def isaac_smoke(config: dict[str, Any], *, steps: int = 1) -> int:
         return run_eval(smoke_config)
     except PhysXRestartRequired as restart:
         print(
-            f"[OpenWAM RoboDojo] Isaac smoke requests fresh-process restart "
-            f"after PhysX failure ({restart}); exiting 99"
+            f"[OpenWAM RoboDojo] Isaac smoke requests fresh-process restart after PhysX failure ({restart}); exiting 99"
         )
         return 99
 

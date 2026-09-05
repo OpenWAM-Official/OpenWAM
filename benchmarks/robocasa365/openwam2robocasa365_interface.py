@@ -306,9 +306,7 @@ class OpenWAMRoboCasa365Policy:
         base5 = action15[10:15]
         # Environment flat order is EEF xyz3 + rotvec3 + gripper1 + base4 +
         # control_mode1.  Dataset source order is rearranged into this contract.
-        return np.concatenate(
-            [delta_xyz, delta_rotvec, native_gripper, base5[:4], base5[4:5]]
-        ).astype(np.float32)
+        return np.concatenate([delta_xyz, delta_rotvec, native_gripper, base5[:4], base5[4:5]]).astype(np.float32)
 
     def act(self, obs: dict, prompt: str) -> dict:
         payload = build_obs_payload(

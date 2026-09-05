@@ -10,74 +10,6 @@ Output files live under ``<stats_root>/meta/stats_<embodiment>.json`` and carry
 a certificate for the exact source and retained population.
 """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 from __future__ import annotations
 
 import argparse
@@ -123,11 +55,6 @@ EEF20_DIM = 20
 RIGHT_ARM_DIMS_EEF20: Tuple[int, ...] = tuple(range(ARM10_DIM, EEF20_DIM))
 
 
-
-
-
-
-
 # Reuse reader-owned column tables so stats and runtime cannot drift.
 _SIDES: Dict[str, Dict[str, Sequence]] = {
     "bimanual": _BIMANUAL_SIDES,
@@ -151,10 +78,6 @@ def _eef20(table, sides, kind: str, grip_scales) -> np.ndarray:
     per-bucket gripper rescale — or the stats describe a different distribution
     than the reader actually emits.
     """
-
-
-
-
 
     left_spec, right_spec = sides[kind]
     n = table.num_rows
@@ -183,12 +106,6 @@ def classify_buckets(buckets: Sequence[Path]) -> Dict[str, Dict]:
     would create the same partial-normalizer failure as dropping a bucket later
     in the parquet scan, only before the worker pool has a chance to report it.
     """
-
-
-
-
-
-
 
     groups: Dict[str, Dict] = {}
     for b in buckets:
@@ -226,30 +143,9 @@ def _kept_episodes(bucket: Path) -> Optional[set]:
     (and logs) a bucket that raises.
     """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     eps = _manifest_episodes(bucket)
     if eps is None:
         return None
-
-
-
 
     return eps - load_excluded_episodes(bucket)
 
@@ -282,17 +178,6 @@ def _assert_reader_can_load(bucket: Path, shards: Sequence) -> None:
     rather than a parallel implementation of the same idea — a second
     implementation is how the two sides diverged in the first place.
     """
-
-
-
-
-
-
-
-
-
-
-
 
     files = sorted((bucket / "meta" / "episodes").rglob("*.parquet"))
     if not files:
@@ -334,31 +219,16 @@ def _split_episodes(bucket: Path, split: str) -> Optional[set]:
     the range here, so the two cannot disagree about what a split string means.
     """
 
-
-
-
-
-
-
-
-
-
     try:
         with open(bucket / "meta" / "info.json") as f:
             splits = json.load(f).get("splits")
     except (OSError, ValueError) as e:
         raise ValueError(f"{bucket}: cannot read meta/info.json for split resolution ({e})") from e
 
-
-
-
     eps = _manifest_episodes(bucket)
     if eps is None:
         raise ValueError(f"{bucket}: meta/episodes is unreadable, so the population is unknown")
     if not splits:
-
-
-
         return None if split == "train" else set()
     import pandas as pd
 
@@ -368,14 +238,10 @@ def _split_episodes(bucket: Path, split: str) -> Optional[set]:
     try:
         return set(apply_info_splits(df, split, splits, source_name=str(bucket))["episode_index"])
     except Exception as e:
-
-
-
         raise ValueError(f"{bucket}: unusable splits {splits!r} ({e})") from e
 
 
-def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]],
-              min_len: int) -> Optional[np.ndarray]:
+def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]], min_len: int) -> Optional[np.ndarray]:
     """Which rows belong in the statistics: kept episodes, minus trimmed head/tail.
 
     ``kept is None`` means "manifest unreadable, cannot filter"; an **empty set
@@ -387,14 +253,6 @@ def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]],
     plain path stays allocation-free and byte-identical to before.
     """
 
-
-
-
-
-
-
-
-
     if kept is None and not trim:
         return None
     ep = np.asarray(table.column("episode_index").to_pylist(), dtype=np.int64)
@@ -402,13 +260,13 @@ def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]],
     uniq = np.unique(ep)
 
     if kept is not None and not set(uniq.tolist()) <= kept:
-        mask &= (np.isin(ep, np.fromiter(kept, dtype=np.int64, count=len(kept)))
-                 if kept else np.zeros(ep.shape[0], dtype=bool))
+        mask &= (
+            np.isin(ep, np.fromiter(kept, dtype=np.int64, count=len(kept)))
+            if kept
+            else np.zeros(ep.shape[0], dtype=bool)
+        )
 
     if trim:
-
-
-
         order = np.argsort(ep, kind="stable")
         bounds = np.flatnonzero(np.diff(ep[order])) + 1
         for g in np.split(order, bounds):
@@ -416,7 +274,6 @@ def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]],
             if entry is None:
                 continue
             n = g.shape[0]
-
 
             b = resolve_trim_bounds(entry, n, min_len)
             if b is None:
@@ -444,21 +301,6 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray, bool, dict]:
     pool drains.
     """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     bucket_str, layout, embodiment = args[:3]
     dataset_id = args[3] if len(args) > 3 else None
     trim_csv = args[4] if len(args) > 4 else None
@@ -476,26 +318,14 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray, bool, dict]:
         resolve_gripper_scale(bucket, embodiment, spec[1]) if spec is not None else 1.0 for spec in sides["state"]
     )
 
-
-
-
-
-
-
-
-
-
     trim = None
     trim_snapshot = None
     if trim_csv:
         trim_snapshot = _load_trim_snapshot(trim_csv)
-        key = resolve_bucket_key(trim_snapshot.spec, dataset_id or bucket.name, bucket,
-                                 what="trim_csv", source=f"stats({dataset_id})")
+        key = resolve_bucket_key(
+            trim_snapshot.spec, dataset_id or bucket.name, bucket, what="trim_csv", source=f"stats({dataset_id})"
+        )
         trim = trim_snapshot.spec.get(key) if key is not None else None
-
-
-
-
 
     manifest = load_episodes_parquet(bucket)
     info = parse_info_json(bucket)
@@ -515,35 +345,17 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray, bool, dict]:
     }
     need_ep = bool(trim) or kept is not None
 
-
-
-
-
     population_empty = kept is not None and len(kept) == 0
 
     chunks: List[np.ndarray] = []
-
-
-
 
     shards = iter_data_shards(bucket)
     if not shards:
         raise ValueError(f"{bucket}: no data shards under data/chunk-*/file-*.parquet")
 
-
-
-
-
-
-
     _assert_reader_can_load(bucket, shards)
 
     for _, _, pth in shards:
-
-
-
-
-
         names = set(pq.ParquetFile(pth).schema_arrow.names)
         use_ep = need_ep and "episode_index" in names
         if need_ep and not use_ep:
@@ -558,18 +370,7 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray, bool, dict]:
         for kind in ("action", "state"):
             rows = _eef20(table, sides, kind, grip_scales)
             chunks.append(rows if mask is None else rows[mask])
-    out = (np.zeros((0, EEF20_DIM), dtype=np.float32) if not chunks
-           else np.concatenate(chunks, axis=0))
-
-
-
-
-
-
-
-
-
-
+    out = np.zeros((0, EEF20_DIM), dtype=np.float32) if not chunks else np.concatenate(chunks, axis=0)
 
     if len(out) == 0 and not population_empty:
         raise ValueError(
@@ -609,11 +410,6 @@ def compute_stats_for_embodiment(
     on an ambiguous basename.
     """
 
-
-
-
-
-
     dirs: List[Path] = group["dirs"]
     layout = group["arm_layout"]
     acc = Accumulator(dim=EEF20_DIM)
@@ -631,13 +427,6 @@ def compute_stats_for_embodiment(
         reader rejects outright.
         """
 
-
-
-
-
-
-
-
         if root is None:
             return d.name
         try:
@@ -652,24 +441,12 @@ def compute_stats_for_embodiment(
     trim_snapshot = _load_trim_snapshot(trim_csv) if trim_csv else None
     tasks = [(str(d), layout, embodiment, _rel_id(d), trim_csv, min_len, split) for d in dirs]
 
-
-
     scanned_buckets: List[str] = []
     empty_buckets: List[str] = []
     bucket_provenance: Dict[str, dict] = {}
     scan_failures: List[Tuple[str, str]] = []
     with ProcessPoolExecutor(max_workers=min(workers, max(1, len(tasks)))) as pool:
         futures = {pool.submit(_scan_bucket, t): t[0] for t in tasks}
-
-
-
-
-
-
-
-
-
-
 
         for i, fut in enumerate(futures, 1):
             name = futures[fut]
@@ -681,11 +458,6 @@ def compute_stats_for_embodiment(
                 logger.error("  [%s] failed %s (%s)", embodiment, name, e)
                 continue
             if not len(rows):
-
-
-
-
-
                 if not population_empty:
                     rel_id = _rel_id(Path(name))
                     message = "produced 0 rows without an empty-by-construction population"
@@ -723,11 +495,6 @@ def compute_stats_for_embodiment(
         "trim_provenance": trim_snapshot.provenance if trim_snapshot is not None else None,
         "bucket_provenance": {key: bucket_provenance[key] for key in sorted(bucket_provenance)},
         "buckets": sorted(scanned_buckets),
-
-
-
-
-
         "empty_buckets": sorted(empty_buckets),
     }
     if trim_snapshot is not None:
@@ -735,13 +502,8 @@ def compute_stats_for_embodiment(
 
     stats = acc.finalize()
     if rot6d_identity:
-
         pin_rot6d_identity(stats, ROT6D_DIMS_EEF20)
         if layout == "single_arm":
-
-
-
-
             pin_rot6d_identity(stats, RIGHT_ARM_DIMS_EEF20)
     return {
         "eef": stats,
@@ -750,14 +512,7 @@ def compute_stats_for_embodiment(
         "embodiment": embodiment,
         "num_buckets": n_ok,
         "num_rows": int(n_rows),
-
-
-
-
         "population": population,
-
-
-
         "scanned_buckets": population["buckets"],
         "split": population["split"],
         "rot6d_identity": bool(rot6d_identity),
@@ -829,11 +584,6 @@ def main():
             raise SystemExit(f"embodiment {args.embodiment!r} not found; have {sorted(groups)}")
         groups = {args.embodiment: groups[args.embodiment]}
 
-
-
-
-
-
     stats_root = Path(args.stats_root) if args.stats_root else root
     out_dir = stats_root / "meta"
     if stats_root != root:
@@ -852,8 +602,6 @@ def main():
             split=args.split,
         )
 
-
-
         result["trim_csv"] = args.trim_csv
         result["trim_min_keep"] = args.min_keep if args.trim_csv else None
         results[emb] = result
@@ -862,7 +610,6 @@ def main():
     for emb in sorted(results):
         result = results[emb]
         out = out_dir / f"stats_{emb}.json"
-
 
         tmp = out.with_suffix(".json.tmp")
         with open(tmp, "w") as f:

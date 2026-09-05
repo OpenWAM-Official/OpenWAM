@@ -190,6 +190,7 @@ def _install_robot_planner_fallbacks(robotwin_path: str) -> None:
         return
 
     if not hasattr(mplib_cls, "plan_batch"):
+
         def plan_batch(self, now_qpos, target_pose_list, constraint_pose=None, arms_tag=None):
             statuses = []
             positions = []

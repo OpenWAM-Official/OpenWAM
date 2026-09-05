@@ -122,15 +122,9 @@ def write_episode(
         mutate(arrays)
 
     camera_bytes = {
-        "vision/cam_head/colors": [
-            encode_jpeg((240 - i, 10 + i, 20)) for i in range(T)
-        ],
-        "vision/cam_left_wrist/colors": [
-            encode_jpeg((10, 230 - i, 20 + i)) for i in range(T)
-        ],
-        "vision/cam_right_wrist/colors": [
-            encode_jpeg((10 + i, 20, 220 - i)) for i in range(T)
-        ],
+        "vision/cam_head/colors": [encode_jpeg((240 - i, 10 + i, 20)) for i in range(T)],
+        "vision/cam_left_wrist/colors": [encode_jpeg((10, 230 - i, 20 + i)) for i in range(T)],
+        "vision/cam_right_wrist/colors": [encode_jpeg((10 + i, 20, 220 - i)) for i in range(T)],
     }
     with h5py.File(path, "w") as handle:
         for key, value in arrays.items():
@@ -178,9 +172,7 @@ def expected_raw_eef20(T: int, calibration: dict | None = None) -> np.ndarray:
         right_cal["base_pos_relative_to_env_origin"],
         right_cal["base_quat_wxyz"],
     )
-    return arms_to_eef20(left_base, left_grip, right_base, right_grip).astype(
-        np.float32
-    )
+    return arms_to_eef20(left_base, left_grip, right_base, right_grip).astype(np.float32)
 
 
 def flat_stats() -> dict:
@@ -288,9 +280,7 @@ def test_real_reader_preserves_native_pose_and_clips_only_gripper_sensor_noise(
         tmp_path,
         T=4,
         embodiment=embodiment,
-        mutate=lambda arrays: arrays["state/left_ee_joint_states"].__setitem__(
-            (0, 0), noise
-        ),
+        mutate=lambda arrays: arrays["state/left_ee_joint_states"].__setitem__((0, 0), noise),
     )
     dataset = build_single(
         tmp_path,
@@ -312,9 +302,7 @@ def test_real_reader_preserves_native_pose_and_clips_only_gripper_sensor_noise(
 
     assert dataset.calibration is None
     assert dataset.variant == "real"
-    assert dataset.source_frame == (
-        "per_arm_robot_base_position_and_orientation_wxyz"
-    )
+    assert dataset.source_frame == ("per_arm_robot_base_position_and_orientation_wxyz")
     np.testing.assert_array_equal(raw, expected)
     sample = dataset[0]
     np.testing.assert_array_equal(sample["proprio"].numpy(), expected[0:1])
@@ -324,9 +312,7 @@ def test_real_reader_preserves_native_pose_and_clips_only_gripper_sensor_noise(
 
 
 @pytest.mark.parametrize("jpeg_storage", ["fixed", "vlen", "padded"])
-def test_instruction_and_three_camera_l_shape_support(
-    tmp_path: Path, jpeg_storage: str
-):
+def test_instruction_and_three_camera_l_shape_support(tmp_path: Path, jpeg_storage: str):
     write_episode(
         tmp_path,
         T=3,
@@ -410,14 +396,8 @@ def test_from_config_threads_color_jitter_to_all_tasks(tmp_path: Path):
     }
 
     dataset = MultiTaskRoboDojoDataset.from_config(config, split="train")
-    assert all(
-        isinstance(task_dataset._color_jitter, VideoColorJitter)
-        for task_dataset in dataset._sub_datasets
-    )
-    assert all(
-        task_dataset._color_jitter.saturation == 0.3
-        for task_dataset in dataset._sub_datasets
-    )
+    assert all(isinstance(task_dataset._color_jitter, VideoColorJitter) for task_dataset in dataset._sub_datasets)
+    assert all(task_dataset._color_jitter.saturation == 0.3 for task_dataset in dataset._sub_datasets)
 
 
 def test_short_and_tail_windows_repeat_last_values_and_mask_padding(tmp_path: Path):
@@ -487,12 +467,8 @@ def test_normalize_raw20_then_scatter_to_80_and_inverse_denormalize(
     assert dataset.action_dim == 80
     assert dataset.normalization_stats_path == str(stats_path)
     assert dataset.normalization_stats is not None
-    np.testing.assert_allclose(
-        sample["proprio"].numpy()[0, mapped], normalized[0], atol=1e-6
-    )
-    np.testing.assert_allclose(
-        sample["action"].numpy()[:, mapped], normalized[1:], atol=1e-6
-    )
+    np.testing.assert_allclose(sample["proprio"].numpy()[0, mapped], normalized[0], atol=1e-6)
+    np.testing.assert_allclose(sample["action"].numpy()[:, mapped], normalized[1:], atol=1e-6)
     np.testing.assert_array_equal(sample["action"].numpy()[:, unmapped], 0.0)
     assert sample["action_mask"][:, mapped].all()
     assert not sample["action_mask"][:, unmapped].any()
@@ -547,19 +523,13 @@ def test_normalization_auto_generates_or_validates_explicit_stats(
         "unify_action": False,
     }
     automatic = RoboDojoDataset(**common)
-    expected_automatic = (
-        tmp_path / "meta" / "robodojo_normalization_stats.npy"
-    )
+    expected_automatic = tmp_path / "meta" / "robodojo_normalization_stats.npy"
     assert automatic.normalization_stats_path == str(expected_automatic)
     assert expected_automatic.is_file()
     # A second construction discovers the complete file instead of recomputing.
-    assert RoboDojoDataset(**common).normalization_stats_path == str(
-        expected_automatic
-    )
+    assert RoboDojoDataset(**common).normalization_stats_path == str(expected_automatic)
     with pytest.raises(FileNotFoundError, match="normalization"):
-        RoboDojoDataset(
-            **common, normalization_stats_path=tmp_path / "missing.npy"
-        )
+        RoboDojoDataset(**common, normalization_stats_path=tmp_path / "missing.npy")
 
     malformed = write_stats(tmp_path / "malformed.npy")
     payload = np.load(malformed, allow_pickle=True).item()
@@ -644,9 +614,7 @@ def test_calibration_path_is_rejected(tmp_path: Path):
             "state/right_ee_poses",
         ),
         (
-            lambda arrays: arrays.__setitem__(
-                "state/left_ee_poses", arrays["state/left_ee_poses"][:, :6]
-            ),
+            lambda arrays: arrays.__setitem__("state/left_ee_poses", arrays["state/left_ee_poses"][:, :6]),
             r"left_ee_poses.*\(T, 7\)",
         ),
         (
@@ -661,22 +629,16 @@ def test_calibration_path_is_rejected(tmp_path: Path):
             "finite",
         ),
         (
-            lambda arrays: arrays["state/right_ee_poses"].__setitem__(
-                (0, slice(3, 7)), [2.0, 0.0, 0.0, 0.0]
-            ),
+            lambda arrays: arrays["state/right_ee_poses"].__setitem__((0, slice(3, 7)), [2.0, 0.0, 0.0, 0.0]),
             "unit wxyz",
         ),
         (
-            lambda arrays: arrays["state/left_ee_joint_states"].__setitem__(
-                (0, 0), 1.1
-            ),
+            lambda arrays: arrays["state/left_ee_joint_states"].__setitem__((0, 0), 1.1),
             r"\[0, 1\]",
         ),
     ],
 )
-def test_episode_schema_is_validated_before_indexing(
-    tmp_path: Path, mutation, message: str
-):
+def test_episode_schema_is_validated_before_indexing(tmp_path: Path, mutation, message: str):
     write_episode(tmp_path, T=3, mutate=mutation)
     with pytest.raises((KeyError, ValueError), match=message):
         build_single(tmp_path, num_frames=3)
@@ -687,9 +649,7 @@ def test_official_closed_gripper_float_noise_is_accepted_and_clipped(tmp_path: P
     path = write_episode(
         tmp_path,
         T=3,
-        mutate=lambda arrays: arrays["state/left_ee_joint_states"].__setitem__(
-            (0, 0), noise
-        ),
+        mutate=lambda arrays: arrays["state/left_ee_joint_states"].__setitem__((0, 0), noise),
     )
     dataset = build_single(tmp_path, num_frames=3)
     raw = read_calibrated_eef20(path, valid_calibration())
@@ -713,9 +673,7 @@ def test_episode_schema_rejects_single_frame_empty_instruction_and_camera_mismat
     with h5py.File(path, "a") as handle:
         del handle["vision/cam_head/colors"]
         dtype = h5py.vlen_dtype(np.dtype("uint8"))
-        dataset = handle.create_dataset(
-            "vision/cam_head/colors", shape=(2,), dtype=dtype
-        )
+        dataset = handle.create_dataset("vision/cam_head/colors", shape=(2,), dtype=dtype)
         jpeg = np.frombuffer(encode_jpeg((1, 2, 3)), dtype=np.uint8)
         dataset[0] = jpeg
         dataset[1] = jpeg
@@ -840,14 +798,8 @@ def test_multitask_discovers_all_tasks_sorted_and_shares_files(tmp_path: Path):
         "task_b",
         "task_holdout",
     ]
-    assert all(
-        dataset.normalization_stats_path == str(stats)
-        for dataset in train._sub_datasets
-    )
-    assert all(
-        dataset.calibration_fingerprint == train.calibration_fingerprint
-        for dataset in train._sub_datasets
-    )
+    assert all(dataset.normalization_stats_path == str(stats) for dataset in train._sub_datasets)
+    assert all(dataset.calibration_fingerprint == train.calibration_fingerprint for dataset in train._sub_datasets)
     assert train.action_dim == 80
     np.testing.assert_allclose(
         train.denormalize_action(train[0]["action"].numpy()),
@@ -873,10 +825,7 @@ def test_multitask_auto_stats_use_meta_and_cover_the_discovered_corpus(
     )
     expected = tmp_path / "meta" / "robodojo_normalization_stats.npy"
     assert dataset.normalization_stats_path == str(expected)
-    assert all(
-        sub_dataset.normalization_stats_path == str(expected)
-        for sub_dataset in dataset._sub_datasets
-    )
+    assert all(sub_dataset.normalization_stats_path == str(expected) for sub_dataset in dataset._sub_datasets)
     payload = np.load(expected, allow_pickle=True).item()
     assert payload["metadata"]["tasks"] == ["task_a", "task_b"]
 

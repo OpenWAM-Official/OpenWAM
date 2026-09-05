@@ -113,9 +113,7 @@ class LiberoDataset(LeRobotV3Reader):
     ):
         mode = str(action_mode).strip().lower()
         if mode != ACTION_MODE:
-            raise ValueError(
-                f"LIBERO supports only action_mode={ACTION_MODE!r}, got {action_mode!r}."
-            )
+            raise ValueError(f"LIBERO supports only action_mode={ACTION_MODE!r}, got {action_mode!r}.")
         if bool(unify_action) and unify_action_map is None:
             raise ValueError(
                 "LIBERO unify_action=true requires an explicit unify_action_map; "
@@ -151,15 +149,11 @@ class LiberoDataset(LeRobotV3Reader):
         for column in ("observation.state", "action"):
             shape = tuple(features.get(column, {}).get("shape", ()))
             if shape != (EEF10_DIM,):
-                raise ValueError(
-                    f"LIBERO {column} feature must have shape [{EEF10_DIM}], got {shape}"
-                )
+                raise ValueError(f"LIBERO {column} feature must have shape [{EEF10_DIM}], got {shape}")
 
         conversion_path = self._dataset_dir / "meta" / "conversion.json"
         if not conversion_path.is_file():
-            raise FileNotFoundError(
-                f"LIBERO requires {conversion_path} (native-action conversion metadata)"
-            )
+            raise FileNotFoundError(f"LIBERO requires {conversion_path} (native-action conversion metadata)")
         with conversion_path.open(encoding="utf-8") as handle:
             conversion = json.load(handle)
         if conversion.get("output_representation") != OUTPUT_REPRESENTATION:
@@ -167,7 +161,6 @@ class LiberoDataset(LeRobotV3Reader):
                 f"{conversion_path} declares output_representation={conversion.get('output_representation')!r}, "
                 f"expected {OUTPUT_REPRESENTATION!r}; this is not a native-delta LIBERO dataset"
             )
-
 
     def _build_stats_rank0(self, path: Path) -> None:
         """Auto-build the pooled stats file: rank 0 scans, other ranks wait."""
@@ -202,7 +195,11 @@ class LiberoDataset(LeRobotV3Reader):
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
             self._state_normalization_stats = None
             return None
-        stats_path = Path(self._source_stats_path) if self._source_stats_path else self._dataset_dir / "meta" / NORMALIZATION_STATS_FILENAME
+        stats_path = (
+            Path(self._source_stats_path)
+            if self._source_stats_path
+            else self._dataset_dir / "meta" / NORMALIZATION_STATS_FILENAME
+        )
         if not stats_path.is_file():
             self._build_stats_rank0(stats_path)
 
@@ -210,9 +207,7 @@ class LiberoDataset(LeRobotV3Reader):
         if not isinstance(raw, dict):
             raise ValueError(f"{stats_path} must contain a dictionary payload")
         if ACTION_STATS_KEY not in raw or STATE_STATS_KEY not in raw:
-            raise KeyError(
-                f"{stats_path} must contain {ACTION_STATS_KEY!r} and {STATE_STATS_KEY!r} blocks"
-            )
+            raise KeyError(f"{stats_path} must contain {ACTION_STATS_KEY!r} and {STATE_STATS_KEY!r} blocks")
         action_raw = raw[ACTION_STATS_KEY]
         state_raw = raw[STATE_STATS_KEY]
 

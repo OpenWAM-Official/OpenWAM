@@ -222,8 +222,7 @@ class ObsPreprocessor:
             obs["state"] = state
         elif self.requires_proprio:
             raise ObsValidationError(
-                "this checkpoint requires obs['state']; "
-                "send raw proprio state for proprio-conditioned checkpoints."
+                "this checkpoint requires obs['state']; send raw proprio state for proprio-conditioned checkpoints."
             )
 
         return obs

@@ -243,9 +243,7 @@ def repr_contract_from_cfg(cfg: DictConfig) -> dict:
     dims = OmegaConf.select(cfg, "dataloader.binary_action_dims", default=None)
     gripper_convention = OmegaConf.select(cfg, "dataloader.gripper_convention", default=None)
     contract = {
-        "representation": str(
-            OmegaConf.select(cfg, "dataloader.action_mode", default="joint")
-        ),
+        "representation": str(OmegaConf.select(cfg, "dataloader.action_mode", default="joint")),
     }
     if dims:
         contract["binary_action_dims"] = [int(d) for d in dims]
@@ -344,7 +342,9 @@ def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
     binary_dims = OmegaConf.select(cfg, "dataloader.binary_action_dims", default=None)
     base_proprio = OmegaConf.select(cfg, "dataloader.base_proprio", default="velocity")
     if base_proprio not in ("velocity", "global_pose"):
-        raise ValueError(f"[normalizer] dataloader.base_proprio must be 'velocity' or 'global_pose', got {base_proprio!r}")
+        raise ValueError(
+            f"[normalizer] dataloader.base_proprio must be 'velocity' or 'global_pose', got {base_proprio!r}"
+        )
     if binary_dims or base_proprio == "global_pose":
         proprio_inner = normalizer
         if base_proprio == "global_pose":
