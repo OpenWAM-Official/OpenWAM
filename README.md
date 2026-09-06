@@ -339,7 +339,7 @@ Wan2.2-TI2V-5B video backbone, and the Mutual attention mask.
      --server ws://127.0.0.1:8848 --test --state-dim 10
 
    python scripts/inference_test/inference_continuous_test.py \
-     --server ws://127.0.0.1:8848 --test --state-dim 10
+     --server ws://127.0.0.1:8848 --test --state-dim 10 -n 3
    ~~~
 
    The single-request helper checks ping, one prediction, and reset. The
