@@ -20,7 +20,7 @@ type: vlabench
 #
 # Placeholder path — machine-specific mounts must not land in shared configs;
 # override with dataloader.dataset_dir=/path/to/vlabench_data
-dataset_dir: /mnt/data/wangyuran/OpenWAM/assets/benchmark_data/vlabench
+dataset_dir: /path/to/vlabench_data
 
 # ── Action space ─────────────────────────────────────────────────────────────
 # VLABench is single-arm EEF-only, so its raw EEF10 maps 1:1 onto the shared

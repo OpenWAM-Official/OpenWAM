@@ -1,6 +1,6 @@
 name: qwen3_vl_2b
 # Qwen3-VL-2B understanding backbone (cfg.model.vlm_backbone.*); consumed only by
 # tri_system. 2B/4B etc. differ only by checkpoint_path.
-checkpoint_path: /mnt/data/wangyuran/OpenWAM/assets/vlm_backbone_ckpt/Qwen3-VL-2B-Instruct  # [Required]
+checkpoint_path: /path/to/Qwen3-VL-2B-Instruct  # [Required]
 load_pretrained: true   # false = random-init (ablations / CPU smoke tests)
 max_length: 512         # processor max text length; longer inputs truncated

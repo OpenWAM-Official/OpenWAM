@@ -2,7 +2,7 @@ type: robodojo
 
 # Formal layout only:
 #   <dataset_dir>/<task>/<embodiment>/data/episode_*.hdf5
-dataset_dir: /mnt/data/wangyuran/OpenWAM/assets/benchmark_data/robodojo-real
+dataset_dir: /path/to/robodojo_data
 embodiment: arx_x5               # real: arx_x5, piper, piper_x; sim: arx_x5
 variant: sim                     # sim: env/world -> arm base; real: native pose
 

@@ -16,7 +16,7 @@ training:
   # --- Schedule ---
   num_epochs: 5                   # Total training epochs (null = step-only, driven solely by max_steps)
   max_steps: null                 # Early stop after N steps (null = no limit; required when num_epochs is null)
-  batch_size: 24                   # Per-GPU batch size
+  batch_size: 16                   # Per-GPU batch size
   gradient_accumulation_steps: 1  # Accumulate N micro-batches before optimizer step
 
   # --- LR scheduler ---

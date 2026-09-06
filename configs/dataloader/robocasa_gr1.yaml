@@ -4,7 +4,7 @@ type: robocasa_gr1
 # joint44 files do not; use the converted EEF33 LeRobot v3 release). Prompts
 # resolve task_index through the converted meta/tasks.parquet; missing/blank
 # prompt metadata is an error.
-dataset_dir: /mnt/data/wangyuran/OpenWAM/assets/benchmark_data/robocasa-gr1
+dataset_dir: /path/to/robocasa_gr1_data
 
 # ── Action space ─────────────────────────────────────────────────────────────
 # Only EEF is supported. Raw EEF33:

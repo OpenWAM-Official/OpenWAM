@@ -5,4 +5,4 @@
 # Structural fields (z_dim/spatial_compression/...) are read from the diffusers config.json, not yaml.
 
 name: flux2_vae
-model_path: /mnt/data/wangyuran/OpenWAM/assets/visual_encoder_ckpt/FLUX.2-dev-VAE/vae  # [Required] diffusers snapshot dir; deploy host must read it too
+model_path: /path/to/FLUX.2-dev_VAE  # [Required] diffusers snapshot dir; deploy host must read it too

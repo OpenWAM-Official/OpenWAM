@@ -1,4 +1,4 @@
 # Native Wan VAE — default external encoder; reproduces the in-DiT VAE path.
 # The encoder group is consumed only when video_backbone.from_scratch=true.
 name: wan22_vae
-model_path: /mnt/data/wangyuran/OpenWAM/assets/visual_encoder_ckpt/Wan2.2-VAE
+model_path: /path/to/Wan2.2-TI2V-5B
