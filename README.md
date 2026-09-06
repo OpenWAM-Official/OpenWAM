@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/repo_images/teaser.jpg" alt="OpenWAM teaser" width="75%">
+  <img src="assets/repo_images/teaser.jpg" alt="OpenWAM teaser">
 </p>
 
 <!--
