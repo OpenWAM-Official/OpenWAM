@@ -32,6 +32,7 @@ from openwam.model.architectures.utils.mask_modes import (
     build_cross_modal_attention_mask,
     set_video_attention_mask_mode,
     validate_attention_mask_mode,
+    widen_mask_for_prefix_kv,
 )
 
 if TYPE_CHECKING:
@@ -353,19 +354,16 @@ class TriSystemMoTDriver:
         compiled boundary, then this method keeps the hot path on per-layer
         tensor/tuple pre/post helpers.
         """
-        # Same three-way K/V concat as run_joint_loop, so the same restriction
-        # applies. Today a prefix-KV backbone fails earlier with AttributeError
-        # (cosmos3 defines no ``pre_attn_at_layer_for_compile``), but check here
-        # too so the reason is stated rather than inferred.
-        if int(getattr(vstate, "prefix_kv_len", 0) or 0) > 0:
-            raise NotImplementedError(
-                "TriSystemMoTDriver does not support video backbones that prepend prefix K/V "
-                "tokens (e.g. cosmos3_edge's cached und text stream): the three-way K/V concat "
-                "would misalign against the query-length mask. Use dual_system, or extend this "
-                "driver's mask the way DualSystemMoTDriver.run_joint_loop does."
-            )
+        # Prefix K/V columns (e.g. Cosmos3's cached und text stream) are
+        # represented by a rectangular key axis.  Widen the trimodal mask once
+        # before entering the compiled loop; the per-layer Q/K/V concat then
+        # remains unchanged.
+        if attn_mask is not None:
+            attn_mask = widen_mask_for_prefix_kv(attn_mask, vstate)
+        pre_v = getattr(self.vb, "pre_attn_at_layer_for_compile", self.vb.pre_attn_at_layer)
+        post_v = getattr(self.vb, "post_attn_at_layer_for_compile", self.vb.post_attn_at_layer)
         for layer_id in range(self.num_layers):
-            q_v, k_v, v_v, vpost = self.vb.pre_attn_at_layer_for_compile(layer_id, vstate)
+            q_v, k_v, v_v, vpost = pre_v(layer_id, vstate)
             q_a, k_a, v_a, apost = self.ab.pre_attn_at_layer_for_compile(layer_id, astate)
             q_u, k_u, v_u, upost = self.ub.pre_attn_at_layer_for_compile(layer_id, ustate)
 
@@ -381,7 +379,7 @@ class TriSystemMoTDriver:
             mixed = self._mixed_attention(q_cat, k_cat, v_cat, attn_mask)
 
             attn_v, attn_a, attn_u = mixed.split([s_video, s_action, s_understanding], dim=1)
-            vstate = self.vb.post_attn_at_layer_for_compile(layer_id, vstate, attn_v.contiguous(), vpost)
+            vstate = post_v(layer_id, vstate, attn_v.contiguous(), vpost)
             astate = self.ab.post_attn_at_layer_for_compile(layer_id, astate, attn_a.contiguous(), apost)
             ustate = self.ub.post_attn_at_layer_for_compile(layer_id, ustate, attn_u.contiguous(), upost)
         return vstate, astate, ustate
@@ -402,13 +400,6 @@ class TriSystemMoTDriver:
         # (CosmosPredict25) ``shape[1]`` is just ``T`` — wrong. Going through f and
         # the shared ``compute_video_tokens_per_frame`` helper is the only
         # formulation that works for both layouts.
-        if int(getattr(vstate, "prefix_kv_len", 0) or 0) > 0:
-            raise NotImplementedError(
-                "TriSystemMoTDriver does not support video backbones that prepend prefix K/V "
-                "tokens (e.g. cosmos3_edge's cached und text stream): the three-way K/V concat "
-                "would misalign against the query-length mask. Use dual_system, or extend this "
-                "driver's mask the way DualSystemMoTDriver.run_joint_loop does."
-            )
         s_video = int(vstate.grid_frames) * self._video_tokens_per_frame(vstate)
         s_action = self._get_action_tokens(astate).shape[1]
         s_understanding = ustate.und_tokens.shape[1]
@@ -420,6 +411,10 @@ class TriSystemMoTDriver:
             device=vstate.hidden_states.device,
             und_mask=getattr(ustate, "und_mask", None),
         )
+        # Cosmos3 prepends cached understanding K/V to the video keys.  The
+        # shared mask describes query×query streams, so prepend those key-only
+        # columns before every layer consumes it.
+        attn_mask = widen_mask_for_prefix_kv(attn_mask, vstate)
 
         last_layer = self.num_layers - 1
         for layer_id in range(self.num_layers):

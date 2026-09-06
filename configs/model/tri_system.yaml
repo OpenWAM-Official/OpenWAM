@@ -2,7 +2,7 @@
 # trimodal mixed attention. Only joint_self_attn is supported.
 
 defaults:
-  - video_backbone: wan22_ti2v_5b        # wan22_ti2v_5b | wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25 (cosmos3_edge is rejected)
+  - video_backbone: wan22_ti2v_5b        # wan22_ti2v_5b | wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25 | cosmos3_edge
   - action_backbone: separate_action_dit # dual/tri only support ActionDiT
   - vlm_backbone: qwen3_vl_2b            # understanding backbone (tri only)
   - _self_

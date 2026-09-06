@@ -4,8 +4,8 @@
 # Geometry and the action-side context width (text_dim=2048) auto-derive — no
 # action_backbone overrides needed for joint_cross_attn. Works with
 # dual_system (joint_cross_attn | joint_self_attn | idm) and single_system
-# (vanilla | moe); tri_system is rejected. The und pathway is frozen at build
-# (freeze_und below); the gen pathway is trainable by default.
+# (vanilla | moe); tri_system is also supported. The und pathway is frozen at
+# build (freeze_und below); the gen pathway is trainable by default.
 
 name: cosmos3_edge
 model_path: /path/to/assets/Cosmos3-Edge  # [Required] diffusers-style bundle root (transformer/ + vae/ + text_tokenizer/)

@@ -16,10 +16,10 @@ under ``no_grad`` and caches the per-layer gen-facing K/V; the und final hidden
 encoder; timestep conditioning is additive on noisy-frame tokens only.
 
 Supported architectures: ``dual_system`` / {``joint_cross_attn``,
-``joint_self_attn``, ``idm``} and ``single_system`` / {``vanilla``, ``moe``},
-all verified on real weights for both training and deploy. ``joint_self_attn``
-and ``idm`` ride MoT via the und-prefix-KV declaration + GQA KV-expand;
-``tri_system`` is rejected (its driver does not widen the joint mask).
+``joint_self_attn``, ``idm``}, ``single_system`` / {``vanilla``, ``moe``},
+and ``tri_system`` / {``joint_self_attn``}. ``joint_self_attn``, ``idm``, and
+``tri_system`` ride MoT via the und-prefix-KV declaration + GQA KV-expand;
+the tri-system driver widens the joint mask for the cached und prefix.
 """
 
 from __future__ import annotations
