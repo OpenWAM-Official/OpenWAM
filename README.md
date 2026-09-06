@@ -268,7 +268,10 @@ config is rewritten. Deploy one directly with
 
 ## Quick Start
 
-This path uses the DualSystem JointSelfAttention architecture, the
+Quick Start provides a minimal end-to-end example: prepare the assets, train
+or fine-tune a policy, deploy its checkpoint, and run a first inference check.
+
+The example uses the DualSystem JointSelfAttention architecture, the
 Wan2.2-TI2V-5B video backbone, and the Mutual attention mask.
 
 | Component | Selection | Configuration |
