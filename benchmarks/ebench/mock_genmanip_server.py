@@ -24,8 +24,7 @@ achieved-state guard band, ``base_motion`` finiteness; relative-base steps
 are tallied against the real ±0.015 m / ±1° clamps and absolute-base steps
 against the ±0.2 m / 20° jump guard.
 
-KNOWN DIVERGENCES from the real server (inherent to an open-loop replay —
-see tests/benchmarks and the gate-3 review for the full list):
+KNOWN DIVERGENCES from the real server (inherent to an open-loop replay):
 
 * no IK / physics / achieved-state simulation: unreachable poses, cuRobo
   IK-hold, invalid-state early termination, and success scoring do not exist;
@@ -122,6 +121,7 @@ class EpisodeReplay:
     def __init__(self, bucket: Path, episode_index: int, num_steps: int):
         import pandas as pd
 
+        self.episode_index = int(episode_index)
         with (bucket / "meta" / "info.json").open() as f:
             info = json.load(f)
         chunk = episode_index // int(info.get("chunks_size", 1000))
@@ -194,6 +194,11 @@ class MockState:
         self.pending_reset = False
         self.actions_logged = 0
         self.violations = 0
+        # Set on the first contract violation. From then on EVERY endpoint
+        # answers 500, so the bridge's reconnect/reset recovery cannot mask the
+        # failure by restarting the replay: its retries burn out and it exits
+        # non-zero (the "failure oracle" contract of this mock).
+        self.poisoned = False
         self.base_overlimit_steps = 0
         self.base_jump_guard_steps = 0
         self.log_file = log_path.open("w")
@@ -256,8 +261,11 @@ class MockState:
     def current_replay(self) -> "EpisodeReplay":
         return self.replays[self.episode]
 
+    def _episode_index(self) -> int:
+        return int(self.current_replay().episode_index)
+
     def _episode_id(self) -> str:
-        return f"ebench-mock/run/ep{self.episode}/{self.episode:03d}"
+        return f"ebench-mock/run/ep{self.episode}/{self._episode_index():03d}"
 
     def _running_metric(self) -> dict:
         # Real pool sends a non-None running metric dict on EVERY step.
@@ -279,7 +287,7 @@ class MockState:
             episode_result = {
                 "episode_id": self._episode_id(),
                 "task_name": "mock_replay",
-                "seed": self.episode,
+                "seed": self._episode_index(),
                 "score": 0.0,
                 "sr": 0.0,
                 "worker_id": self.worker_ids[0] if self.worker_ids else "0",
@@ -326,6 +334,17 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         st = self.state
         try:
+            if st.poisoned and path in ("/reset", "/reset_result", "/step"):
+                # Failure oracle: once a contract violation happened, the
+                # bridge must not be able to recover by resetting the replay.
+                self._send(
+                    500,
+                    json.dumps(
+                        {"detail": f"mock poisoned by an earlier action-contract violation ({st.violations} so far)"}
+                    ).encode(),
+                    "application/json",
+                )
+                return
             if path in ("/kill", "/create_workers"):
                 self._send(200, json.dumps({"ok": True}).encode(), "application/json")
                 return
@@ -355,7 +374,13 @@ class Handler(BaseHTTPRequestHandler):
                             st.validate_action(action)
                         except ContractViolation as e:
                             st.violations += 1
-                            logger.error("ACTION CONTRACT VIOLATION (worker %s): %s", wid, e)
+                            st.poisoned = True
+                            logger.error(
+                                "ACTION CONTRACT VIOLATION (worker %s): %s — mock is now poisoned; every further "
+                                "request answers 500 so the bridge run fails instead of restarting the replay",
+                                wid,
+                                e,
+                            )
                             # Failure-type oracle: the real chain 500s on parse
                             # errors — a broken bridge must FAIL the mock run.
                             self._send(500, json.dumps({"detail": str(e)}).encode(), "application/json")
@@ -363,7 +388,7 @@ class Handler(BaseHTTPRequestHandler):
                         st.log_file.write(
                             json.dumps(
                                 {
-                                    "episode": st.episode,
+                                    "episode": st._episode_index(),
                                     "t": st.t,
                                     "worker": str(wid),
                                     "base_motion": [float(v) for v in action["base_motion"]],
@@ -395,7 +420,7 @@ def main():
     p.add_argument("--steps-per-episode", type=int, default=8)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8087)
-    p.add_argument("--log-file", default="/tmp/ebench_mock_actions.jsonl")
+    p.add_argument("--log-file", default="./ebench_mock_actions.jsonl", help="JSONL of every accepted action")
     args = p.parse_args()
 
     bucket = Path(args.dataset_dir) / args.bucket

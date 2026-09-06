@@ -224,7 +224,7 @@ def build_and_save_ebench_stats(
     dataset_dir: str,
     *,
     output: Optional[str] = None,
-    action_mode: str = "ebench",
+    action_mode: str = "eef",
     rot6d_identity: bool = True,
 ) -> Tuple[Path, dict]:
     """Scan, cross-check against the summary merge, and write the reader cache.
@@ -272,8 +272,8 @@ def main():
         "--output",
         default=None,
         help=".npy path (default <dataset_dir>/meta/ebench_normalization_stats.npy — the ebench.yaml convention). "
-        "Use a run-specific path for --groups/--buckets subsets: the cache fingerprint records the "
-        "bucket set, and a training run over a different set hard-fails on it.",
+        "The cache fingerprint records the bucket set found under dataset_dir; a training run over a "
+        "different set of buckets hard-fails on it, so rebuild after adding or removing buckets.",
     )
     parser.add_argument(
         "--no-rot6d-identity",

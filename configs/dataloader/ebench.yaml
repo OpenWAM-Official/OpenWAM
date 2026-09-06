@@ -5,7 +5,8 @@ dataset_dir: /path/to/ebench_data
 # EBench raw 23-D action/proprio:
 #   [0:3) L eef xyz, [3:9) L eef rot6d, [9] L gripper
 #   [10:13) R eef xyz, [13:19) R eef rot6d, [19] R gripper
-#   [20:23) base [x, y, yaw(DEGREES)]
+#   [20:23) base per-step delta [dx, dy, dyaw(DEGREES)] (action.base_delta;
+#           proprio = measured state.base[t] - state.base[t-1], yaw rad->deg)
 # Raw action.ee_pose is [L xyz + quat(wxyz), R xyz + quat(wxyz)]; the reader
 # converts each quaternion to rot6d and averages each hand's two gripper
 # fingers into one scalar. unify_action_map scatters raw 0:10 -> L EEF slots,
@@ -27,9 +28,11 @@ split: train
 
 # ── Rendering (3-slot L-shape canvas) ────────────────────────────────────────
 # camera_layout = [head, left/bottom-left, right/bottom-right]; null slots are
-# rendered as black tiles. At 384x320: top 256Hx320W, bottom halves 128Hx160W,
-# each tile BILINEAR-stretched to its slot. target_camera drives single-view
-# mode and is ignored when multiview=true.
+# rendered as black tiles. At 384x320: top 256Hx320W, bottom halves 128Hx160W.
+# The reader LANCZOS-resizes each decoded camera straight to its slot size (no
+# aspect-ratio crop), so the eval bridge reproduces the same resize before
+# sending (benchmarks/utils/client.py resize_for_lshape_slot). target_camera
+# drives single-view mode and is ignored when multiview=true.
 # EBench baseline clients use overlook as the head camera and left/right wrist
 # cameras as hand views.
 height: 384

@@ -190,6 +190,8 @@ AGENTS.md
 # Benchmark client eval outputs (metrics, videos, per-job logs).
 # The glob also covers archived runs kept alongside, e.g. _eval_out_bad/.
 benchmarks/vlabench/_eval_out*/
+# EBench bridge: genmanip_client.EvalClient mirrors per-episode results here (GENMANIP_RESULT_DIR).
+client_results/
 
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

@@ -21,10 +21,12 @@ one obs per popped action.
 
 Conversions live in ``benchmarks/utils/action_conversion.py`` and mirror the
 trainer's rendering byte-for-byte (pinned by tests/benchmarks/test_ebench_bridge.py).
-(default ``delta``).
+The base slot is always the per-step delta command (``base_is_rel=True``), the
+only base mode the EBench dataloader trains.
 
-Env: the GenManip client env (``pip install -e genmanip-client``) plus
-``numpy, Pillow, websockets>=15``. No torch, no openwam import.
+Env: the GenManip client env (``pip install -e genmanip-client`` plus its
+undeclared runtime imports ``opencv-python``, ``PyTurboJPEG<2``, ``filelock``)
+and ``numpy, Pillow, websockets>=15, PyYAML``. No torch, no openwam import.
 """
 
 # benchmarks.utils lives two levels up; make it importable from the EBench
@@ -79,6 +81,8 @@ def wait_until_healthy(south: WSPolicyClient, deadline_s: float = 300.0) -> None
         try:
             south.ping()
             return
+        except ImportError:
+            raise  # missing / too-old websockets is a setup error, not a slow server
         except Exception as e:  # noqa: BLE001 — retried until deadline
             last_err = e
             time.sleep(2.0)
@@ -247,6 +251,7 @@ def run_worker(args) -> None:
         raise RuntimeError(f"EvalClient recovery failed after {args.client_reinit_retries} attempts") from err
 
     client = make_client()
+    reconnects = 0
     try:
         obs = client.reset()
         done = False
@@ -272,6 +277,15 @@ def run_worker(args) -> None:
                 # and starts a fresh episode, so replaying an action computed
                 # for the old episode's obs would corrupt the new one. Resume
                 # the outer loop from the fresh reset obs instead.
+                reconnects += 1
+                if reconnects > args.max_reconnects:
+                    # A deterministic server-side rejection (e.g. an action
+                    # the sim cannot parse) would otherwise loop forever:
+                    # reset succeeds, the same action fails again, repeat.
+                    raise RuntimeError(
+                        f"EvalClient.step failed {reconnects} times in this run (last: {e}); "
+                        f"giving up after --max-reconnects={args.max_reconnects}"
+                    ) from e
                 obs = reconnect(e)
                 driver.invalidate_episode()
                 first = next(
@@ -321,6 +335,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--save-process", action="store_true", help="client-side per-episode video/log dump")
     p.add_argument("--client-reinit-retries", type=int, default=3)
     p.add_argument("--client-reinit-backoff", type=float, default=5.0)
+    p.add_argument(
+        "--max-reconnects",
+        type=int,
+        default=20,
+        help="abort the run after this many north-side step failures + reconnects (a deterministic "
+        "server-side rejection would otherwise loop forever)",
+    )
     return p
 
 

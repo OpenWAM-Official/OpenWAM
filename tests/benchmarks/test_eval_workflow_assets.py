@@ -50,6 +50,15 @@ WORKFLOW_FILES = {
         "target_tasks.txt",
         "run_eval.sh",
     ),
+    "ebench": (
+        "README.md",
+        "policy_config.yml",
+        "prompt_template.py",
+        "openwam2ebench_interface.py",
+        "mock_genmanip_server.py",
+        "single_eval.sh",
+        "multi_eval.sh",
+    ),
 }
 
 
@@ -72,6 +81,8 @@ def test_complete_eval_workflow_is_kept_in_tree(benchmark: str) -> None:
         "benchmarks/robocasa365/setup_env.sh",
         "benchmarks/robocasa365/run_smoke.sh",
         "benchmarks/robocasa365/run_eval.sh",
+        "benchmarks/ebench/single_eval.sh",
+        "benchmarks/ebench/multi_eval.sh",
     ],
 )
 def test_workflow_shell_entrypoints_are_executable(relative_path: str) -> None:

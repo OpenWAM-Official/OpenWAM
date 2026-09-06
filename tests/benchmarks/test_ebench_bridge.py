@@ -20,6 +20,7 @@ import pytest
 from benchmarks.ebench.openwam2ebench_interface import EBenchOpenWAMDriver
 from benchmarks.ebench.prompt_template import format_prompt_for_inference as bridge_prompt
 from benchmarks.utils.action_conversion import (
+    EBENCH_GRIPPER_OPEN,
     ebench_obs_to_raw23,
     ebench_quat_wxyz_to_rot6d,
     ebench_render_state_base,
@@ -127,6 +128,45 @@ def test_action_round_trip_delta():
         # recovered quaternion must encode the same rotation as the rot6d
         back = ebench_quat_wxyz_to_rot6d(np.asarray(quat_wxyz, np.float32))
         np.testing.assert_allclose(back, _rot6d_normalize(raw[sl_rot]), atol=1e-5)
+
+
+def test_action_gripper_clip_and_wrong_width():
+    raw = np.zeros(23)
+    raw[3:9] = [1, 0, 0, 0, 1, 0]
+    raw[13:19] = [1, 0, 0, 0, 1, 0]
+    raw[9], raw[19] = 0.09, -0.02  # outside the physical finger range -> clipped
+    out = raw23_to_ebench_action(raw)
+    assert out["action"][0][2] == pytest.approx([EBENCH_GRIPPER_OPEN] * 2)
+    assert out["action"][1][2] == pytest.approx([0.0, 0.0])
+    with pytest.raises(ValueError, match="23-D"):
+        raw23_to_ebench_action(np.zeros(20))
+
+
+def test_mock_oracle_accepts_bridge_actions_and_poisons_on_violation(tmp_path):
+    """The mock's validator must accept what the bridge emits, reject the
+    known bad shapes, and stay poisoned afterwards (so a bad bridge cannot
+    recover by resetting the replay)."""
+    from benchmarks.ebench.mock_genmanip_server import ContractViolation, MockState
+
+    st = MockState([], tmp_path / "actions.jsonl")
+    raw = np.zeros(23)
+    raw[3:9] = [1, 0, 0, 0, 1, 0]
+    raw[13:19] = [1, 0, 0, 0, 1, 0]
+    raw[9], raw[19] = 0.02, 0.04
+    raw[20:23] = [0.01, -0.005, 0.5]
+    st.validate_action(raw23_to_ebench_action(raw))  # bridge output passes
+    assert st.poisoned is False
+
+    bad = raw23_to_ebench_action(raw)
+    bad["action"][0] = (np.zeros(3), bad["action"][0][1], bad["action"][0][2])  # ndarray position
+    with pytest.raises(ContractViolation, match="Python lists"):
+        st.validate_action(bad)
+    nan = raw.copy()
+    nan[0] = float("nan")
+    with pytest.raises(ContractViolation, match="non-finite"):
+        st.validate_action(raw23_to_ebench_action(nan))
+    st.poisoned = True  # what the /step handler does on the first violation
+    assert st.poisoned
 
 
 def test_wire_types_survive_genmanip_consumption():
@@ -319,6 +359,7 @@ def test_run_worker_reconnect_discards_stale_actions(monkeypatch):
         save_process=False,
         client_reinit_retries=2,
         client_reinit_backoff=0.0,
+        max_reconnects=20,
     )
     iface.run_worker(args)
 

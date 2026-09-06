@@ -24,7 +24,7 @@ RoboDojo trains through OpenWAM but evaluates through the external
 
 ## 1. What the client sends
 
-One call per control step: up to three lossless PNG camera frames + the task `prompt` — the exact string the model should see (the server forwards it verbatim; wrap it in your checkpoint's template first). Proprioceptive checkpoints also require a raw `state` vector whose length matches the checkpoint's `model.architecture.state_dim`.
+One call per control step: up to three lossless PNG camera frames + the task `prompt` — the exact string the model should see (the server forwards it verbatim; wrap it in your checkpoint's template first). Proprioceptive checkpoints also require a raw `state` vector in the checkpoint's training layout — the raw width the dataloader reads (e.g. 10 for LIBERO, 23 for EBench), not the unified `model.architecture.state_dim`; the server normalizes and scatters it.
 
 ```json
 // obs message (Client → Server)
@@ -45,13 +45,14 @@ One call per control step: up to three lossless PNG camera frames + the task `pr
 Response (action message, Server → Client):
 
 ```json
-{"type": "action", "action": [float × 20 or 14], "step": int, "latency_ms": float}
+{"type": "action", "action": [float × raw_action_dim], "step": int, "latency_ms": float}
+// raw_action_dim = the checkpoint's dataloader action width (e.g. 10 LIBERO, 14/20 RoboTwin, 23 EBench)
 ```
 
 ## 2. Three things you don't need to handle
 
 - **Image sizing / aspect ratio.** Use the bundled benchmark adapter. RoboCasa365,
-  LIBERO, BEHAVIOR, EBench, VLABench, and RoboCasa-GR1 reproduce their unchanged
+  LIBERO, EBench, VLABench, and RoboCasa-GR1 reproduce their unchanged
   training readers' LANCZOS tile resize before sending; RoboTwin sends native
   camera sizes because its reader performs BILINEAR composition directly.
 - **Action units.** For normalized checkpoints, the returned action is already denormalized to **physical units** (eef: xyz in meters, rot6d unitless, gripper 0-1; joint: radians). Feed it directly to your controller — do not multiply by any mean/std. If the checkpoint was trained with normalization disabled, deploy leaves actions and state in that raw training scale.
@@ -63,7 +64,7 @@ Response (action message, Server → Client):
 - `left_wrist_camera`, `right_wrist_camera`: optional. If missing or `null`:
   - Server is single-view → the field is ignored.
   - Server is multi-view → the slot is filled with a black frame. The model still runs, but accuracy degrades since you're out of the training distribution for wrist-conditioned checkpoints.
-- `state`: required when the checkpoint has `model.architecture.use_proprioception: true`. The server validates the dimension before inference and returns a `ServerError` (status 400) for missing or mismatched state instead of failing later inside the model.
+- `state`: required when the checkpoint has `model.architecture.use_proprioception: true`. The server returns a `ServerError` (status 400) when it is missing or not a flat numeric list; the width is **not** checked up front (unify-action checkpoints legitimately send the raw pre-unify width), so a wrong-width state surfaces as a normalizer/model error — use the bundled adapters' state helpers.
 
 ## 4. Episode lifecycle and reset
 
@@ -140,7 +141,7 @@ The bundled test script ([scripts/inference_test/inference_single_test.py](../sc
 | `client must send 'images' dict` | Legacy single-field `image` payload (no longer supported) |
 | `failed to decode base64 image` | Corrupted base64 or invalid image bytes |
 | `requires obs['state']` | Checkpoint uses proprioception but the payload omitted `state` |
-| `state dimension mismatch` | Payload `state` length differs from checkpoint `state_dim` |
+| `state must be a flat numeric list/array` | Payload `state` is not a 1-D numeric sequence |
 | `camera_layout` | Server config has fewer than 3 entries in `camera_layout` while multi-view is enabled — check the checkpoint |
 
 ## 7. See also
