@@ -1,4 +1,19 @@
-# OpenWAM
+<p align="center">
+  <img src="assets/repo_images/openwam_title.png" alt="OpenWAM" width="820">
+</p>
+
+<p align="center"><sub>An Open, Modular Exploration Towards Systematic World–Action Model Pretraining</sub></p>
+
+<table align="center">
+  <tr>
+    <td bgcolor="#555555"><font color="#ffffff">PROJECT PAGE</font></td>
+    <td bgcolor="#1682c4"><a href="https://openwam-official.github.io/"><font color="#ffffff">OPENWAM-OFFICIAL.GITHUB.IO</font></a></td>
+    <td bgcolor="#555555"><font color="#ffffff">ARXIV</font></td>
+    <td bgcolor="#e63946"><font color="#ffffff">XXXX.XXXXXX</font></td>
+    <td bgcolor="#555555"><font color="#ffffff">HUGGINGFACE</font></td>
+    <td bgcolor="#ef6c2f"><a href="https://huggingface.co/OpenWAM"><font color="#ffffff">MODEL &amp; DATA</font></a></td>
+  </tr>
+</table>
 
 <!--
 ## What is OpenWAM
