@@ -148,10 +148,9 @@ The script installs the upstream cosmos packages into the active environment and
 
 ## Assets Preparation
 
-The downloaders are interactive. Component downloaders place files in the
-directories shown below and update the matching YAML path. The
-released-checkpoint downloader keeps each checkpoint's self-contained config
-unchanged.
+The downloaders are interactive. Component downloaders store assets under
+assets/ and update the matching YAML path; the released-checkpoint downloader
+keeps each checkpoint's self-contained config unchanged.
 
 ### 1. Video Backbone
 
@@ -167,12 +166,8 @@ python scripts/download_assets/download_video_backbone.py
 | Cosmos-Predict2.5-2B | Hugging Face | Also downloads Cosmos-Reason1-7B |
 | Cosmos3-Edge | Hugging Face, ModelScope | |
 
-The downloaded weights and updated configuration are stored at:
-
-~~~text
-assets/video_backbone_ckpt/
-configs/model/video_backbone/<selected_backbone>.yaml
-~~~
+Weights are saved under assets/video_backbone_ckpt/ and the selected
+configs/model/video_backbone/ file is updated with the downloaded path.
 
 ### 2. Benchmark Data
 
@@ -181,14 +176,9 @@ python scripts/download_assets/download_benchmark_data.py
 ~~~
 
 Available choices include RoboTwin2.0, RoboDojo, RoboDojo-Real, LIBERO,
-VLABench, EBench, RoboCasa365, and RoboCasa_GR1. Normalization statistics are
-prepared when needed. The downloaded data and updated configuration are stored
-at:
-
-~~~text
-assets/benchmark_data/<benchmark>/
-configs/dataloader/<selected_benchmark>.yaml
-~~~
+VLABench, EBench, RoboCasa365, and RoboCasa_GR1. Data is saved under
+assets/benchmark_data/<benchmark>/, normalization statistics are prepared when
+needed, and the matching configs/dataloader/ file is updated.
 
 ### 3. VLM Backbone (Optional)
 
@@ -198,27 +188,20 @@ Required only by tri_system:
 python scripts/download_assets/download_vlm_backbone.py
 ~~~
 
-The downloaded weights and updated configuration are stored at:
-
-~~~text
-assets/vlm_backbone_ckpt/
-configs/model/vlm_backbone/<selected_vlm>.yaml
-~~~
+Weights are saved under assets/vlm_backbone_ckpt/ and the selected
+configs/model/vlm_backbone/ file is updated.
 
 ### 4. Visual Encoders (Optional)
 
-Required only for video backbones that use an external encoder:
+Required only for video backbones that use an external encoder configured under
+configs/model/video_backbone/encoder/:
 
 ~~~bash
 python scripts/download_assets/download_visual_encoder.py
 ~~~
 
-The downloaded weights and updated encoder configuration are stored at:
-
-~~~text
-assets/visual_encoder_ckpt/
-configs/model/video_backbone/encoder/<selected_encoder>.yaml
-~~~
+Weights are saved under assets/visual_encoder_ckpt/ and the selected encoder
+configuration is updated.
 
 ### 5. Released OpenWAM Checkpoints
 
@@ -229,23 +212,16 @@ checkpoints from the OpenWAM collection:
 python scripts/download_assets/download_openwam_checkpoints.py
 ~~~
 
-Checkpoint directories are saved at:
-
-~~~text
-assets/openwam_ckpt/openwam_alpha/
-assets/openwam_ckpt/openwam_study/<type>/
-~~~
-
-Each checkpoint directory contains its own config and can be deployed directly
-with:
+Checkpoints are saved under assets/openwam_ckpt/openwam_alpha/ or
+assets/openwam_ckpt/openwam_study/<type>/. Each checkpoint directory contains
+its own config and can be deployed directly with:
 
 ~~~bash
 bash scripts/deploy.sh <ckpt_dir_path>
 ~~~
 
-For fine-tuning, set the finetune checkpoint field in the
-[training configuration](configs/train.yaml) to the downloaded directory.
-Benchmark data is still required.
+For fine-tuning, set training.finetune_ckpt_path in configs/train.yaml to the
+downloaded checkpoint directory. Benchmark data is still required.
 
 
 ## Quick Start
@@ -256,21 +232,12 @@ or fine-tune a policy, deploy its checkpoint, and run a first inference check.
 The example uses the DualSystem JointSelfAttention architecture, the
 Wan2.2-TI2V-5B video backbone, and the Mutual attention mask.
 
-| Component | Selection | YAML key |
+| Component | Selection | Configuration |
 |---|---|---|
-| Architecture | dual_system / joint_self_attn | model, model.architecture.variant |
-| Video backbone | wan22_ti2v_5b | model/video_backbone |
+| Architecture | dual_system / joint_self_attn | [configs/model/dual_system.yaml](configs/model/dual_system.yaml) |
+| Video backbone | wan22_ti2v_5b | [configs/model/video_backbone/wan22_ti2v_5b.yaml](configs/model/video_backbone/wan22_ti2v_5b.yaml) |
 | Attention mask | mutual | model.architecture.attention_mask_mode |
-| Dataset | libero | dataloader |
-
-Configuration files for this example:
-
-~~~text
-configs/model/dual_system.yaml
-configs/model/video_backbone/wan22_ti2v_5b.yaml
-configs/dataloader/libero.yaml
-configs/train.yaml
-~~~
+| Dataset | libero | [configs/dataloader/libero.yaml](configs/dataloader/libero.yaml) |
 
 > **Resource recommendation:** We recommend 8 GPUs with 80 GB VRAM each for
 > training. This configuration supports normal training for all architectures
@@ -310,12 +277,9 @@ configs/train.yaml
    training.debug=true runs 20 steps, saves at steps 10 and 20, and uses a
    constant learning rate. Check the run output, then set
    training.debug=false for normal training. Training defaults and CLI
-   overrides are defined in the [training configuration](configs/train.yaml).
-   Debug outputs use training.output_path. The default output directory is:
-
-   ~~~text
-   outputs/openwam_checkpoints/
-   ~~~
+   overrides are defined in [configs/train.yaml](configs/train.yaml).
+   Debug outputs use training.output_path, whose default is
+   outputs/openwam_checkpoints.
 
 4. Deploy the debug checkpoint and inspect one input-output cycle:
 
@@ -363,9 +327,9 @@ configs/train.yaml
    ~~~
 
    The default model configuration already matches the required setup above.
-   You can set the same field in the [training configuration](configs/train.yaml)
+   You can set the same field in [configs/train.yaml](configs/train.yaml)
    instead of passing it on the command line. num_frames=33 and
-   video_stride=4 in the [LIBERO dataloader configuration](configs/dataloader/libero.yaml)
+   video_stride=4 in [configs/dataloader/libero.yaml](configs/dataloader/libero.yaml)
    produce the 32-step action horizon expected by the sampler; no separate
    action_chunk override is needed.
 
