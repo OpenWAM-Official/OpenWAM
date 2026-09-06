@@ -209,3 +209,6 @@ assets/
 assets/*
 !assets/openwam_usage_docs/
 !assets/openwam_usage_docs/**
+# Versioned repository images.
+!assets/repo_images/
+!assets/repo_images/**
