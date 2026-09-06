@@ -296,9 +296,8 @@ def bootstrap_robotwin_module(*, install_trace_hooks: bool = True):
     writable runtime root + chdir + sys.path, prewarm CUDA/Curobo before SAPIEN,
     patch the legacy ``warp.torch`` namespace, load ``script/eval_policy.py``,
     install the optional planner fallback (``ROBOTWIN_ENABLE_PLANNER_FALLBACK=1``)
-    and the per-env exception trace hooks. Callers (``main`` here for whole-task
-    eval, ``episode_worker`` for episode-level eval) then monkeypatch / drive the
-    module as they need.
+    and the per-env exception trace hooks. Callers (such as ``main`` here for
+    whole-task eval) then monkeypatch / drive the module as they need.
     """
     robotwin_path = os.environ.get("ROBOTWIN_PATH")
     if not robotwin_path:

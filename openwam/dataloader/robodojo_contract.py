@@ -3,10 +3,9 @@
 Generic pose / EEF20 math lives in ``openwam.dataloader.utils.poses``.
 This module only holds the numbers and file-layout rules the reader needs.
 
-The Isaac eval runtime keeps a pinned copy in
-``benchmarks/robodojo/contract.py``. The two must stay aligned on
-``ROBODOJO_CONTRACT_ID``; ``tests/test_robodojo_runtime_boundary.py`` checks
-that. Production modules on either side must not import the other.
+The Isaac eval runtime (XPolicyLab) keeps a pinned copy of this contract.
+The two must stay aligned on ``ROBODOJO_CONTRACT_ID``. Production modules
+on either side must not import the other.
 """
 
 from __future__ import annotations

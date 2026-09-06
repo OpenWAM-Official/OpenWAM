@@ -12,7 +12,7 @@
 # Usage:
 #   EBENCH_PYTHON=/path/to/python bash benchmarks/ebench/single_eval.sh \
 #       [--url http://127.0.0.1:8087] [--run-id X] [--token T] \
-#       [--worker-id 0] [--south-port 8848] [--base-mode delta]
+#       [--worker-id 0] [--south-port 8848]
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 

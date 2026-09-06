@@ -8,7 +8,7 @@
 # Important environment overrides:
 #   SERVER_PYTHON=/path/to/openwam/python
 #   ROBOCASA365_PYTHON=/path/to/robocasa365/python
-#   SERVER_DEVICE=cuda:0  PORT=8848  SPLIT=target  OUTPUT_DIR=/path/to/results
+#   SERVER_DEVICE=cuda:0  PORT=8848  SPLIT=pretrain  OUTPUT_DIR=/path/to/results
 
 set -euo pipefail
 
@@ -37,7 +37,7 @@ command -v setsid >/dev/null || {
 SERVER_DEVICE="${SERVER_DEVICE:-cuda:0}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8848}"
-SPLIT="${SPLIT:-target}"
+SPLIT="${SPLIT:-pretrain}"
 SERVER_START_TIMEOUT="${SERVER_START_TIMEOUT:-1200}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/robocasa365/${RUN_TAG}}"

@@ -73,7 +73,7 @@ def _make_env(cfg: dict):
     task = cfg.get("task", "OpenDrawer")
     return gym.make(
         f"robocasa/{task}",
-        split=cfg.get("split", "target"),
+        split=cfg.get("split", "pretrain"),
         enable_render=True,
     )
 

@@ -1,143 +1,105 @@
-# LIBERO evaluation
+# LIBERO Evaluation
 
-This directory contains the complete OpenWAM evaluation path for
-LIBERO: a reproducible client environment, simulator preflight,
-policy-client configuration, manual single-task evaluation, and managed
-multi-GPU evaluation that starts and stops its own OpenWAM servers.
+Two processes: the **OpenWAM policy server** (this repo's env, holds the model) and the **LIBERO client** (its own env). They talk over WebSocket ([wire protocol](../README.md)), so the two environments never interfere. For the LIBERO-plus perturbation suite see [`benchmarks/libero-plus/`](../libero-plus/README.md).
 
-## Workflow inventory
+Commands below assume conda at `/path/to/miniconda3` and the LIBERO checkout at `/path/to/LIBERO` — substitute your actual paths.
 
-| Stage | Files |
-|---|---|
-| Environment lock | `environment.yml` |
-| Install repo, patch, dependencies, assets | `setup_env.sh` |
-| Import/task/simulator preflight | `run_smoke.sh` + `smoke_libero.py` |
-| Policy client config | `policy_config.yml` |
-| OpenWAM WebSocket adapter | `openwam2libero_interface.py` |
-| One-task client/evaluator | `single_eval.sh` + `single_eval.py` |
-| Managed server + client queue + summary | `run_eval.sh` → `run_all_suites.py` |
-| Scheduling/resume implementation | `scheduler.py` |
+## 1. Environment Setup
 
-The compatibility change required by the pinned upstream checkout lives under
-`patches/`; the setup script applies it idempotently and rejects an unexpected
-checkout instead of silently evaluating different code.
-
-## Representation contract
-
-The OpenWAM server returns raw 10-D native actions:
-
-```text
-[native_delta_xyz3, rot6d(Exp(native_delta_axis_angle3)), gripper_open_command]
-```
-
-The canonical reader uses separate action/state normalization blocks and keeps
-the six rot6d dimensions as an identity mapping. The client sends achieved
-EEF10 proprioception and converts the response to LIBERO's runtime 7-D OSC
-command:
-
-```text
-[native_delta_xyz3, native_delta_axis_angle3, native_close_command]
-```
-
-Only rot6d decoding and the gripper sign conversion happen at this boundary.
-There is no absolute-goal composition and no `0.05 m` / `0.5 rad` controller
-scaling. The trained gripper convention is `-1 = closed, +1 = open`; LIBERO's
-runtime command is the negation (`+1 = close, -1 = open`).
-
-## 1. Create the client environment
-
-The simulator/client environment is intentionally separate from the OpenWAM
-server environment.
+One command builds everything (clones LIBERO at the pinned commit, applies the PyTorch≥2.6 patch, creates the conda env, verifies every version):
 
 ```bash
-CONDA_BIN=/path/to/conda \
-LIBERO_ENV_PREFIX=/path/to/envs/libero \
+CONDA_BIN=/path/to/miniconda3/bin/conda \
+LIBERO_ENV_PREFIX=/path/to/miniconda3/envs/libero \
 LIBERO_PATH=/path/to/LIBERO \
-  bash benchmarks/libero/setup_env.sh
+bash benchmarks/libero/setup_env.sh
 ```
 
-The setup script pins the upstream commit and MuJoCo `3.3.2`.
-
-## 2. Verify the environment before loading a model
-
-Run progressively stronger checks:
+Verify (no model needed):
 
 ```bash
-bash benchmarks/libero/run_smoke.sh import
-bash benchmarks/libero/run_smoke.sh task
-bash benchmarks/libero/run_smoke.sh env
+LIBERO_PATH=/path/to/LIBERO LIBERO_PYTHON=/path/to/miniconda3/envs/libero/bin/python \
+bash benchmarks/libero/run_smoke.sh env    # also: import | task
 ```
 
-Useful overrides are `LIBERO_PYTHON`, `LIBERO_PATH`, `LIBERO_CONFIG_ROOT`,
-`LIBERO_SMOKE_SUITE`, `LIBERO_SMOKE_TASK_ID`, and `LIBERO_SMOKE_GPU`.
+<details>
+<summary><b>What the script pins (details)</b></summary>
 
-## 3. Manual server and single-task client
+- LIBERO commit `8f1084e3132a39270c3a13ebe37270a43ece2a01`; setup aborts on any mismatch.
+- Python 3.10, `mujoco==3.3.2` (re-checked at every launch), full upstream pip pins.
+- `patches/libero-pytorch-load.patch` applied automatically (`torch.load(..., weights_only=False)`).
+- No separate asset download — assets ship inside the clone. Clients auto-generate `~/.libero-openwam/config.yaml` (relocate with `LIBERO_CONFIG_ROOT`).
+- EGL rendering env vars are exported by the launch scripts; no manual setup.
 
-Start the policy server in the OpenWAM environment:
+</details>
+
+## 2. Start the Policy Server
 
 ```bash
-bash scripts/deploy.sh \
-  --ckpt-dir /path/to/libero_checkpoint \
-  --ckpt-name checkpoint_step_10000.safetensors \
-  --device cuda:0 --port 8848
+python scripts/download_assets/download_openwam_checkpoints.py
+# menu: OpenWAM_Alpha → OpenWAM-Alpha-Sim-LIBERO
 ```
 
-Then start the simulator/client in the isolated LIBERO environment:
+Run from the repo root — the checkpoint lands in `assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-LIBERO` (or use a checkpoint you trained yourself). Needed only for `single_eval.sh`; the managed `run_eval.sh` below starts its own servers:
 
 ```bash
-LIBERO_PATH=/path/to/LIBERO \
-LIBERO_PYTHON=/path/to/envs/libero/bin/python \
-  bash benchmarks/libero/single_eval.sh libero_spatial 0 8848 127.0.0.1
+bash scripts/deploy.sh assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-LIBERO
 ```
 
-The client performs a WebSocket ping and checks the server-advertised
-`representation` before beginning a rollout. Results are written to
-`result_dir/results.json` when configured or when `--result-dir` is supplied to
-`single_eval.py`.
+WebSocket port 8848 by default (`--port` to change). Keep it running.
 
-## 4. Managed end-to-end evaluation
+## 3. Run the Evaluation
 
-`run_eval.sh` is the complete launcher. It starts policy-server replicas, waits
-for readiness, starts isolated LIBERO clients, dynamically schedules tasks,
-retries failed requests, writes results and summaries, and always tears the
-servers down:
+Full run (primary command) — the managed launcher starts its own servers, spreads all four suites over the GPUs, and tears everything down:
 
 ```bash
-SERVER_PYTHON=/path/to/openwam/bin/python \
-LIBERO_PYTHON=/path/to/envs/libero/bin/python \
+SERVER_PYTHON=/path/to/miniconda3/envs/openwam/bin/python \
+LIBERO_PYTHON=/path/to/miniconda3/envs/libero/bin/python \
 LIBERO_PATH=/path/to/LIBERO \
 GPUS=0,1 REPLICAS_PER_GPU=1 \
-  bash benchmarks/libero/run_eval.sh \
-    /path/to/libero_checkpoint checkpoint_step_10000.safetensors \
-    --compile-enabled false
+bash benchmarks/libero/run_eval.sh \
+  assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-LIBERO checkpoint_step_10000.safetensors
 ```
 
-For a one-task end-to-end validation, append `--smoke`.
-
-The underlying Python entry point can also be called directly for task
-sampling, custom suites, external servers, or resume:
+Append `--smoke` first for a one-task end-to-end validation. Single suite against the running server from section 2 (args: suite, task id, port, host):
 
 ```bash
-python benchmarks/libero/run_all_suites.py \
-  --ckpt-dir /path/to/checkpoint \
-  --ckpt-name checkpoint_step_10000.safetensors \
-  --gpus 0,1,2,3 --replicas-per-gpu 2 \
-  --task-sample-ratio 0.2 --task-sample-seed 42 \
-  --output-dir outputs/libero/my_run
+LIBERO_PATH=/path/to/LIBERO LIBERO_PYTHON=/path/to/miniconda3/envs/libero/bin/python \
+bash benchmarks/libero/single_eval.sh libero_spatial 0 8848 127.0.0.1
 ```
 
-Reusing an existing `--output-dir` resumes valid completed tasks. When
-expanding a sampled run to the full task list, pass `--resume-superset`.
-Checkpoint, config, seed, trial range, MuJoCo version, and protocol checks stay
-strict. `manifest.json`, per-task `results.json`, `summary.json`, `summary.csv`,
-client logs, and server logs make the evaluation auditable.
+<details>
+<summary><b>Notes & troubleshooting</b></summary>
 
-## Training
+- Always pass the checkpoint dir + filename explicitly (in-code defaults are placeholders); the dir must contain `config.yaml` and `normalization_stats.npy`, and the checkpoint must serve the `eef` representation — the client pings and refuses mismatches. Substitute your actual `checkpoint_step_*.safetensors` name.
+- Protocol is pinned and validated at launch: 50 trials/task, seed 42, `max_steps` 600 (700 for `libero_10`); deviations abort.
+- Suites: `libero_spatial`, `libero_object`, `libero_goal`, `libero_10` (aliases `spatial|object|goal|long`). Managed replicas use ports from 8920.
+- Resume: add `--output-dir outputs/libero/<run_name>` and rerun the same command — completed tasks are skipped after a signature check.
+- Results land in the output dir: `summary.csv`, `summary.json`, `manifest.json`, per-task `results.json`, client/server logs.
 
-The matching training configuration is:
+</details>
 
-```bash
-bash scripts/train.sh dataloader=libero
-```
+## 4. Results
 
-Its required invariants are `type: libero` and `action_mode: libero`.
+Scores from the OpenWAM paper. **Bold** = best, <u>underline</u> = second best; Type distinguishes WAM vs VLA.
+
+| Method | Type | Spatial | Object | Goal | Long | Avg |
+|---|---|---:|---:|---:|---:|---:|
+| OpenVLA | VLA | 84.7 | 88.4 | 79.2 | 53.7 | 76.5 |
+| π₀ | VLA | 98.0 | 96.8 | 94.4 | 88.4 | 94.4 |
+| StarVLA | VLA | 97.8 | 98.6 | 96.2 | 93.8 | 96.6 |
+| π₀.₅ | VLA | 98.8 | 98.2 | 98.0 | 92.4 | 96.9 |
+| GR00T-N1.6 | VLA | 97.7 | 98.5 | 97.5 | 94.4 | 97.0 |
+| OpenVLA-OFT | VLA | 97.6 | 98.4 | 97.9 | 94.5 | 97.1 |
+| X-VLA | VLA | 98.2 | 98.6 | 97.8 | 97.6 | 98.1 |
+| ABot-M0 | VLA | 98.8 | <u>99.8</u> | 99.0 | 96.6 | 98.6 |
+| Being-H0.5 | VLA | 99.2 | 99.6 | <u>99.4</u> | 97.4 | 98.9 |
+| Qwen-RobotManip | VLA | - | - | - | - | 99.2 |
+| Fast-WAM | WAM | 98.2 | **100.0** | 97.0 | 95.2 | 97.6 |
+| Motus | WAM | 96.8 | <u>99.8</u> | 96.6 | 97.6 | 97.7 |
+| ImageWAM | WAM | 97.2 | 99.2 | 98.8 | <u>98.4</u> | 98.4 |
+| LingBot-VA | WAM | 98.5 | 99.6 | 97.2 | **98.5** | 98.5 |
+| DiT4DiT | WAM | - | - | - | - | 98.6 |
+| Being-H0.7 | WAM | - | - | - | - | 99.2 |
+| ABot-M0.5 | WAM | **100.0** | <u>99.8</u> | <u>99.4</u> | <u>98.4</u> | **99.4** |
+| **OpenWAM-α** | WAM | <u>99.6</u> | 99.6 | **99.8** | 98.2 | <u>99.3</u> |

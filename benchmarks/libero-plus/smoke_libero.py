@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke checks for a LIBERO installation."""
+"""Smoke checks for a LIBERO-plus installation."""
 
 from __future__ import annotations
 
@@ -15,12 +15,12 @@ import yaml
 
 
 def _repo_root() -> Path:
-    raw_root = os.environ.get("LIBERO_PATH", "")
+    raw_root = os.environ.get("LIBERO_PLUS_PATH", "")
     if not raw_root:
-        raise SystemExit("LIBERO_PATH is not set")
+        raise SystemExit("LIBERO_PLUS_PATH is not set")
     root = Path(raw_root).expanduser()
     if not root.is_dir():
-        raise SystemExit(f"LIBERO_PATH does not exist: {root}")
+        raise SystemExit(f"LIBERO_PLUS_PATH does not exist: {root}")
     return root.resolve()
 
 
@@ -32,8 +32,8 @@ def _benchmark_root(repo_root: Path) -> Path:
 
 
 def _config_root() -> Path:
-    default = Path.home() / ".libero-openwam"
-    raw_root = os.environ.get("LIBERO_CONFIG_ROOT", os.environ.get("LIBERO_CONFIG_PATH", str(default)))
+    default = Path.home() / ".libero-openwam-plus"
+    raw_root = os.environ.get("LIBERO_PLUS_CONFIG_ROOT", os.environ.get("LIBERO_CONFIG_PATH", str(default)))
     return Path(raw_root).expanduser().resolve()
 
 
@@ -57,7 +57,7 @@ def write_config() -> dict[str, str]:
 
 def _load_task_map() -> dict[str, list[str]]:
     task_map_path = _benchmark_root(_repo_root()) / "benchmark" / "libero_suite_task_map.py"
-    spec = importlib.util.spec_from_file_location("libero_suite_task_map", task_map_path)
+    spec = importlib.util.spec_from_file_location("libero_plus_suite_task_map", task_map_path)
     if spec is None or spec.loader is None:
         raise SystemExit(f"Failed to load task map: {task_map_path}")
     module = importlib.util.module_from_spec(spec)
@@ -86,7 +86,11 @@ def _language_from_task_name(task_name: str) -> str:
         match = re.search(r"SCENE\d+_(.*)", task_name)
         if match:
             return match.group(1).replace("_", " ")
-    return task_name.replace("_", " ")
+    return re.sub(
+        r"_(?:table|tb|light|language|view|add|level\d+|noise|robot|background)_?\d*$",
+        "",
+        task_name,
+    ).replace("_", " ")
 
 
 def task_smoke(suite: str, task_id: int) -> None:

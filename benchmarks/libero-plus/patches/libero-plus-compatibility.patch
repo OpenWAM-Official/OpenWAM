@@ -1,0 +1,50 @@
+diff --git a/libero/__init__.py b/libero/__init__.py
+new file mode 100644
+index 0000000..a1589cc
+--- /dev/null
++++ b/libero/__init__.py
+@@ -0,0 +1 @@
++"""Package marker required for editable LIBERO-plus installations."""
+diff --git a/libero/libero/benchmark/__init__.py b/libero/libero/benchmark/__init__.py
+index 8156148..c4660b9 100644
+--- a/libero/libero/benchmark/__init__.py
++++ b/libero/libero/benchmark/__init__.py
+@@ -186,2 +186,2 @@ class Benchmark(abc.ABC):
+-        init_states = torch.load(init_states_path)
++        init_states = torch.load(init_states_path, weights_only=False)
+         return init_states
+@@ -242,2 +242,2 @@ class Benchmark(abc.ABC):
+-        init_states = torch.load(init_states_path)
++        init_states = torch.load(init_states_path, weights_only=False)
+         if "_add_" in self.tasks[i].init_states_file or "_level" in self.tasks[i].init_states_file:
+diff --git a/libero/libero/envs/env_wrapper.py b/libero/libero/envs/env_wrapper.py
+index be94797..c9107fd 100644
+--- a/libero/libero/envs/env_wrapper.py
++++ b/libero/libero/envs/env_wrapper.py
+@@ -52,7 +52,15 @@ def motion_blur(x, severity=1):
+-    x = cv2.imdecode(np.fromstring(x.make_blob(), np.uint8),
+-                    cv2.IMREAD_UNCHANGED)
+-
+-    if x.shape != (224, 224):
+-        return np.clip(x[..., [2, 1, 0]], 0, 255)  # BGR to RGB
+-    else:  # greyscale to RGB
+-        return np.clip(np.array([x, x, x]).transpose((1, 2, 0)), 0, 255)
++    # Request an encoded format explicitly. ``make_blob()`` without one can
++    # intermittently expose ImageMagick's raw pixel buffer after the in-place
++    # blur. OpenCV may decode that as a malformed Hx3 image or abort in native
++    # code when many LIBERO-plus clients run concurrently.
++    blob = x.make_blob(format="PNG")
++    x = cv2.imdecode(np.frombuffer(blob, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
++    if x is None:
++        raise RuntimeError("ImageMagick motion blur produced an invalid PNG")
++    if x.ndim == 2:  # greyscale to RGB at any configured camera resolution
++        x = np.repeat(x[..., None], 3, axis=-1)
++    elif x.ndim == 3 and x.shape[-1] >= 3:
++        x = x[..., :3][..., [2, 1, 0]]  # BGR to RGB
++    else:
++        raise RuntimeError(f"ImageMagick motion blur produced shape {x.shape}")
++    return np.clip(x, 0, 255)
+@@ -206,2 +214,3 @@ class ControlEnv:
+     ):
++        bddl_file_name = str(bddl_file_name)
+         if "_view_" in bddl_file_name and "_initstate_" in bddl_file_name:

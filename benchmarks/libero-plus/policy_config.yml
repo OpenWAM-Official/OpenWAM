@@ -1,0 +1,44 @@
+# OpenWAM LIBERO-plus native-action benchmark client config.
+policy_name: openwam_libero
+host: "127.0.0.1"
+port: 8848
+request_timeout: 300
+
+suite: libero_spatial
+task_id: 0
+num_trials: 1
+max_steps: 600
+max_steps_by_suite:
+  libero_spatial: 600
+  libero_object: 600
+  libero_goal: 600
+  libero_10: 700
+
+# Official LIBERO-plus one-rollout protocol.
+seed: 10000
+rng_mode: official_global
+reseed_each_trial: false
+fail_on_incomplete: false
+
+settle_steps: 30
+settle_action: [0, 0, 0, 0, 0, 0, -1]
+
+camera_height: 256
+camera_width: 256
+head_camera_key: agentview_image
+left_wrist_camera_key: robot0_eye_in_hand_image
+right_wrist_camera_key: null
+image_transform: rotate_180
+
+# The server-side checkpoint must have been trained from
+# configs/dataloader/libero.yaml. It returns raw native-action
+# EEF10 after normalization/unification is inverted server-side.
+action_mode: eef
+state_dim: 10
+send_state: true
+action_indices: null
+action_clip: null
+
+debug: false
+debug_dir: "./debug_libero"
+result_dir: "./evaluate_results/libero_plus"

@@ -20,13 +20,10 @@ south_host: "127.0.0.1"
 south_port: 8848
 request_timeout: 300      # seconds per south inference round-trip
 
-# --- Action settings ---
-# Must match the checkpoint's dataloader.base_action_source:
-#   delta      -> base_motion = per-step [dx_m, dy_m, dyaw_deg], base_is_rel=true
-#   cumulative -> base_motion = absolute [x_m, y_m, yaw_deg],   base_is_rel=false
-# Pass --ckpt-config <ckpt>/config.yaml to hard-verify this at startup — a
-# silent mismatch scores garbage.
-base_mode: delta
+# --- Contract check ---
+# Pass --ckpt-config <ckpt>/config.yaml to hard-verify at startup that the
+# checkpoint matches this bridge (dataloader.type=ebench, action_mode=eef,
+# unify_action=true) — a silent mismatch scores garbage.
 
 # --- Observation settings ---
 send_state: true          # RAW-23 proprio; required for proprio-conditioned ckpts

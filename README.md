@@ -41,11 +41,14 @@ OpenWAM/
 ├── configs/           # Hydra configs for model, dataloader, training, deploy
 ├── tests/             # Unit tests
 ├── benchmarks/
-│   ├── robotwin/      # RoboTwin eval client, single / multi / DLC-parallel eval scripts
+│   ├── robotwin/      # RoboTwin eval client, single / multi eval scripts
 │   ├── libero/        # LIBERO WebSocket eval client
+│   ├── libero-plus/   # LIBERO-plus perturbation-suite eval client
 │   ├── robocasa365/   # RoboCasa365 native-action eval client
 │   ├── robocasa_gr1/  # RoboCasa GR1 tabletop eval client
-│   └── vlabench/      # VLABench eval client, single / multi-GPU track sweeps
+│   ├── vlabench/      # VLABench eval client, single / multi-GPU track sweeps
+│   ├── ebench/        # EBench (GenManip) eval bridge
+│   └── robodojo/      # RoboDojo: training in OpenWAM, evaluation via XPolicyLab
 ├── assets/            # Base-model checkpoints (created by the download script; git-ignored)
 └── third_party/       # Vendored externals (Cosmos-Predict2.5 submodule)
 ```
@@ -72,9 +75,12 @@ All architectures are selected via `configs/model/<framework>.yaml` with `archit
 | RoboTwin eval | Supported | All 50 tasks; see `benchmarks/robotwin/` |
 | SimplerEnv eval | Planned | Requires external environment setup |
 | LIBERO eval | Supported | See `benchmarks/libero/` |
+| LIBERO-plus eval | Supported | Perturbation-robustness suite over LIBERO; see `benchmarks/libero-plus/` |
 | RoboCasa365 eval | Supported | Native state19/action15 contract; see `benchmarks/robocasa365/` |
 | RoboCasa GR1 eval | Supported | GR1 tabletop tasks; see `benchmarks/robocasa_gr1/` |
 | VLABench eval | Supported | 10 primitive tasks across 6 evaluation tracks; see `benchmarks/vlabench/` |
+| EBench eval | Supported | GenManip generalist tasks; see `benchmarks/ebench/` |
+| RoboDojo eval | External | Trains in OpenWAM (sim + real); evaluates via [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) |
 | Calvin eval | Planned | Requires external environment setup |
 
 ## Installation
@@ -375,17 +381,7 @@ The server chunks actions internally: the first call runs full inference (slow),
 
 ### 4. Benchmarks
 
-Evaluation adapters live under `benchmarks/`. Eval scripts connect to an **already-running** policy server over WebSocket — no model weights are needed on the evaluator machine. See [benchmarks/robotwin/README.md](benchmarks/robotwin/README.md) for single-task, multi-task, DLC multi-node, and CSV-export usage.
-
-For large multi-node RoboTwin runs, `benchmarks/robotwin/dlc_parallel_eval.sh` claims tasks from a shared-filesystem queue:
-
-```bash
-ROBOTWIN_PATH=/path/to/RoboTwin \
-ROBOTWIN_PYTHON=/path/to/robotwin/bin/python \
-ROBOTWIN_RUN_ID=run1 \
-bash benchmarks/robotwin/dlc_parallel_eval.sh \
-  -m all -n openwam -d /path/to/ckpt_dir --denoise-steps 10 all
-```
+Evaluation adapters live under `benchmarks/`. Eval scripts connect to an **already-running** policy server over WebSocket — no model weights are needed on the evaluator machine. Each benchmark folder ships a README covering environment setup, server start, and evaluation launch — see e.g. [benchmarks/robotwin/README.md](benchmarks/robotwin/README.md).
 
 Benchmark support status is listed under [Support Status](#benchmarks-and-evaluation) above.
 

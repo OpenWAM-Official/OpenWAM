@@ -42,7 +42,7 @@ echo "[robocasa365-smoke] mode=${MODE} task=${TASK} python=${PYTHON_BIN}"
 "${PYTHON_BIN}" "${SCRIPT_DIR}/smoke_robocasa365.py" \
     --mode "${MODE}" \
     --task "${TASK}" \
-    --split "${ROBOCASA365_SMOKE_SPLIT:-target}" \
+    --split "${ROBOCASA365_SMOKE_SPLIT:-pretrain}" \
     --steps "${ROBOCASA365_SMOKE_STEPS:-1}" \
     --host "${ROBOCASA365_POLICY_HOST:-127.0.0.1}" \
     --port "${ROBOCASA365_PORT:-8848}"

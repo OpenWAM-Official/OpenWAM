@@ -6,7 +6,7 @@
 #
 # Then, inside the separate robocasa365 env:
 #   ROBOCASA365_PYTHON=/path/to/robocasa365/env/bin/python \
-#     bash benchmarks/robocasa365/single_eval.sh OpenDrawer target 8848 127.0.0.1
+#     bash benchmarks/robocasa365/single_eval.sh OpenDrawer pretrain 8848 127.0.0.1
 
 set -euo pipefail
 
@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 task="${1:-OpenDrawer}"
-split="${2:-target}"
+split="${2:-pretrain}"
 port="${3:-${ROBOCASA365_PORT:-8848}}"
 host="${4:-${ROBOCASA365_POLICY_HOST:-127.0.0.1}}"
 

@@ -1,182 +1,102 @@
-# RoboCasa365 evaluation
+# RoboCasa365 Evaluation
 
-This client connects the RoboCasa simulator to an OpenWAM server trained on the
-canonical RoboCasa365 native-action LeRobot v3 conversion.
+Two processes: the **OpenWAM policy server** (this repo's env, holds the model) and the **RoboCasa365 client** (its own env). They talk over WebSocket ([wire protocol](../README.md)), so the two environments never interfere.
 
-## Workflow inventory
+Commands below assume conda at `/path/to/miniconda3` and the external checkouts at `/path/to/robocasa`, `/path/to/robosuite` — substitute your actual paths.
 
-| Stage | Files |
-|---|---|
-| Reproducible isolated client environment | `environment.yml`, `setup_env.sh` |
-| Simulator/client preflight | `run_smoke.sh`, `smoke_robocasa365.py` |
-| Policy-client configuration | `policy_config.yml` |
-| OpenWAM WebSocket/action adapter | `openwam2robocasa365_interface.py` |
-| One-task client/evaluator | `single_eval.sh`, `single_eval.py` |
-| Official target-list evaluation + CSV | `multi_eval.sh`, `target_tasks.txt` |
-| Managed server → client → evaluation | `run_eval.sh` |
+## 1. Environment Setup
 
-The simulator and thin client run in their own RoboCasa365 environment; the
-model server runs in the normal OpenWAM environment. This separation prevents
-the simulator's pinned NumPy/MuJoCo stack from changing the model runtime.
-
-## Representation contract
-
-The simulator exposes native state16 and consumes native action12. The policy
-uses the converted dataset's compact representation:
-
-- state19: achieved EEF `xyz3 + rot6d6 + gripper1`, followed by world base
-  `xyz3 + rot6d6`;
-- action15: native normalized EEF delta
-  `xyz3 + rot6d(Exp(delta_rotvec3)) + gripper1`, followed by
-  `base_vx + base_vy + base_vyaw + torso + control_mode`.
-
-Training scatters state and action independently into the 80-D shared model
-space:
-
-```text
-state19  [0:10] -> [0:10], [10:19] -> [68:77]
-action15 [0:10] -> [0:10], [10:15] -> [68:73]
-```
-
-The server gathers and de-normalizes action15. The client directly reconstructs
-the native OSC command:
-
-```text
-native_delta_xyz    = action15[0:3]
-native_delta_rotvec = Log(rot6d_to_matrix(action15[3:9]))
-native_gripper      = -action15[9]
-```
-
-No current state, previous target, `0.05` position scale, or `0.5` rotation
-scale participates in the action bridge. Base velocity, torso, and control mode
-pass through. Gripper convention is `-1=closed, +1=open` on the policy side and
-is sign-inverted back to RoboCasa's native close command.
-
-## Cameras and prompt
-
-- `robot0_agentview_left` is sent as the head camera;
-- `robot0_eye_in_hand` is sent as the left wrist camera;
-- `robot0_agentview_right` is sent through the fixed `right_wrist_camera`
-  transport field and fills the bottom-right slot;
-- eval reproduces the unchanged training reader's LANCZOS slot resize
-  (`320x256` head, `160x128` bottom views) and transports all three views as
-  lossless PNG;
-- the native task instruction is sent unchanged, with no prompt prefix or
-  suffix, matching the training dataloader.
-
-## 1. Create and verify the client environment
-
-The setup pins RoboCasa `1.0.1` and the compatible robosuite master revision,
-creates the conda environment, installs both repositories, sets up macros, and
-downloads the official kitchen assets (about 10 GB):
+One command builds everything (clones + pins [robocasa](https://github.com/robocasa/robocasa) and [robosuite](https://github.com/ARISE-Initiative/robosuite), creates the `robocasa365` conda env, downloads the ~10 GB kitchen assets, asserts every version):
 
 ```bash
-CONDA_BIN=/path/to/conda \
-ROBOCASA365_ENV_PREFIX=/path/to/envs/robocasa365 \
+CONDA_BIN=/path/to/miniconda3/bin/conda \
+ROBOCASA365_ENV_PREFIX=/path/to/miniconda3/envs/robocasa365 \
 ROBOCASA365_PATH=/path/to/robocasa \
 ROBOSUITE_PATH=/path/to/robosuite \
-  bash benchmarks/robocasa365/setup_env.sh
+bash benchmarks/robocasa365/setup_env.sh
 ```
 
-Set `ROBOCASA365_DOWNLOAD_ASSETS=0` only when assets are already available or
-when intentionally preparing dependencies first. Then run the preflight from
-weakest to strongest:
+Verify (`roundtrip` also needs the server from section 2):
 
 ```bash
-ROBOCASA365_PYTHON=/path/to/envs/robocasa365/bin/python \
-  bash benchmarks/robocasa365/run_smoke.sh import
-ROBOCASA365_PYTHON=/path/to/envs/robocasa365/bin/python \
-  bash benchmarks/robocasa365/run_smoke.sh env OpenDrawer
+ROBOCASA365_PYTHON=/path/to/miniconda3/envs/robocasa365/bin/python \
+bash benchmarks/robocasa365/run_smoke.sh env OpenDrawer    # also: import | roundtrip
 ```
 
-## 2. Manual server and client startup
+<details>
+<summary><b>What the script pins (details)</b></summary>
 
-Start the server in the OpenWAM environment:
+- robocasa `a07e365c958c4216cd6bbd5f30b47f09a65c6f00` (v1.0.1, includes the official 1.5× horizon update); robosuite `5ce6643f3092639d08f7b0f90ed1c6a84f50552c`. Setup errors on any mismatch.
+- Python 3.11, `mujoco==3.3.1`, `numpy==2.2.5`, `websockets==15.0.1`; asserts a registered `robocasa/*` gym env.
+- `ROBOCASA365_DOWNLOAD_ASSETS=0` skips the asset download (run robocasa's downloader later).
+- EGL env vars are exported by the launch wrappers as overridable defaults.
+
+</details>
+
+## 2. Start the Policy Server
 
 ```bash
-bash scripts/deploy.sh \
-  --ckpt-dir /path/to/robocasa365_checkpoint \
-  --ckpt-name checkpoint_step_10000.safetensors \
-  --device cuda:0 --port 8848
+python scripts/download_assets/download_openwam_checkpoints.py
+# menu: OpenWAM_Alpha → OpenWAM-Alpha-Sim-RoboCasa365
 ```
 
-Optionally verify the client/server wire path without creating a simulator:
+Run from the repo root — the checkpoint lands in `assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-RoboCasa365` (or use a checkpoint you trained yourself). Then:
 
 ```bash
-ROBOCASA365_PYTHON=/path/to/envs/robocasa365/bin/python \
-  bash benchmarks/robocasa365/run_smoke.sh roundtrip
+bash scripts/deploy.sh assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-RoboCasa365
 ```
 
-Then run one task:
+WebSocket port 8848 by default (`--port` to change). Keep it running.
+
+## 3. Run the Evaluation
+
+Single task (args: task, split, port, host):
 
 ```bash
-ROBOCASA365_PYTHON=/path/to/robocasa/env/bin/python \
-  bash benchmarks/robocasa365/single_eval.sh OpenDrawer target 8848 127.0.0.1
+ROBOCASA365_PYTHON=/path/to/miniconda3/envs/robocasa365/bin/python \
+bash benchmarks/robocasa365/single_eval.sh OpenDrawer pretrain 8848 127.0.0.1
 ```
 
-For the official target list:
+Official 50-task target list (18 atomic + 32 composite) with a CSV summary:
 
 ```bash
-ROBOCASA365_PYTHON=/path/to/robocasa/env/bin/python \
-  bash benchmarks/robocasa365/multi_eval.sh target
+ROBOCASA365_PYTHON=/path/to/miniconda3/envs/robocasa365/bin/python \
+bash benchmarks/robocasa365/multi_eval.sh --out ./results_robocasa365 target
 ```
 
-Smoke checks:
+Or fully managed (starts the server, runs the tasks, stops the server; requires `setsid`):
 
 ```bash
-ROBOCASA365_PYTHON=... bash benchmarks/robocasa365/run_smoke.sh import
-ROBOCASA365_PYTHON=... bash benchmarks/robocasa365/run_smoke.sh env OpenDrawer
-ROBOCASA365_PYTHON=... bash benchmarks/robocasa365/run_smoke.sh roundtrip
+SERVER_PYTHON=/path/to/miniconda3/envs/openwam/bin/python \
+ROBOCASA365_PYTHON=/path/to/miniconda3/envs/robocasa365/bin/python \
+bash benchmarks/robocasa365/run_eval.sh \
+  assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-RoboCasa365 checkpoint_step_10000.safetensors target
 ```
 
-Set `debug: true` in `policy_config.yml` to write per-step camera, state19, and
-native action12 inspection bundles.
+<details>
+<summary><b>Notes & troubleshooting</b></summary>
 
-## 3. Managed end-to-end evaluation
+- The server's ping must advertise representation `robocasa365` — the client hard-fails otherwise. The released checkpoint matches; your own must be trained on the robocasa365 conversion.
+- Rollout horizons come from robocasa's official task registry at runtime; leave `max_steps_override: null` in `policy_config.yml` for benchmark runs.
+- Client defaults live in `benchmarks/robocasa365/policy_config.yml` (5 trials/task, `pretrain` split). Splits: `pretrain` = training-distribution kitchens (layouts/styles 11-60), `target` = the official 10 held-out evaluation kitchens, `all` = everything; pass the split as arg 2 / `--split` / `SPLIT=` to switch. CLI flags and `ROBOCASA365_PORT` / `ROBOCASA365_POLICY_HOST` override; `ROBOCASA365_POLICY_CONFIG` points at a custom file.
+- `multi_eval.sh` tasks: literal names, `target`/`all` (expands `target_tasks.txt`), or a file; per-task success rates aggregate into `<out>/summary_<split>.csv`.
+- `run_eval.sh` requires an explicit checkpoint filename (substitute your actual `checkpoint_step_*.safetensors`) and writes `server.log` / `client.log` / `tasks/summary_<split>.csv` under `outputs/robocasa365/<timestamp>` (override with `OUTPUT_DIR`); `scripts/deploy.sh` alone may omit `--ckpt-name` (picks the latest).
 
-`run_eval.sh` owns the complete lifecycle for one policy server: it starts the
-server, waits for its TCP endpoint, launches the isolated client, evaluates one
-task or the official target list, and stops the server on success, failure, or
-interrupt.
+</details>
 
-One task:
+## 4. Results
 
-```bash
-SERVER_PYTHON=/path/to/openwam/bin/python \
-ROBOCASA365_PYTHON=/path/to/envs/robocasa365/bin/python \
-  bash benchmarks/robocasa365/run_eval.sh \
-    /path/to/checkpoint checkpoint_step_10000.safetensors OpenDrawer
-```
+Scores from the OpenWAM paper. **Bold** = best, <u>underline</u> = second best; Type distinguishes WAM vs VLA.
 
-All official target tasks:
-
-```bash
-SERVER_PYTHON=/path/to/openwam/bin/python \
-ROBOCASA365_PYTHON=/path/to/envs/robocasa365/bin/python \
-OUTPUT_DIR=outputs/robocasa365/full \
-  bash benchmarks/robocasa365/run_eval.sh \
-    /path/to/checkpoint checkpoint_step_10000.safetensors target
-```
-
-Useful overrides are `SERVER_DEVICE`, `HOST`, `PORT`, `SPLIT`,
-`SERVER_START_TIMEOUT`, `OUTPUT_DIR`, and `ROBOCASA365_POLICY_CONFIG`. Server
-and client logs are preserved under `OUTPUT_DIR`; multi-task evaluation also
-writes `tasks/summary_<split>.csv`.
-
-The rollout horizon is read directly from RoboCasa's official
-`robocasa.utils.dataset_registry_utils.get_task_horizon(task)` registry. Leave
-`max_steps_override: null` for benchmark evaluation; set it only to deliberately
-shorten a smoke/debug run. A successful `info["success"]` terminates the episode,
-matching the official RoboCasa evaluators.
-
-## Training data
-
-The default dataloader config reads the two independent converted repos:
-
-```text
-/path/to/benchmark_data/robocasa365/robocasa365-pretrain-atomic
-/path/to/benchmark_data/robocasa365/robocasa365-pretrain-composite
-```
-
-Both have identical LeRobot v3 schemas. The shared statistics file is
-`/path/to/benchmark_data/robocasa365/robocasa365_multitask_compact_stats.npy`.
+| Method | Type | Atomic | Comp.-Seen | Comp.-Unseen | Avg |
+|---|---|---:|---:|---:|---:|
+| Diffusion Policy | VLA | 15.7 | 0.2 | 1.3 | 6.1 |
+| π₀ | VLA | 36.3 | 5.2 | 0.7 | 15.0 |
+| π₀.₅ | VLA | 39.6 | 7.1 | 1.2 | 16.9 |
+| GR00T-N1.5 | VLA | 50.7 | 14.8 | 2.7 | 23.9 |
+| Qwen-RobotManip | VLA | 68.6 | 20.1 | <u>14.9</u> | 35.9 |
+| RLDX-1 | VLA | 67.6 | 27.9 | 8.5 | 36.0 |
+| Xiaomi-Robotics-1 | VLA | **80.2** | **57.1** | **32.1** | **57.4** |
+| GigaWorld-Policy | WAM | 44.4 | 11.8 | 2.9 | 20.7 |
+| ABot-M0.5 | WAM | <u>75.9</u> | <u>38.3</u> | 2.7 | <u>40.4</u> |
+| **OpenWAM-α** | WAM | 69.7 | 32.1 | 8.9 | 38.2 |

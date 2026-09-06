@@ -315,7 +315,6 @@ def test_run_worker_reconnect_discards_stale_actions(monkeypatch):
         south_host="h",
         south_port=1,
         request_timeout=1.0,
-        base_mode="delta",
         no_send_state=False,
         save_process=False,
         client_reinit_retries=2,

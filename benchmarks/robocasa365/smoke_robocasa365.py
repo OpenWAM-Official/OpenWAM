@@ -93,7 +93,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["import", "env", "roundtrip"], default="import")
     parser.add_argument("--task", default=os.environ.get("ROBOCASA365_SMOKE_TASK", "OpenDrawer"))
-    parser.add_argument("--split", default=os.environ.get("ROBOCASA365_SMOKE_SPLIT", "target"))
+    parser.add_argument("--split", default=os.environ.get("ROBOCASA365_SMOKE_SPLIT", "pretrain"))
     parser.add_argument("--steps", type=int, default=int(os.environ.get("ROBOCASA365_SMOKE_STEPS", "1")))
     parser.add_argument("--host", default=os.environ.get("ROBOCASA365_POLICY_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("ROBOCASA365_PORT", "8848")))

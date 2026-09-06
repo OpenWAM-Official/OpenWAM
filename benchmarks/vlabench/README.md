@@ -1,276 +1,102 @@
-# VLABench Benchmark Evaluation
+# VLABench Evaluation
 
-Closed-loop evaluation on [VLABench](https://github.com/OpenMOSS/VLABench)
-(ICCV 2025) against a running OpenWAM policy server.
+Two processes: the **OpenWAM policy server** (this repo's env, holds the model) and the **VLABench client** (its own env). They talk over WebSocket ([wire protocol](../README.md)), so the two environments never interfere.
 
-VLABench is a MuJoCo/dm_control benchmark for language-conditioned manipulation
-on a Franka Panda. This client drives its `Evaluator` and speaks the OpenWAM
-WebSocket protocol; the model, checkpoint and action denormalization all stay
-server-side.
+Commands below assume conda at `/path/to/miniconda3` and the VLABench checkout at `/path/to/VLABench` — substitute your actual paths.
 
-**Nothing in the VLABench repo needs to be modified.** The adapter duck-types
-VLABench's `Policy` interface (`name` / `control_mode` / `reset` / `predict`)
-and imports nothing from it, so any checkout works.
+## 1. Environment Setup
 
-## Files
-
-| File | Description |
-|---|---|
-| `openwam2vlabench_interface.py` | `OpenWAMVLABenchPolicy` — WebSocket adapter from VLABench observations to OpenWAM server payloads. |
-| `single_eval.py` | Run one task (or one whole track) against an OpenWAM policy server; drives VLABench's `Evaluator`. |
-| `single_eval.sh` | Shell wrapper; patches host/port/task/track/episodes at runtime. |
-| `multi_eval.sh` | Fan tasks x tracks across GPUs, then merge per-job results. |
-| `smoke_vlabench.py` | Preflight: `env` / `loop` checks. No GPU, checkpoint or server needed. |
-| `run_smoke.sh` | Smoke launcher. |
-| `policy_config.yml` | Eval client config template. |
-
-Conversions live in [`benchmarks/utils/action_conversion.py`](../utils/action_conversion.py)
-(`vlabench_obs_to_eef10`, `eef10_to_vlabench_ee`, `rot6d_to_euler_xyz`) and are
-covered by [`tests/benchmarks/test_vlabench_bridge.py`](../../tests/benchmarks/test_vlabench_bridge.py)
-— pure numpy, no simulator needed.
-
-## Setup
-
-VLABench pins `numpy==1.25.0`, `mujoco==3.2.2`, `dm_control==1.0.22`, so it needs
-its own environment, separate from OpenWAM's:
+VLABench pins `numpy==1.25.0` / `mujoco==3.2.2` / `dm_control==1.0.22` — a separate env is mandatory:
 
 ```bash
-conda create -n vlabench python=3.10 && conda activate vlabench
-git clone https://github.com/OpenMOSS/VLABench.git && cd VLABench
+/path/to/miniconda3/bin/conda create -n vlabench python=3.10 -y
+conda activate vlabench
+git clone https://github.com/OpenMOSS/VLABench.git /path/to/VLABench && cd /path/to/VLABench
 pip install -r requirements.txt && pip install -e .
-python scripts/download_assets.py        # ~17 GB
+python scripts/download_assets.py            # ~17 GB of scene/object assets
+pip install numpy Pillow websockets          # the only extras the OpenWAM client needs
 ```
 
-The client needs only `numpy`, `Pillow` and `websockets` on top of that.
-
-## Training Data
-
-The `vlabench` dataloader consumes the official primitive finetune release —
-LeRobot v3 parquet + AV1 MP4, 5000 episodes / 575,101 frames / 128 instruction
-variants, ~13 GB:
+Verify (`env` needs no GPU/checkpoint/server):
 
 ```bash
-hf download VLABench/vlabench_primitive_ft_lerobot_video \
-  --repo-type dataset \
-  --local-dir /path/to/vlabench_primitive_ft_lerobot_video
+VLABENCH_PATH=/path/to/VLABench VLABENCH_PYTHON=/path/to/miniconda3/envs/vlabench/bin/python \
+bash benchmarks/vlabench/run_smoke.sh env select_fruit
 ```
 
-> Not `VLABench/vlabench_primitive_ft_dataset` — that redirects to
-> `VLABench/raw_primitive_datasets`, the pre-conversion tarballs, which this
-> reader cannot read.
+<details>
+<summary><b>Constraints (details)</b></summary>
 
-`configs/dataloader/vlabench.yaml` ships `dataset_dir: /TODO/...` as a
-placeholder (per CONTRIBUTING §Config Change Policy machine-specific mounts do
-not belong in shared configs), so point it at your copy with a Hydra override.
+- No commit pin needed — the adapter imports nothing from VLABench. Caveats: `track_5` seeded episodes reproduce only per-commit, and a few tasks fail to instantiate on current `main`.
+- OS packages for EGL: `libglu1-mesa`, `libgl1-mesa-dri`, `libgl1-mesa-glx`. `MUJOCO_GL=egl` is exported by the launch scripts.
+- `VLABENCH_PATH` is required by every command below; `VLABENCH_PYTHON` defaults to `python` on PATH.
+- `run_smoke.sh loop select_fruit` runs a full closed loop against an in-process mock (append `8 127.0.0.1:8848` to use a real server).
 
-Normalization statistics are read from `<dataset_dir>/meta/eef_stats.json` and
-are **not** auto-computed — generate them once before the first run:
+</details>
+
+## 2. Start the Policy Server
 
 ```bash
-python -m openwam.dataloader.utils.stats_computation.vlabench_stats_computation \
-  --dataset-dir /path/to/vlabench_primitive_ft_lerobot_video
+python scripts/download_assets/download_openwam_checkpoints.py
+# menu: OpenWAM_Alpha → OpenWAM-Alpha-Sim-VLABench
 ```
 
-Add `--dry-run` to print the table without writing. The rot6d dims are pinned to
-identity so normalization is a pass-through on the rotation representation; the
-reader warns loudly if it loads a stats file that predates that pin.
-
-Finetuning from the pretrained mixture (the 10 raw EEF dims land on slots 0-9 of
-the unified 80-D space, which are pretrained semantic dims):
+Run from the repo root — the checkpoint lands in `assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-VLABench` (or use a checkpoint you trained yourself). Then:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NPROC_PER_NODE=8 bash scripts/train.sh \
-  dataloader=vlabench \
-  dataloader.dataset_dir=/path/to/vlabench_primitive_ft_lerobot_video \
-  training.finetune_ckpt_path=/path/to/OpenWAM_Pretrained \
-  training.num_epochs=null training.max_steps=6000 \
-  training.batch_size=24 training.output_path=/path/to/output
+bash scripts/deploy.sh assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-VLABench
 ```
 
-The resulting checkpoint is self-contained (`config.yaml` + `tokenizer/` +
-`normalization_stats.npy`), so `scripts/deploy.sh` below needs nothing else.
+WebSocket port 8848 by default (`--port` to change). For the multi-GPU sweep below, start one server per port instead (loop shown there).
 
-## Smoke Tests
+## 3. Run the Evaluation
 
-Preflight the VLABench install and the adapter's observation contract without a
-GPU, a checkpoint or a running server:
+Single task or whole track — args are `<task|all> [track] [n_episodes] [port] [host]`:
 
 ```bash
-VLABENCH_PATH=/path/to/VLABench \
-VLABENCH_PYTHON=/path/to/envs/vlabench/bin/python \
-  bash benchmarks/vlabench/run_smoke.sh env select_fruit
+VLABENCH_PATH=/path/to/VLABench VLABENCH_PYTHON=/path/to/miniconda3/envs/vlabench/bin/python \
+bash benchmarks/vlabench/single_eval.sh select_fruit track_1_in_distribution 50 8848
+
+VLABENCH_PATH=/path/to/VLABench VLABENCH_PYTHON=/path/to/miniconda3/envs/vlabench/bin/python \
+bash benchmarks/vlabench/single_eval.sh all track_2_cross_category 50 8848
 ```
 
-| Mode | Checks |
-|---|---|
-| `env` (default) | Loads one task and asserts the observation contract the adapter depends on: camera count / order, `ee_state`, robot base frame, instruction. |
-| `loop` | `env` plus a full closed loop against an in-process mock OpenWAM server that echoes proprio back as the action (hold-still policy). Pass a `host:port` as argument 4 to drive a real server instead — the cheapest preflight before committing GPUs to a track sweep. |
-
-Smoke knobs:
-
-| Variable | Default | Description |
-|---|---:|---|
-| `VLABENCH_SMOKE_MODE` | `env` | Mode, when not passed as argument 1. |
-| `VLABENCH_SMOKE_TASK` | `select_fruit` | Task to instantiate, when not passed as argument 2. |
-| argument 3 | `8` | Max steps for the `loop` mode rollout. |
-| `VLABENCH_SMOKE_SERVER` | (unset) | Argument 4. `loop` mode only: `host:port` of a REAL server to drive instead of the mock — exercises the wire action width, server-side denormalization and latency. |
-
-## Run
-
-Start a server, then point the client at it:
+Multi-GPU sweep — one server per port first, then `multi_eval.sh [tracks|all] [tasks|all] [n_episodes] [ports]` (parallelism = number of ports):
 
 ```bash
-# 1. server (OpenWAM env)
-bash scripts/deploy.sh /path/to/vlabench_finetuned_ckpt --device cuda:0 --port 8848
-
-# 2. eval (VLABench env)
-VLABENCH_PATH=/path/to/VLABench \
-VLABENCH_PYTHON=/path/to/envs/vlabench/bin/python \
-  bash benchmarks/vlabench/single_eval.sh select_fruit track_1_in_distribution 50 8848
+for i in 0 1 2 3; do
+  CUDA_VISIBLE_DEVICES=$i nohup bash scripts/deploy.sh \
+    assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-VLABench --device cuda:0 --port $((8880+i)) &
+done
+VLABENCH_PATH=/path/to/VLABench VLABENCH_PYTHON=/path/to/miniconda3/envs/vlabench/bin/python \
+bash benchmarks/vlabench/multi_eval.sh all all 50 8880,8881,8882,8883
 ```
 
-`all` in place of the task name runs every task in the track. For a full sweep:
+**One policy server per concurrent simulator** — hard correctness rule: two simulators sharing one port silently corrupt each other's action chunks.
 
-```bash
-VLABENCH_PATH=... VLABENCH_PYTHON=... \
-  bash benchmarks/vlabench/multi_eval.sh all all 50 8848
-```
+<details>
+<summary><b>Notes & troubleshooting</b></summary>
 
-A `single_eval.sh` run writes `<save_dir>/<track>/` — `metrics.json`,
-per-task `detail_info.json`, and `openwam/evaluation_result.json`.
+- Tracks: `track_1_in_distribution`, `track_2_cross_category`, `track_3_common_sense`, `track_4_semantic_instruction`, `track_5_cross_task`, `track_6_unseen_texture`.
+- `track_5` ships no episode config: give `single_eval.sh` an explicit task (not `all`), or let `multi_eval.sh` use `VLABENCH_TRACK5_TASKS` / its default 10-task held-out split.
+- Expected, not bugs: `Failed to converge after 99 steps` (IK giving up; frequent for undertrained ckpts), ~1% `PhysicsError mjWARN_BADQACC` (upstream MuJoCo), `get_intention_score raised KeyError` note (NaN fallback; success/progress survive).
+- Budget 30-60 min per task per process (RGB+depth+segmentation every step, plus IK).
+- `policy_config.yml` is preconfigured for the released checkpoint; use `POLICY_CONFIG_PATH` for a custom copy.
+- Results: `benchmarks/vlabench/_eval_out/` (override `VLABENCH_SAVE_DIR`) — `metrics.json`, per-task `detail_info.json`; `multi_eval.sh` merges into `combined_results.json` with logs under `_eval_out/logs/`.
 
-`multi_eval.sh` gives every job its own `_eval_out/by_task/<task>/<track>/`
-and merges them into `_eval_out/combined_results.json` at the end, printing a
-per-track mean. The isolation is required, not cosmetic: VLABench's `Evaluator`
-updates `metrics.json` with a read-modify-write, so concurrent jobs sharing a
-directory would silently drop each other's results. Per-job logs are under
-`_eval_out/logs/<track>__<task>.log`.
+</details>
 
-> Budget the time: VLABench renders **every** camera's RGB + depth + segmentation
-> each step and solves IK per step. Upstream quotes 30–60 min per task in a
-> single process; 10 tasks x 5 tracks needs the parallel runner.
+## 4. Results
 
-## Evaluation tracks
+Scores from the OpenWAM paper. **Bold** = best, <u>underline</u> = second best; Type distinguishes WAM vs VLA. Column groups: ID = in-distribution, Cat = cross-category, CS = common sense, Ins = semantic instruction, Tex = unseen texture; SR / PS / IS = success rate / progress score / intention score.
 
-Pass the track as the second argument, or set `eval_track` in `policy_config.yml`.
-
-| Track | Measures | Episode source |
-|---|---|---|
-| `track_1_in_distribution` | Task learning on in-domain episodes | frozen config |
-| `track_2_cross_category` | Object category / instance generalization | frozen config |
-| `track_3_common_sense` | Common-sense target description | frozen config |
-| `track_4_semantic_instruction` | Semantically rich instructions | frozen config |
-| `track_5_cross_task` | Skill transfer to held-out tasks | **seeds — see below** |
-| `track_6_unseen_texture` | Unseen backgrounds and table textures | frozen config |
-
-Tracks pin the episode set so runs compare across machines. Setting
-`eval_track: null` falls back to seed-sampled episodes, which upstream advises
-against — *"there is a risk of improperly initialized episodes. We recommend
-using the 'evaluation_tracks' method."*
-
-### track_5 is the open one
-
-VLABench's README lists six dimensions but `configs/evaluation/tracks/` ships
-only five JSONs. Track 5 has none by design: the train/eval task split is the
-user's to choose (*"kept open in this setting, allowing users to choose training
-tasks and evaluation tasks according to their needs"*), so there is nothing
-upstream could freeze — and consequently no published baseline for it.
-
-It therefore runs on seeded episodes (`seed=42+i`, reproducible for a given
-VLABench commit) over a task list you supply. `multi_eval.sh` carries a default
-split for a policy finetuned on the standard 10-task primitive dataset: each
-trained family's `*_spatial` sibling (same objects and motor skill, an
-instruction family never seen in training) plus `select_billiards` and
-`select_ingredient` (unseen object categories). Override with
-`VLABENCH_TRACK5_TASKS=a,b,c`.
-
-`insert_bloom_flower`, `replace_wilted_flower`, `select_painting_by_style`,
-`select_billiards_semantic` and `select_drink_spatial` are excluded because they
-fail to instantiate in VLABench `main` (PhysicsError / `KeyError: 'task'` /
-ConfigManager signature mismatch), not by choice.
-
-Published Track 1 success rates for reference: Pi0-ft 47%, Pi-fast-ft
-(delta chunk) 51.2%, Pi05-ft 40.6%, Pi-fast-ft (relative chunk) 29.1%.
-
-## Contract
-
-Checkpoints come from [`configs/dataloader/vlabench.yaml`](../../configs/dataloader/vlabench.yaml)
-(`unify_action_map: ["0-9"]`), so the wire carries raw **EEF10**
-`[xyz3, rot6d6, grip1]` in both directions — the server scatters the proprio
-into the unified 80-D space and gathers the action back out.
-
-### Cameras
-
-`obs["rgb"]` is `(4, 480, 480, 3)`. Indices verified against the live MuJoCo
-model (names read via `mj_id2name`) and VLABench's LeRobot converter:
-
-| Index | MuJoCo camera | Dataset key | OpenWAM slot |
-|---|---|---|---|
-| 0 | `right` | `second_image` | `right_wrist_camera` |
-| 1 | `left` | — | unused |
-| 2 | `forward` | `image` | `head_camera` |
-| 3 | `franka/Franka_wrist_cam` | `wrist_image` | `left_wrist_camera` |
-
-### Frames
-
-Training data is in the **robot base** frame — VLABench's converter subtracts
-the base position from the recorded world pose. VLABench's evaluator runs IK on
-an absolute **world** target. So the client subtracts on the way in and adds
-back on the way out, reading the live base from `obs["robot_frame"]` rather
-than assuming the converter's `[0, -0.4, 0.78]` fallback.
-
-### Gripper: the polarity trap
-
-State and action use **opposite** gripper polarity in the VLABench dataset
-(measured correlation across the corpus: **-0.93**):
-
-- **State `1 = closed`.** `ee_state[7]` comes from `robot.get_ee_open_state()`,
-  which for the Franka returns `True` when the fingers are *closed* — an
-  acknowledged upstream bug
-  ([`franka.py:57`](https://github.com/OpenMOSS/VLABench/blob/main/VLABench/robots/single_arm/franka.py)
-  carries the comment `# BUG: should be False`; the WidowX implementation has
-  the correct polarity).
-- **Action `1 = open`.** The converter binarizes the commanded finger width with
-  `> 0.03` against a `0.04 m` open span.
-
-The client forwards the proprio **verbatim** and thresholds the action with
-`>= 0.5 -> open`. Do not "fix" the state side: the eval env reads the same buggy
-accessor the training data was recorded through, so the inversion cancels, and
-correcting it here would take the policy off-distribution. Both
-`gripper_open_threshold` and `gripper_open_width` are config fields if a future
-upstream fix changes this.
-
-### Chunking
-
-None client-side. The server buffers action chunks internally — one obs in, one
-action out. (The upstream `openpi` and `lingbot_va` adapters keep their own
-`action_plan` deque; this one does not need to.)
-
-## Notes
-
-- `WARNING:absl:Failed to converge after 99 steps` during rollout is expected,
-  not a bug: it is VLABench's IK giving up when the model commands a pose
-  outside the arm's working envelope. An undertrained checkpoint will produce a
-  lot of it.
-- `single_eval.py` runtime-patches `LM4ManipDMEnv.get_intention_score` to return
-  NaN on `KeyError` (`patch_intention_score_keyerror`). Without it, tasks whose
-  target is resolved positionally lose *entire episodes*: the evaluator calls
-  `get_intention_score()` after the rollout but before recording
-  `info["success"]`, `reset_intention_distance` never keyed the positionally-
-  resolved target (`tasks/dm_task.py:353`), and the per-episode `except` in
-  `Evaluator.evaluate` then discards a finished, possibly successful rollout.
-  This wiped all 50 episodes of `select_poker_spatial` on the first attempt.
-  Requesting only `success_rate` does not avoid it — the call is unconditional.
-  NaN rather than 0.0 keeps the loss confined to `intention_score`, since
-  `compute_metric` averages each metric independently.
-- A small number of episodes still die to `PhysicsError: mjWARN_BADQACC`
-  (~1% on the track_5 task set). That is upstream MuJoCo instability, flagged in
-  VLABench's own source (`# BUG some episodes are unstable and lead to crash`),
-  and is not recoverable client-side.
-- VLABench's own `sh/evaluation/example_multi_gpu_eval.sh` parses `--track` /
-  `--task` into `TRACK_OPT` / `TASK_OPT` but then loops over the never-defined
-  `${TRACKS[@]}` / `${TASKS[@]}` (along with undefined `CKPT` and `job_idx`), so
-  its first loop body never executes. `multi_eval.sh` here is the working
-  equivalent.
-- Headless rendering needs `MUJOCO_GL=egl` (the scripts set it) plus
-  `libglu1-mesa` / `libgl1-mesa-dri` / `libgl1-mesa-glx`.
+| Method | Type | ID SR | ID PS | ID IS | Cat SR | Cat PS | Cat IS | CS SR | CS PS | CS IS | Ins SR | Ins PS | Ins IS | Tex SR | Tex PS | Tex IS | Avg SR | Avg PS | Avg IS |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| π₀ | VLA | 47.0 | 62.7 | 67.8 | 21.2 | 33.6 | 44.0 | 29.1 | 43.0 | 54.9 | 17.3 | 38.7 | 58.0 | 32.2 | 42.5 | 50.6 | 29.4 | 44.1 | 55.0 |
+| LoHo-Manip | VLA | 54.0 | - | - | 23.0 | - | - | 36.0 | - | - | 42.0 | - | - | 39.0 | - | - | 39.0 | - | - |
+| ACoT-VLA | VLA | - | 66.1 | 79.8 | - | 38.9 | <u>54.1</u> | - | 37.8 | 52.3 | - | 39.6 | 56.8 | - | 54.6 | 74.6 | - | 47.4 | 63.5 |
+| π₀.₅ | VLA | 65.4 | 77.8 | 80.4 | 38.2 | 49.7 | 52.0 | 43.9 | 57.3 | <u>60.0</u> | 48.2 | 64.2 | 67.0 | 44.9 | 62.3 | 65.0 | 48.1 | 62.3 | 64.9 |
+| ERVLA | VLA | 69.7 | 81.1 | <u>84.2</u> | <u>47.0</u> | <u>61.0</u> | **66.4** | 44.0 | 55.0 | 57.2 | <u>58.0</u> | <u>70.2</u> | <u>73.8</u> | 47.4 | 62.3 | 70.6 | 53.2 | 65.9 | <u>70.4</u> |
+| Xiaomi-Robotics-1 | VLA | 75.6 | 85.0 | 79.8 | **53.0** | **66.6** | **66.4** | 48.4 | 58.3 | 58.2 | 55.8 | 66.8 | 70.2 | **62.6** | **74.9** | <u>74.8</u> | **59.1** | **70.3** | 69.9 |
+| Bridge-WA | WAM | <u>78.0</u> | <u>85.8</u> | **85.0** | 23.0 | 28.8 | 39.0 | <u>51.1</u> | <u>64.4</u> | **74.2** | **67.0** | **80.3** | **82.0** | 45.0 | 60.3 | **76.0** | 52.8 | 64.0 | **71.2** |
+| **OpenWAM-α** | WAM | **83.4** | **87.9** | 75.2 | 38.1 | 45.9 | 45.9 | **58.0** | **64.8** | 57.9 | 53.8 | 64.5 | 66.5 | <u>61.4</u> | <u>72.9</u> | 71.6 | <u>58.9</u> | <u>67.2</u> | 63.5 |

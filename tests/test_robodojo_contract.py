@@ -5,12 +5,10 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from benchmarks.robodojo.calibrate_frames import calibrate_and_save, extract_live_calibration
 from openwam.dataloader.robodojo_contract import (
     CALIBRATION_SCHEMA_VERSION,
     EEF20_LAYOUT,
@@ -298,123 +296,3 @@ def test_env_relative_world_and_robot_base_known_transform_and_round_trip():
 def test_frame_helpers_reject_malformed_inputs(call, message):
     with pytest.raises(ValueError, match=message):
         call()
-
-
-class _FakeTensor:
-    def __init__(self, value):
-        self.value = np.asarray(value, dtype=np.float64)
-
-    def detach(self):
-        return self
-
-    def cpu(self):
-        return self
-
-    def numpy(self):
-        return self.value
-
-
-class _FakeRobotManager:
-    def __init__(self, robots, poses):
-        self.robot_list = robots
-        self.poses = poses
-        self.calls = []
-
-    def get_link_pose(self, *, robot, link_name, env_idx_list, is_relative):
-        self.calls.append(
-            {
-                "robot": robot,
-                "link_name": link_name,
-                "env_idx_list": env_idx_list,
-                "is_relative": is_relative,
-            }
-        )
-        return {env_idx_list[0]: self.poses[robot.arm_name]}
-
-
-def _fake_live_env():
-    left = SimpleNamespace(
-        type="target",
-        robot_type="arm",
-        robot_name="x5",
-        arm_name="left_arm",
-    )
-    right = SimpleNamespace(
-        type="target",
-        robot_type="arm",
-        robot_name="x5",
-        arm_name="right_arm",
-    )
-    support = SimpleNamespace(
-        type="support",
-        robot_type="arm",
-        robot_name="franka",
-        arm_name="support_arm0",
-    )
-    poses = {
-        "left_arm": np.array([10.7, 21.6, 32.5, 1.0, 0.0, 0.0, 0.0]),
-        "right_arm": np.array([11.3, 21.6, 32.5, 0.0, 0.0, 0.0, 1.0]),
-    }
-    manager = _FakeRobotManager([left, support, right], poses)
-    env_origins = _FakeTensor(
-        [
-            [0.0, 0.0, 0.0],
-            [11.0, 22.0, 33.0],
-        ]
-    )
-    return SimpleNamespace(robot_manager=manager, env_origins=env_origins), manager
-
-
-def test_live_calibration_reads_world_base_link_and_subtracts_env_origin(tmp_path: Path):
-    env, manager = _fake_live_env()
-
-    calibration = extract_live_calibration(env, env_idx=1)
-
-    np.testing.assert_allclose(
-        calibration["arms"]["left"]["base_pos_relative_to_env_origin"],
-        [-0.3, -0.4, -0.5],
-    )
-    np.testing.assert_allclose(
-        calibration["arms"]["right"]["base_pos_relative_to_env_origin"],
-        [0.3, -0.4, -0.5],
-    )
-    assert calibration["arms"]["left"]["base_quat_wxyz"] == [1.0, 0.0, 0.0, 0.0]
-    assert calibration["arms"]["right"]["base_quat_wxyz"] == [0.0, 0.0, 0.0, 1.0]
-    assert [call["link_name"] for call in manager.calls] == ["base_link", "base_link"]
-    assert [call["env_idx_list"] for call in manager.calls] == [[1], [1]]
-    assert not any(call["is_relative"] for call in manager.calls)
-
-    output = tmp_path / "calibration.json"
-    written = calibrate_and_save(env, output, env_idx=1)
-    assert written == calibration
-    assert load_calibration(output) == calibration
-
-
-def test_live_calibration_rejects_non_dual_x5_target_configuration():
-    env, _ = _fake_live_env()
-    env.robot_manager.robot_list[-1].robot_name = "franka"
-    with pytest.raises(ValueError, match="dual-arm arx_x5.*x5"):
-        extract_live_calibration(env, env_idx=1)
-
-
-def test_live_calibration_falls_back_to_sim_scene_origins():
-    env, _ = _fake_live_env()
-    origins = env.env_origins
-    del env.env_origins
-    env.sim = SimpleNamespace(scene=SimpleNamespace(env_origins=origins))
-
-    calibration = extract_live_calibration(env, env_idx=1)
-
-    np.testing.assert_allclose(
-        calibration["arms"]["left"]["base_pos_relative_to_env_origin"],
-        [-0.3, -0.4, -0.5],
-    )
-
-
-def test_live_calibration_fails_clearly_before_first_reset():
-    env, _ = _fake_live_env()
-    del env.env_origins
-    env.sim = None
-
-    with pytest.raises(RuntimeError, match="reset.*env_origins"):
-        extract_live_calibration(env, env_idx=0)

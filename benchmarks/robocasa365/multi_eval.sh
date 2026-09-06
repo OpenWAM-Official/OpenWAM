@@ -12,7 +12,7 @@
 # Tasks (positional): task names | "all"/"target" (the 50 eval targets in target_tasks.txt) | a file (one
 #                     task per line, '#' comments allowed).
 # Options:
-#   --split <s>   target | pretrain | all   (default: target)
+#   --split <s>   target | pretrain | all   (default: pretrain)
 #   --port  <p>   server WebSocket port      (default: 8848)
 #   --host  <h>   server host                (default: 127.0.0.1)
 #   --out   <dir> results directory          (default: ./results_robocasa365)
@@ -22,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
 
-split="target"; port="8848"; host="127.0.0.1"; out="./results_robocasa365"
+split="pretrain"; port="8848"; host="127.0.0.1"; out="./results_robocasa365"
 tasks=()
 while [[ $# -gt 0 ]]; do
   case "$1" in

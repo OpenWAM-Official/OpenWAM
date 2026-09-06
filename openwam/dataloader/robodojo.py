@@ -6,8 +6,9 @@ RoboDojo_real records native per-arm robot-base poses and must not receive the
 simulation base transform. Dual-X5 constants and the env-origin → robot-base
 / EEF20 helpers live in
 ``openwam.dataloader.robodojo_contract`` and
-``openwam.dataloader.utils.poses``.  The Isaac eval runtime keeps pinned
-copies under ``benchmarks/robodojo/`` and must not import this package.
+``openwam.dataloader.utils.poses``.  The Isaac eval runtime
+(XPolicyLab) keeps pinned copies of these contracts and must not import
+this package.
 This reader applies those transforms, packs raw EEF20, normalizes in that raw
 space, and only then scatters into OpenWAM's shared 80-D action space.
 

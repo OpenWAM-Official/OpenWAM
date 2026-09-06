@@ -23,6 +23,20 @@ WORKFLOW_FILES = {
         "scheduler.py",
         "patches/libero-pytorch-load.patch",
     ),
+    "libero-plus": (
+        "environment.yml",
+        "setup_env.sh",
+        "run_smoke.sh",
+        "smoke_libero.py",
+        "policy_config.yml",
+        "openwam2libero_interface.py",
+        "single_eval.sh",
+        "single_eval.py",
+        "run_eval.sh",
+        "run_all_suites.py",
+        "scheduler.py",
+        "patches/libero-plus-compatibility.patch",
+    ),
     "robocasa365": (
         "environment.yml",
         "setup_env.sh",
@@ -52,6 +66,9 @@ def test_complete_eval_workflow_is_kept_in_tree(benchmark: str) -> None:
         "benchmarks/libero/setup_env.sh",
         "benchmarks/libero/run_smoke.sh",
         "benchmarks/libero/run_eval.sh",
+        "benchmarks/libero-plus/setup_env.sh",
+        "benchmarks/libero-plus/run_smoke.sh",
+        "benchmarks/libero-plus/run_eval.sh",
         "benchmarks/robocasa365/setup_env.sh",
         "benchmarks/robocasa365/run_smoke.sh",
         "benchmarks/robocasa365/run_eval.sh",
@@ -65,6 +82,7 @@ def test_workflow_shell_entrypoints_are_executable(relative_path: str) -> None:
     ("relative_path", "expected_name"),
     [
         ("benchmarks/libero/environment.yml", "libero"),
+        ("benchmarks/libero-plus/environment.yml", "libero-plus"),
         ("benchmarks/robocasa365/environment.yml", "robocasa365"),
     ],
 )
