@@ -4,7 +4,7 @@
 # Structural fields are read from the weights' manifest.json, not yaml.
 
 name: vjepa21
-model_path: /path/to/vjepa21  # [Required] dir with manifest.json + the checkpoint file it names
+model_path: /mnt/data/wangyuran/OpenWAM/assets/visual_encoder_ckpt/vjepa2_1_vitg_384  # [Required] dir with manifest.json + the checkpoint file it names
 
 # Cond (frame-0) latent path; targets always use the video forward:
 #   video (default): dup frame 0 -> 2-frame clip through the video branch

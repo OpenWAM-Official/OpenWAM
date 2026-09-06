@@ -3,7 +3,7 @@
 #   moe:     + expert FFN on action tokens.
 
 defaults:
-  - video_backbone: wan22_ti2v_5b # wan22_ti2v_5b | wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25 | cosmos3_edge
+  - video_backbone: wan22_ti2v_5b # wan22_ti2v_5b | wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25_2b | cosmos3_edge
   - action_backbone: shared_action_backbone
   - _self_
 

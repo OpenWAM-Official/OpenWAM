@@ -2,7 +2,7 @@ type: libero
 
 # Canonical LIBERO dataset. The reader accepts only the native-action
 # conversion metadata (meta/conversion.json).
-dataset_dir: /path/to/libero_data
+dataset_dir: /mnt/data/wangyuran/OpenWAM/assets/benchmark_data/libero
 
 # ── Action space ─────────────────────────────────────────────────────────────
 # Normalize action and achieved state from their separate native-action stats

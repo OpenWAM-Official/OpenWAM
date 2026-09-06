@@ -23,6 +23,7 @@ OpenWAM is not a VLA clone. Its core direction is to use a video world model as 
 - Primary use cases: joint video-action generation, action-only rollout, robot deployment
 -->
 
+<!--
 ## Repository Layout
 
 ```text
@@ -37,9 +38,8 @@ OpenWAM/
 │   │   └── vlm_backbone/     # VlmBackbone ABC, Qwen3-VL backbone
 │   ├── train/         # OpenWAMTrainer, flow-match loss, checkpointing, optimizer utils
 │   └── deploy/        # Policy server, model loader, inference engine, executors, optimizations
-├── scripts/           # Entrypoints: train.sh, deploy.sh, inference tests, SVAE / LAPA tooling
+├── scripts/           # Entrypoints: train.sh, deploy.sh, inference tooling, SVAE / LAPA tooling
 ├── configs/           # Hydra configs for model, dataloader, training, deploy
-├── tests/             # Unit tests
 ├── benchmarks/
 │   ├── robotwin/      # RoboTwin eval client, single / multi eval scripts
 │   ├── libero/        # LIBERO WebSocket eval client
@@ -82,6 +82,25 @@ All architectures are selected via `configs/model/<framework>.yaml` with `archit
 | EBench eval | Supported | GenManip generalist tasks; see `benchmarks/ebench/` |
 | RoboDojo eval | External | Trains in OpenWAM (sim + real); evaluates via [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) |
 | Calvin eval | Planned | Requires external environment setup |
+-->
+
+## OpenWAM Usage Guidance
+
+OpenWAM is configured through composable Hydra YAML files. Select an architecture,
+backbone, dataloader, and runtime behavior by changing configuration values or
+overriding them on the command line. The task guides below are the maintained
+entry points for using and extending the repository:
+
+| Guide | Use it when you want to… |
+|---|---|
+| [Training and deployment](assets/openwam_usage_docs/train-and-deploy.md) | choose a model/dataloader, prepare assets, train, fine-tune, resume, or deploy a policy |
+| [Architecture extension](assets/openwam_usage_docs/architecture-extension.md) | add a video, visual, VLM, action backbone, or WAM architecture |
+| [Benchmark integration](assets/openwam_usage_docs/benchmark-integration.md) | add a dataset reader and connect a benchmark client to the WebSocket protocol |
+| [OpenWAM-α fine-tuning](assets/openwam_usage_docs/openwam-alpha-finetuning.md) | align a downstream action space and fine-tune the released foundation checkpoint |
+
+The sections that follow cover environment installation, model and dataset asset
+downloads, development checks, licensing, and citation. Benchmark-specific
+environment and evaluation details remain in [`benchmarks/`](benchmarks/).
 
 ## Installation
 
@@ -114,7 +133,7 @@ pip install -e .
 ```
 
 <details>
-<summary><b>Cosmos-Predict2.5 Extras (Optional)</b> — needed only for experiments with the <code>cosmos_predict25</code> video backbone</summary>
+<summary><b>Cosmos-Predict2.5 Extras (Optional)</b> — needed only for experiments with the <code>cosmos_predict25_2b</code> video backbone</summary>
 
 With your environment activated:
 
@@ -229,7 +248,7 @@ this downloader fetches a **finished OpenWAM checkpoint** from our public
 [collections](https://huggingface.co/OpenWAM) — the OpenWAM-Alpha releases or
 the OpenWAM-Study ablations.
 
-If you just want to test or finetune from a
+If you just want to use or finetune from a
 released checkpoint, you can skip the component downloads above entirely:
 every checkpoint directory is self-contained and deploys as-is, or serves as
 a finetuning start by setting `training.finetune_ckpt_path` in
@@ -245,145 +264,7 @@ Checkpoints are saved under `assets/openwam_ckpt/openwam_alpha/` or
 config is rewritten. Deploy one directly with
 `bash scripts/deploy.sh <download_dir>`.
 
-## Quick Start
 
-### 1. Training
-
-Training uses Hydra composition rooted at `configs/train.yaml`; all fields are overridable on the CLI. Quick debug run (20 steps, single task, full pipeline end-to-end):
-
-```bash
-bash scripts/train.sh \
-  dataloader.dataset_dir=/path/to/robotwin_2_0/dataset \
-  dataloader.task_name=adjust_bottle \
-  dataloader.variant=clean_50 \
-  training.debug=true \
-  training.batch_size=1 \
-  training.output_path=/path/to/output_dir
-```
-
-Drop `training.debug=true` for a full run. Loss weights (`lambda_video` / `lambda_action`) live in `configs/train.yaml`; each architecture's frozen pretrained components are its `configs/model/*.yaml` top-level `freeze:` list.
-
-**Architecture** is picked via `model=<framework>` (`dual_system` | `single_system` | `tri_system`) and `model.architecture.variant` (see the [Architectures](#architectures) table).
-
-**Video backbone** is a Hydra group composed under each framework yaml (default `wan22_ti2v_5b`). Switch via `model/video_backbone=`:
-
-```bash
-bash scripts/train.sh model=dual_system \
-    model/video_backbone=wan21_vace_1_3b
-```
-
-Available groups: `wan22_ti2v_5b` (Wan2.2-TI2V-5B, default), `wan21_vace_1_3b` (Wan2.1-VACE-1.3B), `wan21_i2v_14b_480p` (Wan2.1-I2V-14B-480P), `cosmos_predict25`, `cosmos3_edge` (Cosmos3-Edge 4B). Each group ships its own `model_path`; override `model.video_backbone.model_path=` only to point at a different weights dir. ActionDiT geometry (`num_heads`, `head_dim`, `video_dim`, `num_layers`) is auto-resolved from the loaded backbone — no need to mirror it in the yaml; ActionDiT depth then follows `bridge_layers` / `bridge_interval`.
-
-> **Wan:** `video_backbone.name` only drives registry dispatch — the loaded weights are decided entirely by `video_backbone.model_path`. Override **both** together; the builder logs a WARNING (not an error) on a mismatched `(name, model_path)`.
->
-> **Cosmos-Predict2.5:** requires the optional cosmos extras — see [Installation](#installation). `name` is validated (only `cosmos_predict25_2b` today; others raise), and the weights are located by `model_path` (bundle root) **plus** `model_variant` (e.g. `base/post-trained`) — so for cosmos both `model_path` and `model_variant` are load-bearing, not `name`. The action-side `text_dim` auto-derives from the backbone (1024), so no manual override is needed.
->
-> **Cosmos3-Edge:** `name` is validated (only `cosmos3_edge`); weights load from the diffusers-style bundle at `model_path` (`transformer/` + `vae/` + `text_tokenizer/`, modeling code vendored under `cosmos3/_vendor/`). No external text encoder — the bundled tokenizer + the frozen und text stream encode prompts inline, and `text_dim` auto-derives (2048), so `joint_cross_attn` needs no action_backbone overrides. Supported variants: `joint_cross_attn`, `joint_self_attn`, `idm`, and `single_system`/{`vanilla`,`moe`} (`tri_system` is rejected — its driver does not widen the joint mask for the und prefix K/V). Launch with `bash scripts/train.sh model=dual_system model/video_backbone=cosmos3_edge`.
-
-Distributed-training settings, including mixed precision and the DeepSpeed ZeRO stage, live under `training` in `configs/train.yaml` and can be overridden through Hydra CLI arguments.
-
-### 2. Deployment
-
-Deploy a trained checkpoint as a WebSocket policy server:
-
-```bash
-bash scripts/deploy.sh /path/to/checkpoint_dir
-```
-
-To serve one checkpoint from several GPUs at once, set `NUM_GPUS` — GPU `i` gets port `PORT_BASE + i` (default base 8848) and logs under `logs/deploy_gpu*.log`; Ctrl+C stops the whole fleet (`PORT_BASE`, `GPU_START`, `LOG_DIR` are also overridable):
-
-```bash
-NUM_GPUS=8 bash scripts/deploy.sh /path/to/checkpoint_dir
-```
-
-This reads `configs/deploy.yaml` for base settings and the `config.yaml` saved inside the checkpoint for model architecture. The latest `checkpoint_step_*.safetensors` is loaded automatically; use `--ckpt-name` to pin one.
-
-`scripts/deploy.py` and the package entrypoint (`openwam-serve` / `python -m openwam.deploy.server`) both load via the same `load_from_checkpoint_dir` path, merging deploy overrides on top of the saved training config.
-
-#### Self-contained checkpoints
-
-Checkpoints are deployable from their directory alone. During training, rank 0 saves:
-
-- `checkpoint_step_*.safetensors` — full model weights.
-- `config.yaml` — full training config, including video-backbone component specs when `model.video_backbone.model_path` was readable.
-- `normalization_stats.npy` — action normalization stats; when `dataloader.normalize_mode` is enabled, deploy uses them to normalize incoming state and unnormalize returned actions.
-- `tokenizer/google/umt5-xxl/` — copied from the Wan directory so deploy needs no access to the original model path.
-
-Deploy resolves the video backbone from the embedded component specs first (tokenizer from `<ckpt_dir>/tokenizer/`), falling back to `model.video_backbone.model_path` if still accessible. A checkpoint with neither is not deployable.
-
-#### Configuration
-
-`configs/deploy.yaml` is the central config. Every `inference.*` field has a same-name CLI override:
-
-```yaml
-device: cuda:0
-server: { host: "0.0.0.0", port: 8848 }
-
-inference:
-  denoise_steps: 10             # denoising steps
-  denoise_mode: sync            # denoising trajectory: sync | async
-  lead_modality: video          # async denoising only: action | video
-  variance_shift_alpha: 1.0     # async denoising only: lead curve shift, >= 1
-  linear_offset: 0.0            # async denoising only: lag delay, 0 <= value < 1
-  inference_mode: sync          # inference executor: sync | async
-  inference_horizon: null       # both executors: actions per chunk; null = full generated chunk
-  inference_delay_steps: null   # async executor only: expected latency in action steps
-
-optimization:
-  decode_video: false     # false = actions-only (skip VAE decode, faster)
-  dit_cache: { enabled: false, cosine_threshold: 0.99, max_skips: 3 }
-  compile: { enabled: true }
-  prompt_embed_cache: { maxsize: 32 }
-```
-
-`denoise_mode` selects the video/action trajectory within one denoising pass. `linear_offset` is an inference-time lag delay. `inference_mode` independently selects the sync or background-prefetch executor, while `inference_horizon` bounds the number of actions consumed from each generated chunk in either mode. Passing `--denoise-mode sync` or `--inference-mode sync` resets that axis's async-only fields to their defaults, so an async-tuned deploy yaml runs as the sync baseline without unsetting each field; supplying an async-only flag with a nontrivial value alongside `sync` is still an error.
-
-Compile paths are selected from the checkpoint architecture. On dual-system architectures the first request may carry `torch.compile` warmup latency; use `--compile-enabled false` to run eager.
-
-Common per-launch CLI overrides:
-
-```bash
-bash scripts/deploy.sh /path/to/checkpoint_dir \
-  --device cuda:1 --port 9000 \
-  --denoise-steps 10 --denoise-mode sync \
-  --compile-enabled false \
-  --ckpt-name checkpoint_step_10000.safetensors
-```
-
-All flags are optional; yaml values apply when a flag is absent. Optimization settings (`decode_video`, `dit_cache.*`, `compile.*`, `prompt_embed_cache.*`) are yaml-only — edit `configs/deploy.yaml` to change them.
-
-#### WebSocket messages
-
-- `{"type": "obs", ...}` — send 3-camera `images` dict, the prompt (forwarded to the model verbatim; wrap per your checkpoint's template), optional raw `state`; receive an action in the checkpoint's deploy scale (unnormalized to physical units for normalized checkpoints).
-- `{"type": "reset"}` — reset policy state between episodes.
-- `{"type": "ping"}` — liveness check; server replies `{"type": "pong"}`.
-
-See [benchmarks/README.md](benchmarks/README.md) for the full client payload contract.
-
-### 3. Testing the Server
-
-The client always sends a 3-camera payload (head required, wrists optional); the server reads the checkpoint's `config.yaml` and dispatches to single- or multi-view preprocessing. Test scripts send a zero `state` vector by default (`--state-dim 20`); pass real proprioception with `--state` / `--state-file`, or `--no-state` for checkpoints without proprioceptive conditioning.
-
-```bash
-# Smoke test with 3 random images (no files needed)
-python scripts/inference_test/inference_single_test.py --test
-
-# With real images
-python scripts/inference_test/inference_single_test.py \
-  --server ws://127.0.0.1:8848 \
-  --head-camera /path/to/head.jpg \
-  --left-wrist-camera /path/to/left.jpg \
-  --right-wrist-camera /path/to/right.jpg \
-  --prompt "pick up the bottle"
-```
-
-The server chunks actions internally: the first call runs full inference (slow), subsequent calls pop cached actions (<10ms), and re-inference triggers when the buffer empties.
-
-### 4. Benchmarks
-
-Evaluation adapters live under `benchmarks/`. Eval scripts connect to an **already-running** policy server over WebSocket — no model weights are needed on the evaluator machine. Each benchmark folder ships a README covering environment setup, server start, and evaluation launch — see e.g. [benchmarks/robotwin/README.md](benchmarks/robotwin/README.md).
-
-Benchmark support status is listed under [Support Status](#benchmarks-and-evaluation) above.
 
 ## Development
 
@@ -402,26 +283,26 @@ pre-commit install
 ### Common commands
 
 ```bash
-make test      # run the core test suite
 make lint      # check code quality with ruff
 make format    # auto-format code
-make check     # compile check + tests
-make all       # lint + tests (full validation)
+make check     # compile check
+make all       # lint and compile check
 ```
 
 ### Before submitting a PR
 
-1. Run `make all` and make sure it passes.
-2. Add tests for new functionality under `tests/`.
-3. Update `README.md` if you changed user-visible behavior.
-4. Keep commits focused: one logical change per commit.
+1. Run make all and resolve any failures.
+2. Update README.md if you changed user-visible behavior.
+3. Keep commits focused: one logical change per commit.
 
+<!--
 ## Acknowledgements
 
 OpenWAM builds on ideas and components from:
 
 - [DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio)
 - [StarVLA](https://github.com/starVLA/starVLA)
+-->
 
 ## License
 

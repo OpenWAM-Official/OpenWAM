@@ -3,7 +3,7 @@ type: robocasa365
 # Umbrella directory holding the independent native-delta RoboCasa365 LeRobot
 # v3 conversions (atomic + composite) one level down; they share one schema and
 # are read as one 300-task collection.
-dataset_dir: /path/to/robocasa365_data
+dataset_dir: /mnt/data/wangyuran/OpenWAM/assets/benchmark_data/robocasa365
 
 # ── Action space ─────────────────────────────────────────────────────────────
 # The converted Parquet columns are row-aligned:

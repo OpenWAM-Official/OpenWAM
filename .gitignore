@@ -203,3 +203,9 @@ uv.lock
 
 # Downloaded checkpoints and benchmark data (populated by scripts/download_assets/)
 assets/
+
+# Versioned user documentation stored with project assets.
+!assets/
+assets/*
+!assets/openwam_usage_docs/
+!assets/openwam_usage_docs/**

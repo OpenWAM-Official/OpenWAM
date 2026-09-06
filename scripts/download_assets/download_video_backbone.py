@@ -99,7 +99,7 @@ MODELS: dict[str, Model] = {
     ),
     "4": Model(
         name="Cosmos-Predict2.5-2B",
-        config="cosmos_predict25.yaml",
+        config="cosmos_predict25_2b.yaml",
         downloads=(
             Download(
                 "nvidia/Cosmos-Predict2.5-2B",

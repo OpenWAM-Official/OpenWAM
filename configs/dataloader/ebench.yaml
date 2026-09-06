@@ -1,5 +1,5 @@
 type: ebench
-dataset_dir: /path/to/ebench_data
+dataset_dir: /mnt/data/wangyuran/OpenWAM/assets/benchmark_data/ebench
 
 # ── Action space ─────────────────────────────────────────────────────────────
 # EBench raw 23-D action/proprio:

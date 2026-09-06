@@ -5,7 +5,7 @@
 # SECURITY: loading passes trust_remote_code=True — only point model_path at trusted directories.
 
 name: dinov3
-model_path: /path/to/DINOv3  # [Required] HF snapshot dir (config.json + modeling_*.py + safetensors); deploy host must read it too
+model_path: /mnt/data/wangyuran/OpenWAM/assets/visual_encoder_ckpt/dinov3-vitb16-pretrain-lvd1689m  # [Required] HF snapshot dir (config.json + modeling_*.py + safetensors); deploy host must read it too
 
 # Optional frozen S-VAE feature reducer (raw embed_dim -> svae_target_dim, e.g. 48
 # to match the Wan VAE z_dim); train via scripts/svae_train/. Leave both null for the raw path.

@@ -2,6 +2,6 @@
 # baseline — no external encoder, no from_scratch. Resolutions 480x832 / 720x1280.
 
 name: wan21_vace_1_3b
-model_path: /path/to/Wan2.1-VACE-1.3B  # [Required] weights dir
+model_path: /mnt/data/wangyuran/OpenWAM/assets/video_backbone_ckpt/Wan2.1-VACE-1.3B  # [Required] weights dir
 
 shift_video: 5.0      # flow-matching α-shift for the video scheduler (train + deploy single source of truth)

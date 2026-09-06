@@ -8,12 +8,12 @@
 # (do NOT add these for joint_self_attn — MoT needs per-layer 16x128 parity).
 
 name: cosmos_predict25_2b
-model_path: /path/to/Cosmos-Predict2.5-2B  # [Required] bundle root; <model_variant>/<uuid>_ema_bf16.pt is globbed inside
+model_path: /mnt/data/wangyuran/OpenWAM/assets/video_backbone_ckpt/Cosmos-Predict2.5-2B  # [Required] bundle root; <model_variant>/<uuid>_ema_bf16.pt is globbed inside
 model_variant: base/post-trained   # base/{pre,post}-trained | base/distilled | auto/multiview | robot/multiview-agibot | robot/action-cond
 
 # Cosmos-Reason1-7B bundle root, run inline as the live text encoder (training
 # only; checkpoints embed it, so deploy needs no external path).
-text_encoder_path: /path/to/Cosmos-Reason1-7B
+text_encoder_path: /mnt/data/wangyuran/OpenWAM/assets/video_backbone_ckpt/Cosmos-Reason1-7B
 
 text_encoder_dropout: 0.0  # CFG dropout: prob of substituting "" for prompts (training only); seed via +model.video_backbone.text_encoder_dropout_seed=<int>
 

@@ -113,7 +113,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
             cfg.setdefault("bridge_interval", 1)
 
         self.vlm_backbone = build_vlm_backbone(
-            _cfg_get(vlm_cfg, "name", "qwen3_vl"),
+            _cfg_get(vlm_cfg, "name", "qwen3_vl_2b"),
             checkpoint_path=_cfg_get(vlm_cfg, "checkpoint_path"),
             dtype=self.dtype,
             load_pretrained=bool(_cfg_get(vlm_cfg, "load_pretrained", True)),
