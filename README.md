@@ -283,7 +283,8 @@ Wan2.2-TI2V-5B video backbone, and the Mutual attention mask.
 
 > **Resource recommendation:** We recommend 8 GPUs with 80 GB VRAM each for
 > training. This configuration supports normal training for all architectures
-> using Wan2.2-5B or smaller video backbones.
+> using Wan2.2-5B or smaller video backbones. More GPUs are better when
+> available and can further improve training throughput.
 
 ### From Scratch Training
 
