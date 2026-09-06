@@ -148,122 +148,80 @@ The script installs the upstream cosmos packages into the active environment and
 
 ## Assets Preparation
 
-### 1. Download the Video Backbone
+The downloaders are interactive. Component downloaders store assets under
+assets/ and update the matching YAML path; the released-checkpoint downloader
+keeps each checkpoint's self-contained config unchanged.
 
-Run the interactive downloader to fetch the checkpoint you need. It saves the
-weights under `assets/video_backbone_ckpt/` (or a directory you choose) and
-points the matching config under `configs/model/video_backbone/` at the
-download automatically:
+### 1. Video Backbone
 
-```bash
+~~~bash
 python scripts/download_assets/download_video_backbone.py
-```
+~~~
 
-Available models: `Wan2.2-TI2V-5B`, `Wan2.1-VACE-1.3B`, `Wan2.1-I2V-14B-480P`,
-`Cosmos-Predict2.5-2B` (HuggingFace only; also fetches `Cosmos-Reason1-7B` as
-its text encoder), and `Cosmos3-Edge` — each available from HuggingFace or
-ModelScope.
+| Backbone | Sources | Notes |
+|---|---|---|
+| Wan2.2-TI2V-5B | Hugging Face, ModelScope | |
+| Wan2.1-VACE-1.3B | Hugging Face, ModelScope | |
+| Wan2.1-I2V-14B-480P | Hugging Face, ModelScope | |
+| Cosmos-Predict2.5-2B | Hugging Face | Also downloads Cosmos-Reason1-7B |
+| Cosmos3-Edge | Hugging Face, ModelScope | |
 
-<details>
-<summary>Example session: downloading Wan2.2-TI2V-5B from HuggingFace</summary>
+Weights are saved under assets/video_backbone_ckpt/ and the selected
+configs/model/video_backbone/ file is updated with the downloaded path.
 
-```text
-$ python scripts/download_assets/download_video_backbone.py
-OpenWAM video-backbone checkpoint downloader
+### 2. Benchmark Data
 
-Storage location
-  Default: /path/to/OpenWAM/assets/video_backbone_ckpt
-Storage path (press Enter for the default):            # press Enter
-Created default directory /path/to/OpenWAM/assets/video_backbone_ckpt
-
-Select the model to download
-  (1) Wan2.2-TI2V-5B
-  (2) Wan2.1-VACE-1.3B
-  (3) Wan2.1-I2V-14B-480P
-  (4) Cosmos-Predict2.5-2B
-  (5) Cosmos3-Edge
-Model number: 1                                        # type 1
-
-Select the download source
-  (1) huggingface
-  (2) modelscope
-Source number: 1                                       # type 1
-
-Wan2.2-TI2V-5B needs about 34.2 GB under /path/to/OpenWAM/assets/video_backbone_ckpt.
-Start the download? [Y/n]                              # press Enter to confirm
-Downloading Wan-AI/Wan2.2-TI2V-5B -> /path/to/OpenWAM/assets/video_backbone_ckpt/Wan2.2-TI2V-5B
-Fetching 23 files: 100%|██████████████████| 23/23 [12:41<00:00, 33.1s/it]
-
-Done. Wan2.2-TI2V-5B is saved under:
-  /path/to/OpenWAM/assets/video_backbone_ckpt/Wan2.2-TI2V-5B
-Updated configs/model/video_backbone/wan22_ti2v_5b.yaml: model_path -> /path/to/OpenWAM/assets/video_backbone_ckpt/Wan2.2-TI2V-5B
-```
-
-Interrupted or partial downloads resume automatically on the next run.
-
-</details>
-
-### 2. Download the Benchmark Data
-
-Run the interactive downloader to fetch the benchmark you need. It saves the
-data under `assets/benchmark_data/<benchmark>/` (or a directory you choose),
-verifies the in-dataset normalization stats (computing them on the spot when
-the source ships none), and points `dataset_dir` in the matching config under
-`configs/dataloader/` at the download automatically:
-
-```bash
+~~~bash
 python scripts/download_assets/download_benchmark_data.py
-```
+~~~
 
-Available benchmarks: `RoboTwin2.0`, `RoboDojo`, `RoboDojo-Real`, `LIBERO`,
-`VLABench`, `EBench`, `RoboCasa365`, `RoboCasa_GR1`. RoboTwin2.0 comes from
-the official upstream zips (`aloha-agilex` embodiment) and is unpacked — with
-the archives cleaned up — automatically.
+Available choices include RoboTwin2.0, RoboDojo, RoboDojo-Real, LIBERO,
+VLABench, EBench, RoboCasa365, and RoboCasa_GR1. Data is saved under
+assets/benchmark_data/<benchmark>/, normalization statistics are prepared when
+needed, and the matching configs/dataloader/ file is updated.
 
-### 3. Download the VLM Backbone (Optional)
+### 3. VLM Backbone (Optional)
 
-Only the `tri_system` architecture consumes a VLM backbone. The downloader
-saves the weights under `assets/vlm_backbone_ckpt/` and updates
-`configs/model/vlm_backbone/` accordingly:
+Required only by tri_system:
 
-```bash
+~~~bash
 python scripts/download_assets/download_vlm_backbone.py
-```
+~~~
 
-### 4. Download the Visual Encoders (Optional)
+Weights are saved under assets/vlm_backbone_ckpt/ and the selected
+configs/model/vlm_backbone/ file is updated.
 
-Only needed for video-backbone variants that plug in an external visual
-encoder (`configs/model/video_backbone/encoder/`). The downloader saves the
-weights under `assets/visual_encoder_ckpt/` and updates the encoder configs
-accordingly:
+### 4. Visual Encoders (Optional)
 
-```bash
+Required only for video backbones that use an external encoder configured under
+configs/model/video_backbone/encoder/:
+
+~~~bash
 python scripts/download_assets/download_visual_encoder.py
-```
+~~~
 
-### 5. Download Released OpenWAM Checkpoints (Optional)
+Weights are saved under assets/visual_encoder_ckpt/ and the selected encoder
+configuration is updated.
 
-Unlike steps 1-4, which fetch the components for training your own model,
-this downloader fetches a **finished OpenWAM checkpoint** from our public
-[collections](https://huggingface.co/OpenWAM) — the OpenWAM-Alpha releases or
-the OpenWAM-Study ablations.
+### 5. Released OpenWAM Checkpoints (Optional)
 
-If you just want to use or finetune from a
-released checkpoint, you can skip the component downloads above entirely:
-every checkpoint directory is self-contained and deploys as-is, or serves as
-a finetuning start by setting `training.finetune_ckpt_path` in
-`configs/train.yaml` to the downloaded path (finetuning still needs the
-benchmark data from step 2):
+Use this downloader to obtain OpenWAM-Alpha releases or OpenWAM-Study
+checkpoints from the OpenWAM collection:
 
-```bash
+~~~bash
 python scripts/download_assets/download_openwam_checkpoints.py
-```
+~~~
 
-Checkpoints are saved under `assets/openwam_ckpt/openwam_alpha/` or
-`assets/openwam_ckpt/openwam_study/<type>/` (or a directory you choose); no
-config is rewritten. Deploy one directly with
-`bash scripts/deploy.sh <download_dir>`.
+Checkpoints are saved under assets/openwam_ckpt/openwam_alpha/ or
+assets/openwam_ckpt/openwam_study/<type>/. Each checkpoint directory contains
+its own config and can be deployed directly with:
 
+~~~bash
+bash scripts/deploy.sh <ckpt_dir_path>
+~~~
+
+For fine-tuning, set training.finetune_ckpt_path in configs/train.yaml to the
+downloaded checkpoint directory. Benchmark data is still required.
 
 
 ## Quick Start
