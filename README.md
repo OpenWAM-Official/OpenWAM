@@ -409,35 +409,6 @@ Installation and Assets Preparation above cover environment setup and model or
 dataset downloads. Benchmark-specific environment and evaluation details remain
 in the benchmarks directory.
 
-## Development
-
-### Dev setup
-
-On top of the base installation, install the dev toolchain and (optionally) the
-pre-commit hooks:
-
-```bash
-pip install -e '.[dev]'
-
-# Optional but recommended: ruff runs automatically on each commit
-pre-commit install
-```
-
-### Common commands
-
-```bash
-make lint      # check code quality with ruff
-make format    # auto-format code
-make check     # compile check
-make all       # lint and compile check
-```
-
-### Before submitting a PR
-
-1. Run make all and resolve any failures.
-2. Update README.md if you changed user-visible behavior.
-3. Keep commits focused: one logical change per commit.
-
 ## License
 
 OpenWAM is released under the [Apache License 2.0](LICENSE).
