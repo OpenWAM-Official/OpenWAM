@@ -281,6 +281,10 @@ Wan2.2-TI2V-5B video backbone, and the Mutual attention mask.
 | Attention mask | mutual | model.architecture.attention_mask_mode |
 | Dataset | libero | [configs/dataloader/libero.yaml](configs/dataloader/libero.yaml) |
 
+> **Resource recommendation:** We recommend 8 GPUs with 80 GB VRAM each for
+> training. This configuration supports normal training for all architectures
+> using Wan2.2-5B or smaller video backbones.
+
 ### From Scratch Training
 
 1. Download LIBERO and let the downloader update its dataloader configuration:
