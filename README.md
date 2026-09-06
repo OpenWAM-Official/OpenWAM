@@ -2,12 +2,16 @@
   <img src="assets/repo_images/openwam_title.png" alt="OpenWAM" width="60%">
 </p>
 
-<p align="center">An Open, Modular Exploration Towards Systematic World–Action Model Pretraining</p>
+<p align="center"><strong>An Open, Modular Exploration Towards Systematic World–Action Model Pretraining</strong></p>
 
 <p align="center">
   <a href="https://openwam-official.github.io/"><img src="https://img.shields.io/badge/Project%20Page-OPENWAM--OFFICIAL.GITHUB.IO-blue?style=for-the-badge&amp;logo=github" alt="Project Page"></a>
   <img src="https://img.shields.io/badge/arXiv-XXXX.XXXXXX-red?style=for-the-badge&amp;logo=arxiv" alt="Technical Report (pending)">
   <a href="https://huggingface.co/OpenWAM"><img src="https://img.shields.io/badge/HuggingFace-Model%20%26%20Data-orange?style=for-the-badge&amp;logo=huggingface" alt="Model &amp; Data on Hugging Face"></a>
+</p>
+
+<p align="center">
+  <img src="assets/repo_images/teaser.jpg" alt="OpenWAM teaser" width="75%">
 </p>
 
 <!--
