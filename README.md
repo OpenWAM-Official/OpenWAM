@@ -98,23 +98,9 @@ All architectures are selected via `configs/model/<framework>.yaml` with `archit
 | Calvin eval | Planned | Requires external environment setup |
 -->
 
-## OpenWAM Usage Guidance
+## News
 
-OpenWAM is configured through composable Hydra YAML files. Select an architecture,
-backbone, dataloader, and runtime behavior by changing configuration values or
-overriding them on the command line. The task guides below are the maintained
-entry points for using and extending the repository:
-
-| Guide | Use it when you want to… |
-|---|---|
-| [Training and deployment](assets/openwam_usage_docs/train-and-deploy.md) | choose a model/dataloader, prepare assets, train, fine-tune, resume, or deploy a policy |
-| [Architecture extension](assets/openwam_usage_docs/architecture-extension.md) | add a video, visual, VLM, action backbone, or WAM architecture |
-| [Benchmark integration](assets/openwam_usage_docs/benchmark-integration.md) | add a dataset reader and connect a benchmark client to the WebSocket protocol |
-| [OpenWAM-α fine-tuning](assets/openwam_usage_docs/openwam-alpha-finetuning.md) | align a downstream action space and fine-tune the released foundation checkpoint |
-
-The sections that follow cover environment installation, model and dataset asset
-downloads, development checks, licensing, and citation. Benchmark-specific
-environment and evaluation details remain in [`benchmarks/`](benchmarks/).
+**[2026/09/06]** 🔥OpenWAM Codebase Release！
 
 ## Installation
 
@@ -279,6 +265,24 @@ config is rewritten. Deploy one directly with
 `bash scripts/deploy.sh <download_dir>`.
 
 
+
+## OpenWAM Usage Guidance
+
+OpenWAM is configured through composable Hydra YAML files. Select an architecture,
+backbone, dataloader, and runtime behavior by changing configuration values or
+overriding them on the command line. The task guides below are the maintained
+entry points for using and extending the repository:
+
+| Guide | Use it when you want to… |
+|---|---|
+| [Training and deployment](assets/openwam_usage_docs/train-and-deploy.md) | choose a model/dataloader, prepare assets, train, fine-tune, resume, or deploy a policy |
+| [Architecture extension](assets/openwam_usage_docs/architecture-extension.md) | add a video, visual, VLM, action backbone, or WAM architecture |
+| [Benchmark integration](assets/openwam_usage_docs/benchmark-integration.md) | add a dataset reader and connect a benchmark client to the WebSocket protocol |
+| [OpenWAM-α fine-tuning](assets/openwam_usage_docs/openwam-alpha-finetuning.md) | align a downstream action space and fine-tune the released foundation checkpoint |
+
+The sections that follow cover environment installation, model and dataset asset
+downloads, development checks, licensing, and citation. Benchmark-specific
+environment and evaluation details remain in [`benchmarks/`](benchmarks/).
 
 ## Development
 
