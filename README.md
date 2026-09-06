@@ -330,14 +330,16 @@ Wan2.2-TI2V-5B video backbone, and the Mutual attention mask.
    ~~~
 
    Keep the server running, then open another terminal and run the two
-   inference helpers:
+   inference helpers. Deployment enables compile by default, so the first
+   inference may take longer while compilation warms up; later requests are
+   typically faster:
 
    ~~~bash
    python scripts/inference_test/inference_single_test.py \
      --server ws://127.0.0.1:8848 --test --state-dim 10
 
    python scripts/inference_test/inference_continuous_test.py \
-     --server ws://127.0.0.1:8848 --test --state-dim 10 -n 3
+     --server ws://127.0.0.1:8848 --test --state-dim 10
    ~~~
 
    The single-request helper checks ping, one prediction, and reset. The
