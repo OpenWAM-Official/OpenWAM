@@ -37,6 +37,24 @@ sys.excepthook = _force_flush_excepthook
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+
+class _StartupNoiseFilter(logging.Filter):
+    # Hide optional compiler probes while keeping warnings and errors visible.
+    _HIDDEN_PREFIXES = ("gcc -pthread ", "NCCL version ")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not (record.name == "root" and message.startswith(self._HIDDEN_PREFIXES))
+
+
+def _install_startup_noise_filter() -> None:
+    # Suppress verbose optional-op probes emitted by DeepSpeed/distutils.
+    noise_filter = _StartupNoiseFilter()
+    root = logging.getLogger()
+    for handler in root.handlers:
+        handler.addFilter(noise_filter)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,7 +71,8 @@ def _build_accelerator(cfg: DictConfig):
     grad_accum = int(t.gradient_accumulation_steps)
     max_grad_norm = getattr(t, "max_grad_norm", None)
     mixed_precision = str(t.mixed_precision)
-    logger.info("mixed_precision = %s (from cfg.training.mixed_precision)", mixed_precision)
+    if os.environ.get("LOCAL_RANK", "0") == "0":
+        logger.info("mixed_precision = %s (from cfg.training.mixed_precision)", mixed_precision)
 
     plugin = accelerate.DeepSpeedPlugin(
         zero_stage=int(t.zero_stage),
@@ -123,6 +142,8 @@ def _train_openwam(cfg: DictConfig) -> None:
 
 @hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="train")
 def main(cfg: DictConfig) -> None:
+    _install_startup_noise_filter()
+
     # Only print on rank 0
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     if local_rank == 0:
