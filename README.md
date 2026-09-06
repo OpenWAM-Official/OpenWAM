@@ -315,6 +315,28 @@ Wan2.2-TI2V-5B video backbone, and the Mutual attention mask.
    Debug outputs use training.output_path, whose default is
    outputs/openwam_checkpoints.
 
+4. Deploy the debug checkpoint and inspect one input-output cycle:
+
+   ~~~bash
+   bash scripts/deploy.sh <debug_ckpt_dir_path>
+   ~~~
+
+   Keep the server running, then open another terminal and run the two
+   inference helpers:
+
+   ~~~bash
+   python scripts/inference_test/inference_single_test.py \
+     --server ws://127.0.0.1:8848 --test
+
+   python scripts/inference_test/inference_continuous_test.py \
+     --server ws://127.0.0.1:8848 --test -n 3
+   ~~~
+
+   The single-request helper checks ping, one prediction, and reset. The
+   continuous helper sends repeated predictions over one connection and
+   reports the returned action dimension and latency. Stop the deployment
+   process after the checks.
+
 ### OpenWAM-α Fine-Tuning
 
 1. Download LIBERO as shown above.
