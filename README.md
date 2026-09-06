@@ -266,6 +266,93 @@ config is rewritten. Deploy one directly with
 
 
 
+## Quick Start
+
+This path uses the DualSystem JointSelfAttention architecture, the
+Wan2.2-TI2V-5B video backbone, and the Mutual attention mask.
+
+| Component | Selection | Configuration |
+|---|---|---|
+| Architecture | dual_system / joint_self_attn | [configs/model/dual_system.yaml](configs/model/dual_system.yaml) |
+| Video backbone | wan22_ti2v_5b | [configs/model/video_backbone/wan22_ti2v_5b.yaml](configs/model/video_backbone/wan22_ti2v_5b.yaml) |
+| Attention mask | mutual | model.architecture.attention_mask_mode |
+| Dataset | libero | [configs/dataloader/libero.yaml](configs/dataloader/libero.yaml) |
+
+### From Scratch Training
+
+1. Download LIBERO and let the downloader update its dataloader configuration:
+
+   ~~~bash
+   python scripts/download_assets/download_benchmark_data.py
+   ~~~
+
+   Select LIBERO in the interactive menu.
+
+2. Download Wan2.2-TI2V-5B:
+
+   ~~~bash
+   python scripts/download_assets/download_video_backbone.py
+   ~~~
+
+   Select Wan2.2-TI2V-5B and the desired model source.
+
+3. Start a debug run with the complete model selection:
+
+   ~~~bash
+   bash scripts/train.sh \
+     dataloader=libero \
+     model=dual_system \
+     model/video_backbone=wan22_ti2v_5b \
+     model.architecture.variant=joint_self_attn \
+     model.architecture.attention_mask_mode=mutual \
+     training.debug=true
+   ~~~
+
+   training.debug=true runs 20 steps, saves at steps 10 and 20, and uses a
+   constant learning rate. Check the run output, then set
+   training.debug=false for normal training. Training defaults and CLI
+   overrides are defined in [configs/train.yaml](configs/train.yaml).
+   Debug outputs use training.output_path, whose default is
+   outputs/openwam_checkpoints.
+
+### OpenWAM-α Fine-Tuning
+
+1. Download LIBERO as shown above.
+
+2. Download the OpenWAM-Alpha foundation checkpoint:
+
+   ~~~bash
+   python scripts/download_assets/download_openwam_checkpoints.py
+   ~~~
+
+   Select OpenWAM_Alpha and OpenWAM-Alpha-Pretrain-Foundation-Model.
+   Keep the resulting directory as <foundation_ckpt_dir_path>.
+
+3. Start fine-tuning from that directory:
+
+   ~~~bash
+   bash scripts/train.sh \
+     dataloader=libero \
+     training.finetune_ckpt_path=<foundation_ckpt_dir_path>
+   ~~~
+
+   The default model configuration already matches the required setup above.
+   You can set the same field in [configs/train.yaml](configs/train.yaml)
+   instead of passing it on the command line. num_frames=33 and
+   video_stride=4 in [configs/dataloader/libero.yaml](configs/dataloader/libero.yaml)
+   produce the 32-step action horizon expected by the sampler; no separate
+   action_chunk override is needed.
+
+4. Deploy the resulting checkpoint directory:
+
+   ~~~bash
+   bash scripts/deploy.sh <ckpt_dir_path>
+   ~~~
+
+   Install and run the LIBERO client according to the
+   [LIBERO evaluation guide](benchmarks/libero/README.md).
+
+
 ## OpenWAM Usage Guidance
 
 OpenWAM is configured through composable Hydra YAML files. Select an architecture,
@@ -280,9 +367,9 @@ entry points for using and extending the repository:
 | [Benchmark integration](assets/openwam_usage_docs/benchmark-integration.md) | add a dataset reader and connect a benchmark client to the WebSocket protocol |
 | [OpenWAM-α fine-tuning](assets/openwam_usage_docs/openwam-alpha-finetuning.md) | align a downstream action space and fine-tune the released foundation checkpoint |
 
-The sections that follow cover environment installation, model and dataset asset
-downloads, development checks, licensing, and citation. Benchmark-specific
-environment and evaluation details remain in [`benchmarks/`](benchmarks/).
+Installation and Assets Preparation above cover environment setup and model or
+dataset downloads. Benchmark-specific environment and evaluation details remain
+in the benchmarks directory.
 
 ## Development
 
