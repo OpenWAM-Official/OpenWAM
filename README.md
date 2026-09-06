@@ -203,7 +203,7 @@ python scripts/download_assets/download_visual_encoder.py
 Weights are saved under assets/visual_encoder_ckpt/ and the selected encoder
 configuration is updated.
 
-### 5. Released OpenWAM Checkpoints (Optional)
+### 5. Released OpenWAM Checkpoints
 
 Use this downloader to obtain OpenWAM-Alpha releases or OpenWAM-Study
 checkpoints from the OpenWAM collection:
@@ -353,9 +353,12 @@ entry points for using and extending the repository:
 | Guide | Use it when you want to… |
 |---|---|
 | [Training and deployment](assets/openwam_usage_docs/train-and-deploy.md) | choose a model/dataloader, prepare assets, train, fine-tune, resume, or deploy a policy |
-| [Architecture extension](assets/openwam_usage_docs/architecture-extension.md) | add a video, visual, VLM, action backbone, or WAM architecture |
-| [Benchmark integration](assets/openwam_usage_docs/benchmark-integration.md) | add a dataset reader and connect a benchmark client to the WebSocket protocol |
-| [OpenWAM-α fine-tuning](assets/openwam_usage_docs/openwam-alpha-finetuning.md) | align a downstream action space and fine-tune the released foundation checkpoint |
+| [Architecture extension](assets/openwam_usage_docs/architecture-extension.md) | extend a video, visual, VLM, action backbone, or WAM architecture |
+| [Benchmark integration](assets/openwam_usage_docs/benchmark-integration.md) | extend a dataloader and connect a benchmark client to the WebSocket protocol |
+| [OpenWAM-α fine-tuning](assets/openwam_usage_docs/openwam-alpha-finetuning.md) | fine-tune the released foundation checkpoint to execute downstream task |
+
+> 💡 **Agent tip:** Pick the guide that matches your task and feed it directly
+> to your agent — less explaining, more building.
 
 Installation and Assets Preparation above cover environment setup and model or
 dataset downloads. Benchmark-specific environment and evaluation details remain
@@ -390,29 +393,14 @@ make all       # lint and compile check
 2. Update README.md if you changed user-visible behavior.
 3. Keep commits focused: one logical change per commit.
 
-<!--
-## Acknowledgements
-
-OpenWAM builds on ideas and components from:
-
-- [DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio)
-- [StarVLA](https://github.com/starVLA/starVLA)
--->
-
 ## License
 
 OpenWAM is released under the [Apache License 2.0](LICENSE).
 
 ## Citation
 
-If you use OpenWAM, please cite the repository directly:
+If you use OpenWAM, please cite:
 
 ```bibtex
-@misc{openwam2026,
-  title        = {OpenWAM: A Modular Open-Source Library for Systematic WAM Training, Inference and Deployment},
-  author       = {OpenWAM Contributors},
-  year         = {2026},
-  url          = {https://github.com/KraHsu/OpenWAM},
-  howpublished = {GitHub repository}
-}
+TODO
 ```
