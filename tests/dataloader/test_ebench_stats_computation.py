@@ -228,7 +228,7 @@ def test_payload_accepted_by_reader_and_unlocks_quantile(bucket, monkeypatch):
     assert out_path == root / "meta" / "ebench_normalization_stats.npy"  # the reader's fixed cache location
     payload = np.load(out_path, allow_pickle=True).item()
     assert payload["pool"] == "action" and payload["source"] == "parquet_scan"
-    assert "q01" in payload["ebench"] and "q99" in payload["ebench"]
+    assert "q01" in payload["eef"] and "q99" in payload["eef"]
 
     # The reader must cache-hit the offline file (fingerprint match), never
     # re-running the scan.
@@ -239,7 +239,7 @@ def test_payload_accepted_by_reader_and_unlocks_quantile(bucket, monkeypatch):
 
     monkeypatch.setattr(stats_mod, "build_and_save_ebench_stats", no_rebuild)
     loaded, path = _load_or_build_stats(
-        [bucket], DELTA_KEYS, action_mode="ebench", dataset_dir=str(root), normalize_mode="quantile"
+        [bucket], DELTA_KEYS, action_mode="eef", dataset_dir=str(root), normalize_mode="quantile"
     )
     assert path == str(out_path)
     np.testing.assert_allclose(loaded["q99"], stats["q99"], atol=1e-6)

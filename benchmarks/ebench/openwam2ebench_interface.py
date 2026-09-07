@@ -1,34 +1,10 @@
-"""EBench (GenManip) eval driver for the OpenWAM Policy Server.
+"""Bridge one GenManip worker to an OpenWAM policy server.
 
-Unlike RoboTwin/RoboCasa365 (where the sim loads our adapter), EBench inverts
-control: the *policy side* is a client that polls the GenManip Isaac Sim eval
-server with ``genmanip_client.EvalClient``. This module is therefore a
-standalone driver — the EvalClient loop on the north side, a
-``benchmarks.utils.WSPolicyClient`` to the OpenWAM policy server on the south
-side::
-
-    GenManip eval server (Isaac Sim / online endpoint, :8087)
-        ▲ EvalClient  (pickle wire; obs down, action dicts up)
-    THIS DRIVER  — one process per worker_id
-        ▼ WSPolicyClient (JSON-WS)
-    OpenWAM policy server (:8848, one server per worker — stateful executor)
-
-Per sim step: obs → (images + wrapped prompt + RAW-23 proprio) → server
-normalizes/infers/denormalizes → RAW-23 physical action → EBench ``ee_pose``
-action dict (GenManip runs cuRobo IK server-side). Single-step ``step()`` only:
-``/step_chunk`` returns just the final obs, but the OpenWAM executor consumes
-one obs per popped action.
-
-Conversions live in ``benchmarks/utils/action_conversion.py`` and mirror the
-trainer's rendering byte-for-byte (pinned by tests/benchmarks/test_ebench_bridge.py).
-(default ``delta``).
-
-Env: the GenManip client env (``pip install -e genmanip-client``) plus
-``numpy, Pillow, websockets>=15``. No torch, no openwam import.
+Each step sends EBench images, prompt, and raw-23 state to OpenWAM, then
+converts the returned action to GenManip's ``ee_pose`` format.
 """
 
-# benchmarks.utils lives two levels up; make it importable from the EBench
-# client env without installing the repo.
+# Make the repository's benchmark helpers importable in the client env.
 import os as _os
 import sys as _sys
 
@@ -59,9 +35,7 @@ from benchmarks.utils.action_conversion import (  # noqa: E402
 
 logger = logging.getLogger("openwam2ebench")
 
-# GenManip obs keys (see genmanip/core/evaluator/env.py::get_obs). The trainer
-# composes overlook as the multiview head slot and left/right wrists as hand
-# slots (configs/dataloader/ebench.yaml camera_layout) — same mapping here.
+# Camera order matches configs/dataloader/ebench.yaml.
 HEAD_KEY = "video.overlook_camera_view"
 LEFT_WRIST_KEY = "video.left_camera_view"
 RIGHT_WRIST_KEY = "video.right_camera_view"
@@ -79,7 +53,9 @@ def wait_until_healthy(south: WSPolicyClient, deadline_s: float = 300.0) -> None
         try:
             south.ping()
             return
-        except Exception as e:  # noqa: BLE001 — retried until deadline
+        except ImportError:
+            raise
+        except Exception as e:  # noqa: BLE001
             last_err = e
             time.sleep(2.0)
     raise RuntimeError(f"OpenWAM server not healthy after {deadline_s}s: {last_err}")
@@ -103,7 +79,7 @@ class EBenchOpenWAMDriver:
         self.episodes = 0
 
     def on_episode_start(self, inner_obs: dict) -> None:
-        """Reset south server state + bridge base bookkeeping, re-read the prompt."""
+        """Reset policy state and start an episode."""
         reply = self._south.reset()
         if reply.get("type") != "reset_ack":
             raise RuntimeError(f"OpenWAM server reset not acknowledged: {reply}")
@@ -120,12 +96,11 @@ class EBenchOpenWAMDriver:
         logger.info("episode %d start; prompt=%r", self.episodes, self._prompt)
 
     def invalidate_episode(self) -> None:
-        """Force on_episode_start at the next act() — used after a north
-        reconnect, whose reset() started a fresh sim episode."""
+        """Mark the current episode inactive after a reconnect."""
         self._episode_active = False
 
     def act(self, inner_obs: dict) -> dict:
-        """One sim step: obs dict in → EBench action dict out."""
+        """Convert one observation into an EBench action."""
         if inner_obs.get("reset", False) or not self._episode_active:
             self.on_episode_start(inner_obs)
 
@@ -139,8 +114,6 @@ class EBenchOpenWAMDriver:
                 continue
             arr = np.asarray(img)
             if arr.dtype != np.uint8 or arr.ndim != 3 or arr.shape[2] != 3:
-                # Fail fast with the camera name: a float/RGBA/BGR frame would
-                # either crash deep inside Pillow or silently swap channels.
                 raise ValueError(f"camera {name!r} must be HxWx3 uint8 RGB, got dtype={arr.dtype} shape={arr.shape}")
 
         state_list = None
@@ -175,26 +148,20 @@ class EBenchOpenWAMDriver:
                 "unify_action=true) checkpoint?"
             )
         if not np.isfinite(action).all():
-            # NaN survives every hop (JSON emits NaN tokens; np.clip(nan)=nan;
-            # a NaN quat passes norm checks because abs(nan-1)>tol is False) —
-            # stop it here, before the sim consumes a NaN pose target.
+            # Reject NaN before it reaches the simulator.
             raise ValueError(f"OpenWAM server returned non-finite action: {action.tolist()}")
 
         out = raw23_to_ebench_action(action)
         for i, (_pos, quat, _grip) in enumerate(out["action"]):
             norm = float(np.linalg.norm(quat))
             if not abs(norm - 1.0) <= 0.05:
-                # Degenerate rot6d (e.g. all-zeros from an early/diverged model:
-                # rot6d stats are identity-pinned, so a zero normalized output
-                # denormalizes to a zero rot6d) → non-unit quat → real cuRobo IK
-                # silently holds the current joints. Fail loudly instead.
+                # A degenerate rot6d can become a non-unit quaternion that IK holds silently.
                 raise ValueError(
                     f"arm {i} rot6d degenerated to a non-unit quaternion (norm={norm:.4f}); "
                     f"raw rot6d={action[3:9] if i == 0 else action[13:19]}"
                 )
 
-        # Update AFTER building this step's proprio: proprio(t) differences
-        # state(t) against state(t-1), exactly like training rows.
+        # Match training: update the previous base after rendering this step.
         if cur_base is not None:
             self._prev_base = cur_base
         self.steps += 1
@@ -202,7 +169,7 @@ class EBenchOpenWAMDriver:
 
 
 def run_worker(args) -> None:
-    from genmanip_client import EvalClient  # imported here: only needed at runtime
+    from genmanip_client import EvalClient
 
     south = WSPolicyClient(f"ws://{args.south_host}:{args.south_port}", timeout=float(args.request_timeout))
     wait_until_healthy(south)
@@ -219,12 +186,7 @@ def run_worker(args) -> None:
         )
 
     def reconnect(last_err: Exception):
-        """Rebuild the EvalClient with retries; return the fresh reset obs.
-
-        The whole rebuild+reset lives INSIDE the retried scope: the most
-        likely trigger is a sim-server hiccup/restart, so the first reinit is
-        likely to fail too — it must consume a retry, not abort the run.
-        """
+        """Recreate the client and reset the sim episode with bounded retries."""
         nonlocal client
         err = last_err
         for attempt in range(args.client_reinit_retries):
@@ -242,11 +204,13 @@ def run_worker(args) -> None:
                     pass
                 client = make_client()
                 return client.reset()
-            except Exception as e:  # noqa: BLE001 — reinit itself failed; burn a retry
+            except Exception as e:  # noqa: BLE001
                 err = e
         raise RuntimeError(f"EvalClient recovery failed after {args.client_reinit_retries} attempts") from err
 
     client = make_client()
+    reconnects = 0
+    max_reconnects = int(getattr(args, "max_reconnects", 20))
     try:
         obs = client.reset()
         done = False
@@ -267,11 +231,14 @@ def run_worker(args) -> None:
                 break
             try:
                 obs, done = client.step(actions)
-            except Exception as e:  # noqa: BLE001 — north-side transport recovery
-                # DISCARD the stale actions: client.reset() kills the workers
-                # and starts a fresh episode, so replaying an action computed
-                # for the old episode's obs would corrupt the new one. Resume
-                # the outer loop from the fresh reset obs instead.
+            except Exception as e:  # noqa: BLE001
+                # Reset starts a new episode, so discard these actions.
+                reconnects += 1
+                if reconnects > max_reconnects:
+                    raise RuntimeError(
+                        f"EvalClient.step failed {reconnects} times in this run (last: {e}); "
+                        f"giving up after --max-reconnects={max_reconnects}"
+                    ) from e
                 obs = reconnect(e)
                 driver.invalidate_episode()
                 first = next(
@@ -321,6 +288,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--save-process", action="store_true", help="client-side per-episode video/log dump")
     p.add_argument("--client-reinit-retries", type=int, default=3)
     p.add_argument("--client-reinit-backoff", type=float, default=5.0)
+    p.add_argument(
+        "--max-reconnects",
+        type=int,
+        default=20,
+        help="abort the run after this many north-side step failures + reconnects (a deterministic "
+        "server-side rejection would otherwise loop forever)",
+    )
     return p
 
 

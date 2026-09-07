@@ -1,47 +1,7 @@
-"""Offline mock of the GenManip eval server for EBench bridge validation.
+"""Replay EBench episodes through the GenManip EvalClient wire contract.
 
-Replays real EBench dataset episodes over the EvalClient wire contract and
-acts as a FAILURE-TYPE ORACLE: any action-contract violation returns HTTP 500
-(the real chain propagates parse errors worker→ray→FastAPI 500), so a broken
-bridge FAILS a mock run instead of logging-and-passing.
-
-Wire fidelity (mirrors ``genmanip/utils/standalone/io_utils.py`` +
-``env.get_obs``):
-
-* cameras ship as ``{"type": "jpeg_bytes", "dtype", "shape", "data"}`` (JPEG
-  q85) and numpy states as ``{"type": "numpy_array", base64}`` — the
-  EvalClient decode paths (TurboJPEG, frombuffer) are actually exercised;
-* ``/reset`` returns ``reset_pending`` and the first obs is delivered via the
-  ``/reset_result`` poll, exercising the client's async-reset path;
-* every step carries a non-None running ``metric`` dict and episode rollovers
-  carry an ``episode_result``, matching the real per-worker wrapper.
-
-Action validation emulates the real consumption path
-(``parse_embodiment_action`` + ``env.step``): ``ee_pose`` structure, LIST
-``position + orientation`` concat to 7 plain floats, finiteness (NaN-safe:
-``not (|norm-1| <= tol)``), unit quaternion, 2 finger values inside the
-achieved-state guard band, ``base_motion`` finiteness; relative-base steps
-are tallied against the real ±0.015 m / ±1° clamps and absolute-base steps
-against the ±0.2 m / 20° jump guard.
-
-KNOWN DIVERGENCES from the real server (inherent to an open-loop replay —
-see tests/benchmarks and the gate-3 review for the full list):
-
-* no IK / physics / achieved-state simulation: unreachable poses, cuRobo
-  IK-hold, invalid-state early termination, and success scoring do not exist;
-  episodes always run exactly ``--steps-per-episode`` frames;
-* ingress checks are STRICTER than real in places (real accepts tuples,
-  missing base keys, non-unit quats — cuRobo normalizes): this mock is a
-  bridge-compliance checker, not a permissiveness emulator;
-* the real gripper guard applies to the ACHIEVED state post-physics; here it
-  is applied to the command (the bridge clips to [0, 0.044] anyway);
-* single global replay state: run ONE EvalClient against one mock instance.
-
-Run inside an env with numpy / pandas / pyarrow / av (e.g. the training env):
-
-    python benchmarks/ebench/mock_genmanip_server.py \
-        --dataset-dir /path/to/EBench-Dataset --bucket simple_pnp/task1 \
-        --episodes 2 --steps-per-episode 8 --port 8087
+The mock validates action shapes and ranges and returns HTTP 500 for contract
+violations. It omits IK, physics, and scoring; run one EvalClient per instance.
 """
 
 import argparse
@@ -63,7 +23,7 @@ CAMS = (
     "video.left_camera_view",
     "video.right_camera_view",
 )
-# GenManip invalid-state guard + per-step base clamps (env.py / dualarm_manip.py)
+# GenManip action limits.
 GRIPPER_GUARD = (-0.01, 0.054)
 BASE_STEP_CLAMP_M = 0.015
 BASE_STEP_CLAMP_DEG = 1.0
@@ -77,7 +37,7 @@ def _encode_jpeg_dict(rgb: np.ndarray) -> dict:
         from turbojpeg import TJPF_RGB, TurboJPEG
 
         data = TurboJPEG().encode(rgb, quality=85, pixel_format=TJPF_RGB)
-    except Exception:  # noqa: BLE001 — PIL JPEG decodes fine through TurboJPEG
+    except Exception:  # noqa: BLE001
         from PIL import Image
 
         buf = io.BytesIO()
@@ -122,6 +82,7 @@ class EpisodeReplay:
     def __init__(self, bucket: Path, episode_index: int, num_steps: int):
         import pandas as pd
 
+        self.episode_index = int(episode_index)
         with (bucket / "meta" / "info.json").open() as f:
             info = json.load(f)
         chunk = episode_index // int(info.get("chunks_size", 1000))
@@ -182,7 +143,7 @@ class EpisodeReplay:
 
 
 class ContractViolation(ValueError):
-    """Action violates the wire contract — mapped to HTTP 500 like the real chain."""
+    """Action violates the wire contract."""
 
 
 class MockState:
@@ -194,13 +155,15 @@ class MockState:
         self.pending_reset = False
         self.actions_logged = 0
         self.violations = 0
+        # Keep failures visible across reconnect/reset attempts.
+        self.poisoned = False
         self.base_overlimit_steps = 0
         self.base_jump_guard_steps = 0
         self.log_file = log_path.open("w")
         self.lock = threading.Lock()
 
     def validate_action(self, action: dict) -> None:
-        """Emulate the real server's consumption; raise ContractViolation."""
+        """Validate an action against the GenManip contract."""
         if action.get("control_type") != "ee_pose":
             raise ContractViolation(f"control_type must be 'ee_pose', got {action.get('control_type')!r}")
         if action.get("is_rel") is not False:
@@ -210,7 +173,7 @@ class MockState:
             raise ContractViolation(f"'action' must be a list of 2 arm tuples, got {type(arms).__name__}")
         for i, arm in enumerate(arms):
             pos, quat, grip = arm
-            # Real server: planner.ik_single(position + orientation, ...) — list concat.
+            # The server concatenates these lists before IK.
             if not isinstance(pos, list) or not isinstance(quat, list):
                 raise ContractViolation(f"arm {i}: position/orientation must be Python lists (server list-concats)")
             combined = pos + quat
@@ -221,8 +184,7 @@ class MockState:
             if not np.isfinite(combined).all():
                 raise ContractViolation(f"arm {i}: non-finite pose values {combined}")
             norm = float(np.linalg.norm(quat))
-            # NaN-safe: `not (<= tol)` also catches norm=NaN, which a plain
-            # `abs(norm-1) > tol` comparison would silently accept.
+            # This comparison also rejects NaN.
             if not (abs(norm - 1.0) <= 0.05):
                 raise ContractViolation(f"arm {i}: quaternion norm {norm:.4f} not unit (real IK would hold joints)")
             if len(grip) != 2:
@@ -241,10 +203,9 @@ class MockState:
                 or abs(base[1]) > BASE_STEP_CLAMP_M
                 or abs(base[2]) > BASE_STEP_CLAMP_DEG
             ):
-                self.base_overlimit_steps += 1  # real server clips silently; tally it
+                self.base_overlimit_steps += 1
         else:
-            # Absolute mode: the real server has NO per-step clamp — a large
-            # jump trips the achieved-state guard and zero-scores the episode.
+            # Absolute commands are checked against the jump guard.
             prev = self.replays[self.episode].states["state.base"][max(self.t - 1, 0)]
             if (
                 abs(base[0] - float(prev[0])) > BASE_JUMP_GUARD_M
@@ -256,11 +217,13 @@ class MockState:
     def current_replay(self) -> "EpisodeReplay":
         return self.replays[self.episode]
 
+    def _episode_index(self) -> int:
+        return int(self.current_replay().episode_index)
+
     def _episode_id(self) -> str:
-        return f"ebench-mock/run/ep{self.episode}/{self.episode:03d}"
+        return f"ebench-mock/run/ep{self.episode}/{self._episode_index():03d}"
 
     def _running_metric(self) -> dict:
-        # Real pool sends a non-None running metric dict on EVERY step.
         return {f"*({self.episode}/{len(self.replays)})mock_replay": {"score": 0.0, "sr": 0.0}}
 
     def obs_payload(self, episode_result: dict = None) -> dict:
@@ -279,7 +242,7 @@ class MockState:
             episode_result = {
                 "episode_id": self._episode_id(),
                 "task_name": "mock_replay",
-                "seed": self.episode,
+                "seed": self._episode_index(),
                 "score": 0.0,
                 "sr": 0.0,
                 "worker_id": self.worker_ids[0] if self.worker_ids else "0",
@@ -299,9 +262,9 @@ class MockState:
 
 
 class Handler(BaseHTTPRequestHandler):
-    state: MockState = None  # injected
+    state: MockState = None
 
-    def log_message(self, fmt, *args):  # quiet
+    def log_message(self, fmt, *args):
         pass
 
     def _send(self, code: int, body: bytes, content_type: str = "application/octet-stream"):
@@ -326,6 +289,15 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         st = self.state
         try:
+            if st.poisoned and path in ("/reset", "/reset_result", "/step"):
+                self._send(
+                    500,
+                    json.dumps(
+                        {"detail": f"mock poisoned by an earlier action-contract violation ({st.violations} so far)"}
+                    ).encode(),
+                    "application/json",
+                )
+                return
             if path in ("/kill", "/create_workers"):
                 self._send(200, json.dumps({"ok": True}).encode(), "application/json")
                 return
@@ -335,8 +307,7 @@ class Handler(BaseHTTPRequestHandler):
                     st.worker_ids = [str(w) for w in req["worker_ids"]]
                     st.episode, st.t = 0, 0
                     st.pending_reset = True
-                # Async-reset protocol: first response only flags the pending
-                # reset; the client must poll /reset_result for the real obs.
+                # Match EvalClient's asynchronous reset handshake.
                 self._send_pickle({wid: {"obs": None, "metric": None, "reset_pending": True} for wid in st.worker_ids})
                 return
             if path == "/reset_result":
@@ -355,15 +326,19 @@ class Handler(BaseHTTPRequestHandler):
                             st.validate_action(action)
                         except ContractViolation as e:
                             st.violations += 1
-                            logger.error("ACTION CONTRACT VIOLATION (worker %s): %s", wid, e)
-                            # Failure-type oracle: the real chain 500s on parse
-                            # errors — a broken bridge must FAIL the mock run.
+                            st.poisoned = True
+                            logger.error(
+                                "ACTION CONTRACT VIOLATION (worker %s): %s — mock is poisoned; subsequent "
+                                "reset, reset-result, and step requests return 500 so the bridge run fails",
+                                wid,
+                                e,
+                            )
                             self._send(500, json.dumps({"detail": str(e)}).encode(), "application/json")
                             return
                         st.log_file.write(
                             json.dumps(
                                 {
-                                    "episode": st.episode,
+                                    "episode": st._episode_index(),
                                     "t": st.t,
                                     "worker": str(wid),
                                     "base_motion": [float(v) for v in action["base_motion"]],
@@ -380,7 +355,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_pickle(payload)
                 return
             self._send(404, b"not found", "text/plain")
-        except Exception as e:  # noqa: BLE001 — mirror the real server's 500 body
+        except Exception as e:  # noqa: BLE001
             logger.exception("mock server error")
             self._send(500, json.dumps({"detail": str(e)}).encode(), "application/json")
 
@@ -395,7 +370,7 @@ def main():
     p.add_argument("--steps-per-episode", type=int, default=8)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8087)
-    p.add_argument("--log-file", default="/tmp/ebench_mock_actions.jsonl")
+    p.add_argument("--log-file", default="./ebench_mock_actions.jsonl", help="JSONL of every accepted action")
     args = p.parse_args()
 
     bucket = Path(args.dataset_dir) / args.bucket

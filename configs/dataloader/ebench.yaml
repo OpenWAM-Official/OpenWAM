@@ -1,56 +1,31 @@
 type: ebench
 dataset_dir: /path/to/ebench_data
 
-# ── Action space ─────────────────────────────────────────────────────────────
-# EBench raw 23-D action/proprio:
-#   [0:3) L eef xyz, [3:9) L eef rot6d, [9] L gripper
-#   [10:13) R eef xyz, [13:19) R eef rot6d, [19] R gripper
-#   [20:23) base [x, y, yaw(DEGREES)]
-# Raw action.ee_pose is [L xyz + quat(wxyz), R xyz + quat(wxyz)]; the reader
-# converts each quaternion to rot6d and averages each hand's two gripper
-# fingers into one scalar. unify_action_map scatters raw 0:10 -> L EEF slots,
-# raw 10:20 -> R EEF slots, raw 20:23 -> base slots of the shared 80-D layout
-# (see configs/dataloader/robotwin.yaml for the full table).
+# Raw-23: L xyz/rot6d/gripper, R xyz/rot6d/gripper, base dx/dy/dyaw (degrees).
+# ee_pose uses wxyz quaternions; each hand's finger values are averaged.
+# The three ranges below map raw values into the unified action space.
 action_mode: eef
 unify_action: true
 unify_action_map: ["0-9", "34-43", "68-70"]
 unify_state_map: null  # null = state reuses unify_action_map
 
-# ── Frame sampling ───────────────────────────────────────────────────────────
-# num_frames = state/action window length; action horizon = num_frames - 1.
-# video_stride subsamples video only; state/action stay at the raw rate.
-# window_stride = sliding window step (1 = every frame starts a window).
+# Frame and window sampling.
 num_frames: 33
 video_stride: 4
 window_stride: 1
 split: train
 
-# ── Rendering (3-slot L-shape canvas) ────────────────────────────────────────
-# camera_layout = [head, left/bottom-left, right/bottom-right]; null slots are
-# rendered as black tiles. At 384x320: top 256Hx320W, bottom halves 128Hx160W,
-# each tile BILINEAR-stretched to its slot. target_camera drives single-view
-# mode and is ignored when multiview=true.
-# EBench baseline clients use overlook as the head camera and left/right wrist
-# cameras as hand views.
+# Camera layout and output size.
 height: 384
 width: 320
 multiview: true
 camera_layout: [video.overlook_camera_view, video.left_camera_view, video.right_camera_view]
 target_camera: video.overlook_camera_view
 
-# ── Normalization ────────────────────────────────────────────────────────────
-# Raw-23 stats live at <dataset_dir>/meta/ebench_normalization_stats.npy; when
-# missing, the reader auto-builds them via the offline parquet scan (rank 0
-# scans, other ranks wait). Action and proprio share this one stats entry,
-# matching deploy; rot6d stats are pinned to identity. The scan carries true
-# q01/q99, so "quantile" works with no manual pre-step. To force a rebuild,
-# delete the cache file.
+# Raw-23 stats cache; a missing file is built by the reader.
 normalize_mode: min-max           # "min-max", "z-score", "quantile", or null
 
-# ── Video augmentation (optional) ────────────────────────────────────────────
-# Load-time color jitter applied by the reader to each clip with the SAME
-# random factors across all frames (temporal consistency), TRAIN split only.
-# enabled: false keeps video byte-identical while preserving the knobs.
+# Optional train-only color jitter.
 color_jitter:
   enabled: true
   brightness: 0.2
