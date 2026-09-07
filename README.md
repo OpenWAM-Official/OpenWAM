@@ -339,10 +339,6 @@ Wan2.2-TI2V-5B video backbone, and the Mutual attention mask.
    reports the returned action dimension and latency. Stop the deployment
    process after the checks.
 
-   Cosmos3-Edge direct video-block compilation uses `optimization.compile.enabled`.
-   Dual/Tri joint self-attention with actions uses the existing joint-loop
-   compilation path.
-
 ### OpenWAM-α Fine-Tuning
 
 1. Download LIBERO as shown above.
