@@ -252,6 +252,9 @@ def run_worker(args) -> None:
 
     client = make_client()
     reconnects = 0
+    # Keep programmatic callers that predate --max-reconnects working while
+    # still enforcing the bounded-recovery default used by the CLI.
+    max_reconnects = int(getattr(args, "max_reconnects", 20))
     try:
         obs = client.reset()
         done = False
@@ -278,13 +281,13 @@ def run_worker(args) -> None:
                 # for the old episode's obs would corrupt the new one. Resume
                 # the outer loop from the fresh reset obs instead.
                 reconnects += 1
-                if reconnects > args.max_reconnects:
+                if reconnects > max_reconnects:
                     # A deterministic server-side rejection (e.g. an action
                     # the sim cannot parse) would otherwise loop forever:
                     # reset succeeds, the same action fails again, repeat.
                     raise RuntimeError(
                         f"EvalClient.step failed {reconnects} times in this run (last: {e}); "
-                        f"giving up after --max-reconnects={args.max_reconnects}"
+                        f"giving up after --max-reconnects={max_reconnects}"
                     ) from e
                 obs = reconnect(e)
                 driver.invalidate_episode()
