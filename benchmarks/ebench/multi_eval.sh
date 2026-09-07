@@ -19,7 +19,7 @@ EBENCH_PYTHON="${EBENCH_PYTHON:-python}"
 
 pids=()
 # Ctrl+C / TERM must take the workers down too, or they keep holding GenManip worker slots.
-trap 'kill "${pids[@]}" 2>/dev/null; exit 130' INT TERM
+trap 'for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; done; exit 130' INT TERM
 for ((i = 0; i < NUM_WORKERS; i++)); do
     "${EBENCH_PYTHON}" benchmarks/ebench/openwam2ebench_interface.py \
         --worker-id "$i" --south-port "$((SOUTH_PORT_BASE + i))" "$@" &
