@@ -59,7 +59,15 @@ actual_commit="$(git -C "${LIBERO_PLUS_PATH}" rev-parse HEAD)"
 }
 git -C "${LIBERO_PLUS_PATH}" remote set-url origin "${LIBERO_PLUS_REMOTE}"
 
-if git -C "${LIBERO_PLUS_PATH}" apply --reverse --check "${LIBERO_PATCH}" >/dev/null 2>&1; then
+compatibility_patch_applied() {
+    [[ -f "${LIBERO_PLUS_PATH}/libero/__init__.py" ]] &&
+        grep -Fq 'weights_only=False' "${LIBERO_PLUS_PATH}/libero/libero/benchmark/__init__.py" &&
+        grep -Fq 'make_blob(format="PNG")' "${LIBERO_PLUS_PATH}/libero/libero/envs/env_wrapper.py" &&
+        grep -Fq 'bddl_file_name = str(bddl_file_name)' "${LIBERO_PLUS_PATH}/libero/libero/envs/env_wrapper.py"
+}
+
+if git -C "${LIBERO_PLUS_PATH}" apply --reverse --check "${LIBERO_PATCH}" >/dev/null 2>&1 ||
+    compatibility_patch_applied; then
     echo "[setup] LIBERO-plus compatibility patch already applied"
 elif git -C "${LIBERO_PLUS_PATH}" apply --check "${LIBERO_PATCH}" >/dev/null 2>&1; then
     git -C "${LIBERO_PLUS_PATH}" apply "${LIBERO_PATCH}"
