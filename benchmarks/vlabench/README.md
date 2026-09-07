@@ -195,74 +195,23 @@ Scores from the OpenWAM paper. **Bold** = best, <u>underline</u> = second best; 
 
 ## 5. Fine-tuning on VLABench Data
 
-Only needed to train your own checkpoint — evaluating the released one needs
-nothing from this section. The general training flow (model selection, debug
-run, multi-node launch) is in the root README under
-[Quick Start](../../README.md#quick-start); what follows is the
-VLABench-specific part. Run it in the **OpenWAM** environment, not the VLABench
-one.
-
-### Dataset
+Only needed to train your own checkpoint. The general training workflow is in
+the [root README](../../README.md#quick-start); run this in the **OpenWAM**
+environment, not the VLABench one.
 
 ```bash
-python scripts/download_assets/download_benchmark_data.py
-# menu: VLABench   (~13.2 GB)
-```
-
-The downloader is the supported path and does three things a manual
-`hf download` would not: it pulls
-[`OpenWAM/VLABench`](https://huggingface.co/datasets/OpenWAM/VLABench) — a
-mirror of `VLABench/vlabench_primitive_ft_lerobot_video` repacked into 16 large
-tars, because the upstream repo's ~19k small files download at request-latency
-rather than bandwidth — unpacks them, rewrites `dataset_dir` in
-[`configs/dataloader/vlabench.yaml`](../../configs/dataloader/vlabench.yaml) to
-the download location, and makes sure the normalization statistics exist.
-
-Do not use `VLABench/vlabench_primitive_ft_dataset`: it redirects to
-`VLABench/raw_primitive_datasets`, the pre-conversion tarballs, which this
-reader cannot read.
-
-Normalization statistics live at
-`<dataset_dir>/meta/vlabench_normalization_stats.npy` and are **auto-built on
-first use** whenever `dataloader.normalize_mode` is set — rank 0 scans the
-corpus, the other ranks wait. To build them ahead of time (or to inspect the
-table without writing it):
-
-```bash
-python -m openwam.dataloader.utils.stats_computation.vlabench_stats_computation \
-  --dataset-dir /path/to/vlabench_data          # add --dry-run to only print
-```
-
-The rot6d dimensions are pinned to identity so normalization is a pass-through
-on the rotation representation; the reader warns loudly if it loads a stats file
-that predates that pin.
-
-### Fine-tune
-
-`vlabench.yaml` sets `unify_action_map: ["0-9"]`, so the 10 raw EEF dimensions
-land on slots 0-9 of the unified 80-D action space — dimensions the foundation
-model already pretrained.
-
-```bash
-python scripts/download_assets/download_openwam_checkpoints.py
-# menu: OpenWAM_Alpha → OpenWAM-Alpha-Pretrain-Foundation-Model
-
+python scripts/download_assets/download_benchmark_data.py   # menu: VLABench (~13.2 GB)
 bash scripts/train.sh \
   dataloader=vlabench \
-  training.finetune_ckpt_path=assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Pretrain-Foundation-Model \
-  training.num_epochs=null training.max_steps=6000 \
-  training.output_path=/path/to/output
+  training.finetune_ckpt_path=assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Pretrain-Foundation-Model
 ```
 
-`train.sh` uses all visible GPUs; narrow it with `NPROC_PER_NODE` or
-`CUDA_VISIBLE_DEVICES`. Defaults and every overridable field are in
-[`configs/train.yaml`](../../configs/train.yaml) — `training.batch_size` is
-per-GPU (default 16). Add `training.debug=true` for a 20-step shakeout run
-before committing to a full one.
+The downloader also rewrites `dataset_dir` in
+[`configs/dataloader/vlabench.yaml`](../../configs/dataloader/vlabench.yaml) and
+builds `meta/vlabench_normalization_stats.npy` (otherwise auto-built on first
+use). Do not use `VLABench/vlabench_primitive_ft_dataset` — it redirects to the
+pre-conversion tarballs, which this reader cannot read.
 
-Training writes `config.yaml` and copies `normalization_stats.npy` into the
-checkpoint dir on its own, which covers the first of the two non-weight
-artifacts [§2](#2-start-the-policy-server) needs. The **tokenizer dir is not
-copied** — if the serving host cannot resolve the config's
-`model.video_backbone.model_path` (usually a path on the training machine),
-copy `tokenizer/google/umt5-xxl` into the checkpoint dir before deploying.
+Training writes `config.yaml` and `normalization_stats.npy` into the checkpoint
+dir but **not** the tokenizer dir; copy `tokenizer/google/umt5-xxl` in before
+deploying if the serving host cannot resolve the config's `model_path`.
