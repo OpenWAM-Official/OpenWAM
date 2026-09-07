@@ -18,15 +18,16 @@ Annotated ``@pytest.mark.gpu``; explicit invocation:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 import torch
 
+from tests._assets import asset_path
+
 pytestmark = pytest.mark.gpu
 
-ASSET_PATH = Path(os.environ.get("COSMOS25_ASSET_PATH", "/path/to/assets/Cosmos-Predict2.5-2B"))
+ASSET_PATH = Path(asset_path("OPENWAM_COSMOS25_2B"))
 
 
 def _skip_unless_runnable():

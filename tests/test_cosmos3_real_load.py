@@ -5,15 +5,16 @@ geometry, runs preprocess_input_for_train end-to-end on synthetic PIL frames,
 drives the full 28-block loop shape-conservingly, and round-trips the VAE.
 """
 
-import os
 from pathlib import Path
 
 import pytest
 import torch
 
+from tests._assets import asset_path
+
 pytestmark = pytest.mark.gpu
 
-ASSET_PATH = Path(os.environ.get("COSMOS3_EDGE_ASSET_PATH", "/path/to/assets/Cosmos3-Edge"))
+ASSET_PATH = Path(asset_path("OPENWAM_COSMOS3_EDGE"))
 
 
 def _skip_unless_runnable():

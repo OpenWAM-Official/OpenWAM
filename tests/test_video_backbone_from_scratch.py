@@ -23,6 +23,7 @@ import torch
 
 from openwam.model.video_backbone.wan.models.dit import RMSNorm, WanModel
 from openwam.model.video_backbone.wan.reinit import reinit_dit_from_scratch
+from tests._assets import asset_path
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -364,7 +365,7 @@ model:
 training:
   initialize_model_on_cpu: true
 """
-    model_path = os.environ.get("WAN_TI2V_5B_PATH", "/path/to/Wan2.2-TI2V-5B")
+    model_path = asset_path("OPENWAM_WAN22_TI2V_5B")
     if not os.path.isdir(model_path):
         pytest.skip(f"Wan2.2-TI2V-5B not found at {model_path}")
 
@@ -466,7 +467,7 @@ model:
 training:
   initialize_model_on_cpu: true
 """
-    model_path = os.environ.get("WAN_TI2V_5B_PATH", "/path/to/Wan2.2-TI2V-5B")
+    model_path = asset_path("OPENWAM_WAN22_TI2V_5B")
     if not os.path.isdir(model_path):
         pytest.skip(f"Wan2.2-TI2V-5B not found at {model_path}")
 

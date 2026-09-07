@@ -158,6 +158,28 @@ timestamp="$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="${ROBOTWIN_LOG_ROOT:-${CKPT_DIR}/robotwin_eval_logs/${POLICY_NAME}_${TASK_CONFIG}_${ckpt_label}_${timestamp}}"
 mkdir -p "${LOG_DIR}"
 
+# Freeze the client-side evaluation protocol next to the logs so a result
+# directory is self-describing. Server-side settings (denoise steps, DiT cache,
+# compile) come from configs/deploy.yaml unless overridden on scripts/deploy.sh;
+# they are printed in the deploy log, not visible from the client.
+_git_head() { git -C "$1" rev-parse HEAD 2>/dev/null || echo "unknown"; }
+cat > "${LOG_DIR}/run.env" <<EOF
+timestamp=${timestamp}
+name=${POLICY_NAME}
+mode=${TASK_CONFIG}
+ckpt_dir=${CKPT_DIR}
+server=ws://${SERVER_HOST}:${PORT}
+gpu=${GPU_ID}
+seed=0
+test_num=${ROBOTWIN_TEST_NUM:-100}
+step_limit_overrides=$(grep -cvE '^\s*(#|$)' "${SCRIPT_DIR}/step_limits.yml" 2>/dev/null || true)  # entries in benchmarks/robotwin/step_limits.yml; 0 = RoboTwin upstream limits
+policy_config=${POLICY_CONFIG_PATH:-${SCRIPT_DIR}/policy_config.yml}
+robotwin_path=${ROBOTWIN_PATH:-}
+robotwin_commit=$(_git_head "${ROBOTWIN_PATH:-/nonexistent}")
+openwam_commit=$(_git_head "${SCRIPT_DIR}")
+tasks=${TASKS[*]}
+EOF
+
 echo "[INFO] mode=${TASK_CONFIG}  name=${POLICY_NAME}"
 echo "[INFO] server=ws://${SERVER_HOST}:${PORT}  gpu=${GPU_ID}"
 echo "[INFO] ckpt_dir=${CKPT_DIR}"

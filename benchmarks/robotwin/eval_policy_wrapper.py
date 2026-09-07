@@ -5,10 +5,49 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 import sys
 import tempfile
 import traceback
 import types
+
+# RoboTwin commit this adapter was last verified against (see the "Verified
+# versions" table in README.md). The adapter loads RoboTwin's
+# ``script/eval_policy.py`` by path and monkeypatches it, so an upstream change
+# can break it silently; a mismatch here is the first thing to suspect.
+VERIFIED_ROBOTWIN_COMMIT = "0aeea2d669c0f8516f4d5785f0aa33ba812c14b4"
+
+
+def _warn_on_unverified_robotwin(robotwin_path: str) -> None:
+    """Print a warning when ``robotwin_path`` is not at the verified commit.
+
+    Non-fatal: other commits usually work, and ``ROBOTWIN_SKIP_VERSION_CHECK=1``
+    silences the check entirely (e.g. for a non-git RoboTwin copy).
+    """
+    if os.environ.get("ROBOTWIN_SKIP_VERSION_CHECK", "") == "1":
+        return
+    try:
+        head = subprocess.run(
+            ["git", "-C", robotwin_path, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        head = ""
+    if not head:
+        print(
+            "[eval_policy_wrapper] WARNING: could not read the RoboTwin git commit "
+            f"(not a git checkout?); verified commit is {VERIFIED_ROBOTWIN_COMMIT[:12]}"
+        )
+        return
+    if head != VERIFIED_ROBOTWIN_COMMIT:
+        print(
+            f"[eval_policy_wrapper] WARNING: RoboTwin at {head[:12]} differs from the verified "
+            f"commit {VERIFIED_ROBOTWIN_COMMIT[:12]}; if eval breaks, check out the verified commit "
+            "first (set ROBOTWIN_SKIP_VERSION_CHECK=1 to silence)."
+        )
 
 
 def _load_robotwin_eval_module(robotwin_path: str):
@@ -303,6 +342,7 @@ def bootstrap_robotwin_module(*, install_trace_hooks: bool = True):
     if not robotwin_path:
         raise SystemExit("ROBOTWIN_PATH must be set")
 
+    _warn_on_unverified_robotwin(robotwin_path)
     runtime_root = _prepare_runtime_root(robotwin_path)
     os.chdir(runtime_root)
     if robotwin_path not in sys.path:

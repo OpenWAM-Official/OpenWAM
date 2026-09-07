@@ -15,6 +15,7 @@ import torch
 
 from openwam.model.video_backbone.cosmos_predict25 import text_encoder as te
 from openwam.model.video_backbone.cosmos_predict25.text_encoder import Reason1LiveTextEncoder
+from tests._assets import asset_path
 
 
 def test_constants_match_upstream_geometry():
@@ -108,7 +109,7 @@ def test_validate_geometry_rejects_wrong_layer_count():
 # Reason1 real-load smoke — only runs when Reason1 weights AND CUDA exist.
 # ----------------------------------------------------------------------
 
-REASON1_ASSET_PATH = os.environ.get("REASON1_ASSET_PATH", "/path/to/assets/Cosmos-Reason1-7B")
+REASON1_ASSET_PATH = asset_path("OPENWAM_COSMOS_REASON1_7B")
 
 
 @pytest.mark.gpu
