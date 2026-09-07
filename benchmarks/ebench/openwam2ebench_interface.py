@@ -223,11 +223,10 @@ def run_worker(args) -> None:
         )
 
     def reconnect(last_err: Exception):
-        """Rebuild the EvalClient with retries; return the fresh reset obs.
+        """Rebuild the EvalClient and return a fresh reset observation.
 
-        The whole rebuild+reset lives INSIDE the retried scope: the most
-        likely trigger is a sim-server hiccup/restart, so the first reinit is
-        likely to fail too — it must consume a retry, not abort the run.
+        Reinitialization and reset share the retry scope because a sim restart
+        can make the first rebuild fail too.
         """
         nonlocal client
         err = last_err
@@ -276,15 +275,10 @@ def run_worker(args) -> None:
             try:
                 obs, done = client.step(actions)
             except Exception as e:  # noqa: BLE001 — north-side transport recovery
-                # DISCARD the stale actions: client.reset() kills the workers
-                # and starts a fresh episode, so replaying an action computed
-                # for the old episode's obs would corrupt the new one. Resume
-                # the outer loop from the fresh reset obs instead.
+                # Reset starts a new episode; discard actions computed for the failed one.
                 reconnects += 1
                 if reconnects > max_reconnects:
-                    # A deterministic server-side rejection (e.g. an action
-                    # the sim cannot parse) would otherwise loop forever:
-                    # reset succeeds, the same action fails again, repeat.
+                    # Bound deterministic server-side failures instead of retrying forever.
                     raise RuntimeError(
                         f"EvalClient.step failed {reconnects} times in this run (last: {e}); "
                         f"giving up after --max-reconnects={max_reconnects}"

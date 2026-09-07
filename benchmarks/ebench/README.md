@@ -62,7 +62,7 @@ bash benchmarks/ebench/multi_eval.sh \
     --ckpt-config assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-EBench/config.yaml
 ```
 
-Scores are written by the GenManip server under `saved/eval_results/ebench/<run_id>/` (`gmp status` to watch); the bridge's `EvalClient` also mirrors per-episode `episode_result.json` files into `client_results/` under the directory it runs from (override with `GENMANIP_RESULT_DIR=/some/dir`).
+Scores are written by the GenManip server under `saved/eval_results/<task>/<run_id>/` (`gmp status` to see the resolved path); the bridge's `EvalClient` also mirrors per-episode `episode_result.json` files into `client_results/` under the directory it runs from (override with `GENMANIP_RESULT_DIR=/some/dir`).
 
 Offline sanity check without Isaac Sim — the mock replays real EBench-Dataset episodes over the exact wire format (verifies bridge + conversion; produces no scores). It runs in the **training env** (needs `pandas`, `pyarrow`, `av`), needs only one dataset bucket, and serves exactly one bridge per mock instance (use `single_eval.sh`, not `multi_eval.sh`):
 
@@ -77,7 +77,7 @@ python benchmarks/ebench/mock_genmanip_server.py \
 # in another shell: single_eval.sh as above with --url http://127.0.0.1:8087 (no --run-id needed)
 ```
 
-A clean mock run ends with the bridge logging `run complete: 2 episodes, 16 steps bridged` and the mock logging `16 actions, 0 violations`. Any action-contract violation makes the mock answer HTTP 500 to every request from then on (`ACTION CONTRACT VIOLATION` in the mock log), so the bridge's reconnect attempts burn out and it exits non-zero instead of silently restarting the replay. The mock writes every accepted action to `./ebench_mock_actions.jsonl` (`--log-file`).
+A clean mock run ends with the bridge logging `run complete: 2 episodes, 16 steps bridged` and the mock logging `16 actions, 0 violations`. Any action-contract violation makes the mock return HTTP 500 for subsequent reset, reset-result, and step requests (`ACTION CONTRACT VIOLATION` in the mock log), so the bridge's reconnect attempts burn out and it exits non-zero instead of silently restarting the replay. The mock writes every accepted action to `./ebench_mock_actions.jsonl` (`--log-file`).
 
 <details>
 <summary><b>Notes & troubleshooting</b></summary>

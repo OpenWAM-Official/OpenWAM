@@ -194,10 +194,8 @@ class MockState:
         self.pending_reset = False
         self.actions_logged = 0
         self.violations = 0
-        # Set on the first contract violation. From then on EVERY endpoint
-        # answers 500, so the bridge's reconnect/reset recovery cannot mask the
-        # failure by restarting the replay: its retries burn out and it exits
-        # non-zero (the "failure oracle" contract of this mock).
+        # After a contract violation, reset/reset_result/step return 500 so
+        # reconnect recovery cannot restart the replay and hide the failure.
         self.poisoned = False
         self.base_overlimit_steps = 0
         self.base_jump_guard_steps = 0
@@ -376,8 +374,8 @@ class Handler(BaseHTTPRequestHandler):
                             st.violations += 1
                             st.poisoned = True
                             logger.error(
-                                "ACTION CONTRACT VIOLATION (worker %s): %s — mock is now poisoned; every further "
-                                "request answers 500 so the bridge run fails instead of restarting the replay",
+                                "ACTION CONTRACT VIOLATION (worker %s): %s — mock is poisoned; subsequent "
+                                "reset, reset-result, and step requests return 500 so the bridge run fails",
                                 wid,
                                 e,
                             )
