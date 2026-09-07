@@ -339,15 +339,9 @@ Wan2.2-TI2V-5B video backbone, and the Mutual attention mask.
    reports the returned action dimension and latency. Stop the deployment
    process after the checks.
 
-   Cosmos3-Edge uses the same `optimization.compile.enabled` switch. Paths
-   that call the video backbone's `run_block` can compile the existing
-   gen-stream block body, including shared-token calls. Dual/Tri joint
-   self-attention instead keeps its existing joint-loop compile path; timing
-   that path does not measure the direct video-block optimization. Text
-   preprocessing and VAE stay eager. The per-block default does not enable
-   CUDA graphs, and falls back to eager if compilation fails. Training and
-   gradient-checkpointed calls are unchanged. Performance and numerical
-   differences should be checked with the target checkpoint and workload.
+   Cosmos3-Edge direct video-block compilation uses `optimization.compile.enabled`.
+   Dual/Tri joint self-attention with actions uses the existing joint-loop
+   compilation path.
 
 ### OpenWAM-α Fine-Tuning
 

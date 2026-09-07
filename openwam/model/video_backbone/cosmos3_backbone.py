@@ -409,11 +409,7 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
         return dit_forward.prepare_block_loop(self.dit, **pipeline_inputs)
 
     def apply_compile_optimizations(self, compile_cfg) -> None:
-        """Lazily compile the existing gen-only block body for inference.
-
-        The layer is an explicit argument, so one callable serves every layer
-        without registering compiled modules or changing checkpoint keys.
-        """
+        """Keep layers as arguments so compilation does not change checkpoint keys."""
         self._compiled_gen_block = None
         self._gen_block_compile_enabled = False
         self._gen_block_compile_kwargs = None

@@ -1,4 +1,4 @@
-"""Inference compile wiring and real full-graph capture on tiny Cosmos3 layers."""
+"""CPU checks for Cosmos3 inference compilation."""
 
 from unittest.mock import Mock
 
@@ -184,11 +184,7 @@ def test_failure_retries_eager_once_and_can_reenable(monkeypatch, caplog, at_set
     "padded,masked,mask_4d", [(False, False, False), (True, False, False), (False, True, False), (True, True, True)]
 )
 def test_fullgraph_block_loop_parity(monkeypatch, padded, masked, mask_4d):
-    """Actually trace Dynamo, with real Edge submodules and no graph breaks.
-
-    Backend=eager checks graph capture on CPU; GPU Inductor timing is separate.
-    Sequence changes and fresh per-layer parameters must not reuse stale data.
-    """
+    """Check Dynamo capture with an eager backend, not GPU code generation."""
     torch._dynamo.reset()
     vb = _backbone()
     real_compile = torch.compile
