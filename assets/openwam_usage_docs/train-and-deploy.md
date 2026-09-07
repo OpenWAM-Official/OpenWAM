@@ -296,3 +296,88 @@ optimization:
 ~~~
 
 Compilation can add first-request warm-up latency. Source code: `scripts/train.py`, `openwam/train/openwam_trainer.py`, `scripts/deploy.py`, and `openwam/deploy/`.
+
+### Cosmos3 checkpoint: joint compile on/off validation
+
+The released [Cosmos3 RoboTwin checkpoint](https://huggingface.co/OpenWAM/robotwin_dual_system_joint_self_attention_cosmos3)
+uses `dual_system / joint_self_attn / action_sees_video`. Its inference uses
+the existing joint video/action compile path. No additional per-video-block
+compile implementation or checkpoint remapping is required for this policy.
+The results below document existing functionality, not a new optimization.
+
+Use the existing deployment switch to compare the same checkpoint:
+
+~~~bash
+WAM_PROFILE=1 python scripts/deploy.py \
+  --ckpt-dir /path/to/robotwin_dual_system_joint_self_attention_cosmos3 \
+  --device cuda:0 --host 127.0.0.1 --port 8848 \
+  --compile-enabled false \
+  optimization.dit_cache.enabled=false optimization.decode_video=false
+~~~
+
+In the prepared RoboTwin environment, set `ROBOTWIN_PATH` and
+`ROBOTWIN_PYTHON` as described in [RoboTwin evaluation](../../benchmarks/robotwin/README.md),
+then run the client in another terminal:
+
+~~~bash
+ROBOTWIN_TEST_NUM=3 bash benchmarks/robotwin/single_eval.sh \
+  adjust_bottle demo_clean cosmos3_off 0 8848 127.0.0.1
+~~~
+
+Stop the server, restart with `--compile-enabled true`, and repeat with a
+different result label such as `cosmos3_on`. Keep all other settings and
+actual accepted episode seeds matched. Repeat for the five tasks below.
+The normal deploy config already enables compile; the explicit flags make
+the comparison unambiguous.
+
+**Measured configuration (2026-09-07):** A800-SXM4-80GB, PyTorch 2.7.1+cu128,
+Python 3.10, BF16, Diffusers 0.38.0, Transformers 5.5.0; checkpoint revision
+`079cec41c7538028daf8f048dbd7c0abb092d20a`; RoboTwin revision
+`bf44be51cf5717a5595ce59447f2cf5263d2aa95`, `demo_clean`, 10 denoising steps,
+DiT cache disabled, output video decode disabled. The real observation,
+input VAE/text encoding, policy, action conversion, and simulator were used,
+with the official per-task step limits.
+
+**Warm denoising latency:** an earlier `adjust_bottle` run used one episode
+per setting. Excluding each process's first chunk left three timed chunks:
+
+| Metric | Compile off | Compile on |
+|---|---:|---:|
+| Warm mean | 762.7 ms | 269.3 ms |
+| Warm median | 761 ms | 268 ms |
+| First chunk, excluded above | 2.195 s | 76.293 s |
+
+The warm mean decreased by **64.7%**, calculated as `(off - on) / off`.
+This measures the full ten-step denoising loop, not the whole policy request:
+image/text encoding, networking, and simulator/control time are outside
+this timing boundary. It is a small-sample measurement, not a latency SLA.
+
+**Closed-loop results:** five tasks, three paired episodes per task and per
+setting (30 episodes total):
+
+| Task | Actual paired seeds | Compile off | Compile on |
+|---|---|---:|---:|
+| adjust_bottle | 100001, 100002, 100005 | 3/3 | 3/3 |
+| click_bell | 100000, 100001, 100002 | 3/3 | 3/3 |
+| lift_pot | 100000, 100002, 100003 | 3/3 | 3/3 |
+| pick_dual_bottles | 100000, 100001, 100002 | 3/3 | 3/3 |
+| stack_blocks_two | 100000, 100001, 100002 | 3/3 | 3/3 |
+| **Total** | **15 paired scenes** | **15/15** | **15/15** |
+
+These runs observed no task failures or logged compile fallback. They do not
+establish success-rate equivalence on other tasks, seeds, or randomization.
+Use native per-episode counts: this RoboTwin revision's `_result.txt` retains
+a denominator of 100 when the wrapper limits evaluation to three episodes.
+
+The five-task run also contained multiple slow compile-on chunks (about
+72.6-81.8 s), not only the first process request. Recompilation causes were
+not traced, so do not assume every later request stays near 269 ms or remove
+only the first chunk when computing steady-state statistics.
+
+**Provenance:** GPU runs used OpenWAM base `bccb28c0` with an experimental
+direct video-block patch installed. This checkpoint's joint action path
+bypasses that new block entry point, so the reported speedup and success
+results do not validate the independent direct-block implementation.
+The candidate is based on `fceb7267`; this intervening update did not change
+Cosmos3 computation. These historical GPU runs have not been repeated during
+the current candidate preparation.

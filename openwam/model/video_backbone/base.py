@@ -200,7 +200,7 @@ class VideoBackbone(ABC, nn.Module):
         return torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
 
     # ================================================================
-    # Optional: deploy preprocessing + decode (default raise)
+    # Optional: deploy preprocessing, decode, and compile
     # ================================================================
 
     def preprocess_input_for_inference(self, **kw) -> dict:
@@ -215,6 +215,10 @@ class VideoBackbone(ABC, nn.Module):
     def decode_video(self, latents: Tensor, *, tiled: bool = True) -> list:
         """Latent ``(B, C, T, H, W)`` → PIL frames. Irreversible encoders omit it."""
         raise NotImplementedError(f"{type(self).__name__} does not support decode_video.")
+
+    def apply_compile_optimizations(self, compile_cfg) -> None:
+        """Optional deploy-time compile hook; backbones default to eager execution."""
+        return None
 
     # ================================================================
     # Optional: joint self-attention split (default raise)

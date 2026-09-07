@@ -20,6 +20,7 @@ import torch.nn.functional as F
 pytest.importorskip("diffusers")
 
 from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver  # noqa: E402
+from openwam.model.architectures.utils.mask_modes import widen_mask_for_prefix_kv  # noqa: E402
 from openwam.model.video_backbone import Cosmos3EdgeVideoBackbone  # noqa: E402
 from openwam.model.video_backbone.cosmos3 import block_split, dit_forward, text_pack  # noqa: E402
 from openwam.model.video_backbone.cosmos3._vendor.transformer_cosmos3 import (  # noqa: E402
@@ -253,3 +254,56 @@ def test_padded_und_poison_is_detectable():
                 state = dit_forward.run_block(net, i, state)
             outs.append(dit_forward.finalize_block_loop(net, state))
     assert (outs[0] - outs[1]).abs().max().item() > 1e-3, "poison is inert; the leak tests prove nothing"
+
+
+@pytest.mark.parametrize("batch", [1, 2])
+@pytest.mark.parametrize("padded_und", [False, True])
+@pytest.mark.parametrize("video_mask_mode", ["bidirectional", "first_frame_causal"])
+def test_action_sees_video_matches_direct_blocks_with_matching_mask(batch, padded_und, video_mask_mode):
+    """Match the released policy's one-way coupling without dropping its video mask."""
+    torch.manual_seed(17)
+    net = Cosmos3OmniTransformer(**MINI).eval()
+    vb = Cosmos3EdgeVideoBackbone(
+        net=net,
+        dim=MINI["hidden_size"],
+        num_layers=MINI["num_hidden_layers"],
+        num_heads=MINI["num_attention_heads"],
+        head_dim=MINI["head_dim"],
+        context_dim=MINI["hidden_size"],
+    ).eval()
+    ab = _TinyActionBackbone(
+        MINI["hidden_size"], MINI["num_hidden_layers"], MINI["num_attention_heads"], MINI["head_dim"]
+    ).eval()
+    driver = DualSystemMoTDriver(
+        vb, ab, attention_mask_mode="action_sees_video", video_attention_mask_mode=video_mask_mode
+    )
+    ids = torch.tensor([1, 2, 3, 4])
+    lat = torch.randn(batch, MINI["latent_channel"], 3, 2, 2)
+    astate = types.SimpleNamespace(payload=types.SimpleNamespace(x_action=torch.randn(batch, 5, MINI["hidden_size"])))
+
+    with torch.no_grad():
+        direct = _build_state(net, ids, lat, ncp=1, padded_und=padded_und)
+        joint = _build_state(net, ids, lat, ncp=1, padded_und=padded_und)
+        for state in (direct, joint):
+            if padded_und:
+                padding_mask = state.extras["und_mask"].clone()
+                padding_mask[-1, -1] = False
+                state.extras["und_mask"] = padding_mask
+                state.prefix_kv_mask = padding_mask
+                for k, v in state.extras["und_kv"]:
+                    k[-1, -1] = 1e4
+                    v[-1, -1] = 1e4
+        s_video = direct.hidden_states.shape[1]
+        tokens_per_frame = direct.grid_height * direct.grid_width
+        direct.extras["shared_attention_mask"] = vb.build_video_to_video_mask(
+            video_seq_len=s_video, video_tokens_per_frame=tokens_per_frame, device=lat.device
+        )
+        mask = driver._build_attention_mask(s_video, 5, tokens_per_frame, device=lat.device)
+        mask = widen_mask_for_prefix_kv(mask, joint)
+        assert mask.dim() == (4 if padded_und else 2)
+        for i in range(vb.num_layers):
+            direct = vb.run_block(i, direct)
+            joint, astate = driver.step(i, joint, astate, attn_mask=mask)
+            torch.testing.assert_close(direct.hidden_states, joint.hidden_states, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(vb.finalize(direct), vb.finalize(joint), rtol=1e-5, atol=1e-5)
+        assert torch.isfinite(astate.payload.x_action).all()
