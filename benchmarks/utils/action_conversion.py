@@ -516,14 +516,10 @@ def libero_obs_to_eef10(
 
 
 # --------------------------------------------------------------------------- #
-# EBench (GenManip lift2/R5a dual-arm mobile manipulator)                      #
-# --------------------------------------------------------------------------- #
-# Mirrors of the trainer's rendering in openwam/dataloader/ebench.py — the
-# eval and training ends of the same contract; keep them in lockstep.
+# EBench conversions; keep aligned with openwam/dataloader/ebench.py.
 
 EBENCH_RAW_DIM = 23
-# GenManip lift2 gripper: 0.0 closed .. 0.044 open per finger (both fingers of
-# a hand are commanded identically).
+# GenManip lift2 gripper: 0.0 closed, 0.044 m open per finger.
 EBENCH_GRIPPER_OPEN = 0.044
 
 

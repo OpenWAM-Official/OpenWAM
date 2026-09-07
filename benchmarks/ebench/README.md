@@ -1,23 +1,22 @@
 # EBench (GenManip) Evaluation
 
-Two processes on the OpenWAM side: the **policy server** (this repo's env) and a thin **bridge client**. The bridge polls the GenManip eval server over HTTP (north) and queries the policy server over WebSocket (south, [wire protocol](../README.md)); the Isaac Sim evaluation server itself is the [GenManip](https://github.com/InternRobotics/GenManip) part of the [EBench](https://github.com/InternRobotics/EBench) project and may run on a different machine.
+The bridge connects [GenManip](https://github.com/InternRobotics/GenManip)'s `EvalClient` to one stateful OpenWAM policy server. It sends observations over HTTP and receives policy actions over WebSocket; the GenManip server may run on another machine.
 
 Commands below assume the bridge env's python at `/path/to/bridge-env/bin/python` — substitute your actual paths.
 
 ## 1. Environment Setup
 
-**Sim server** (per the EBench repo, possibly another machine): follow the [EBench environment guide](https://internrobotics.github.io/EBench-doc/getting-started/environment/) — Isaac Sim 4.1.0 (CUDA 12.1) + cuRobo from the [GenManip](https://github.com/InternRobotics/GenManip) repo, plus the `EBench-Assets` dataset (~34 GB, `huggingface-cli download InternRobotics/EBench-Assets --repo-type dataset --local-dir saved`). Isaac Sim 4.1.0 does not support Blackwell GPUs.
+**Sim server** (possibly another machine): follow the [EBench environment guide](https://internrobotics.github.io/EBench-doc/getting-started/environment/) for Isaac Sim 4.1.0 (CUDA 12.1), cuRobo, and the `EBench-Assets` dataset (~34 GB). Isaac Sim 4.1.0 does not support Blackwell GPUs.
 
 **Bridge env** (what OpenWAM's launch scripts run — no torch, no OpenWAM install):
 
 ```bash
 git clone --recursive https://github.com/InternRobotics/EBench && cd EBench
-pip install -e third_party/genmanip-client          # the only EBench piece the bridge imports
-# genmanip-client declares only `requests`; its EvalClient additionally imports these at runtime:
+pip install -e third_party/genmanip-client
 pip install numpy Pillow "websockets>=15" PyYAML opencv-python-headless "PyTurboJPEG<2" filelock
 ```
 
-Point `EBENCH_PYTHON` at this env's python. `PyTurboJPEG>=2` needs libjpeg-turbo 3.x on the system (`libturbojpeg.so`); on Ubuntu ≤ 22.04 keep the `<2` pin. For a no-Isaac sanity check see the mock flow in section 3.
+Point `EBENCH_PYTHON` at this env's python. On Ubuntu ≤ 22.04, keep the `PyTurboJPEG<2` pin unless libjpeg-turbo 3.x is installed. For a no-Isaac sanity check see section 3.
 
 > Hugging Face unreachable? Export `HF_ENDPOINT=https://hf-mirror.com` before running any downloader in this guide.
 
@@ -25,22 +24,21 @@ Point `EBENCH_PYTHON` at this env's python. `PyTurboJPEG>=2` needs libjpeg-turbo
 
 ```bash
 python scripts/download_assets/download_openwam_checkpoints.py
-# menu: OpenWAM_Alpha → OpenWAM-Alpha-Sim-EBench
 ```
 
-Run from the repo root — the checkpoint lands in `assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-EBench` (or use a checkpoint you trained yourself). Then:
+Select `OpenWAM_Alpha → OpenWAM-Alpha-Sim-EBench` in the menu. Run from the repo root; the checkpoint lands in `assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-EBench` (or use a checkpoint you trained yourself). Then:
 
 ```bash
-bash scripts/deploy.sh assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-EBench   # keep running in its own terminal
+bash scripts/deploy.sh assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-EBench
 ```
 
-WebSocket port 8848 by default; the server is ready once it logs `WebSocket server started`. For N parallel workers: `NUM_GPUS=N bash scripts/deploy.sh <ckpt_dir>` → one server per GPU on ports 8848…8848+N-1 (per-GPU logs in `logs/deploy_gpu<i>.log`).
+The default WebSocket port is 8848; wait for `WebSocket server started`. For N workers, `NUM_GPUS=N bash scripts/deploy.sh <ckpt_dir>` starts one server per GPU on ports 8848…8848+N-1.
 
-**Paper settings.** The numbers in section 5 were produced with `bash scripts/deploy.sh <ckpt_dir> --compile-enabled false optimization.dit_cache.enabled=false` — the DiT velocity cache shifts the commanded EE pose by ~2 mm and is kept off for benchmark runs; compile is only a speed knob. Everything else is the `configs/deploy.yaml` default (`denoise_steps: 10`, sync denoising, sync executor, `inference_horizon: null` = execute the full 32-step chunk before re-planning).
+For the reported results, use `--compile-enabled false optimization.dit_cache.enabled=false`; other settings use `configs/deploy.yaml` defaults.
 
 ## 3. Run the Evaluation
 
-On the sim machine (GenManip repo): `python ray_eval_server.py --host 0.0.0.0 --port 8087 --no_save_process`, then submit the split you want, e.g. the held-out split used for the paper numbers: `gmp submit ebench/generalist/test_mini --run_id <run_id>` (`val_train` / `val_unseen` are the open tuning splits; `ebench/mobile_manip/<split>` and `ebench/table_top_manip/<split>` are the specialist tracks). Single worker from this repo:
+On the sim machine (GenManip), start `python ray_eval_server.py --host 0.0.0.0 --port 8087 --no_save_process` and submit a split, for example `gmp submit ebench/generalist/test_mini --run_id <run_id>`. Then run one worker from this repo:
 
 ```bash
 EBENCH_PYTHON=/path/to/bridge-env/bin/python \
@@ -54,43 +52,39 @@ All bridge flags can also come from a YAML: `--config benchmarks/ebench/policy_c
 Parallel run — one policy server per worker:
 
 ```bash
-NUM_GPUS=4 bash scripts/deploy.sh assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-EBench   # terminal 1; blocks until Ctrl+C
-# terminal 2, once all servers log "WebSocket server started":
+NUM_GPUS=4 bash scripts/deploy.sh assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-EBench
 NUM_WORKERS=4 EBENCH_PYTHON=/path/to/bridge-env/bin/python \
 bash benchmarks/ebench/multi_eval.sh \
     --url http://<sim-host>:8087 --run-id <run_id> \
     --ckpt-config assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-EBench/config.yaml
 ```
 
-Scores are written by the GenManip server under `saved/eval_results/<task>/<run_id>/` (`gmp status` to see the resolved path); the bridge's `EvalClient` also mirrors per-episode `episode_result.json` files into `client_results/` under the directory it runs from (override with `GENMANIP_RESULT_DIR=/some/dir`).
+GenManip writes scores under `saved/eval_results/<task>/<run_id>/`; `gmp status` shows the resolved path. The bridge mirrors per-episode `episode_result.json` files into `client_results/` (override with `GENMANIP_RESULT_DIR`).
 
-Offline sanity check without Isaac Sim — the mock replays real EBench-Dataset episodes over the exact wire format (verifies bridge + conversion; produces no scores). It runs in the **training env** (needs `pandas`, `pyarrow`, `av`), needs only one dataset bucket, and serves exactly one bridge per mock instance (use `single_eval.sh`, not `multi_eval.sh`):
+Offline sanity check without Isaac Sim: the mock replays one EBench-Dataset bucket over the EvalClient wire format. Run it in the **training env** (`pandas`, `pyarrow`, and `av` required) with one `single_eval.sh` worker:
 
 ```bash
-# one bucket is enough (the full EBench-Dataset is ~330 GB; the interactive
-# scripts/download_assets/download_benchmark_data.py fetches all of it)
 huggingface-cli download InternRobotics/EBench-Dataset --repo-type dataset \
     --local-dir assets/benchmark_data/ebench --include 'simple_pnp/task1/*'
 python benchmarks/ebench/mock_genmanip_server.py \
     --dataset-dir assets/benchmark_data/ebench --bucket simple_pnp/task1 \
     --episodes 2 --steps-per-episode 8 --port 8087
-# in another shell: single_eval.sh as above with --url http://127.0.0.1:8087 (no --run-id needed)
 ```
 
-A clean mock run ends with the bridge logging `run complete: 2 episodes, 16 steps bridged` and the mock logging `16 actions, 0 violations`. Any action-contract violation makes the mock return HTTP 500 for subsequent reset, reset-result, and step requests (`ACTION CONTRACT VIOLATION` in the mock log), so the bridge's reconnect attempts burn out and it exits non-zero instead of silently restarting the replay. The mock writes every accepted action to `./ebench_mock_actions.jsonl` (`--log-file`).
+In another shell, run the single-worker command above with `--url http://127.0.0.1:8087` and omit `--run-id`.
+
+A successful mock run logs `run complete: 2 episodes, 16 steps bridged` and `16 actions, 0 violations`. Contract violations return HTTP 500 for later reset, reset-result, and step requests, and the bridge exits non-zero. Accepted actions are written to `./ebench_mock_actions.jsonl` (`--log-file`).
 
 <details>
 <summary><b>Notes & troubleshooting</b></summary>
 
-- Always pass `--ckpt-config` when the checkpoint dir is reachable: it hard-verifies the contract (`dataloader.type=ebench`, `action_mode=eef`, `unify_action=true`); without it you only get an UNVERIFIED warning. Checkpoints trained with the pre-release codebase carry `action_mode: ebench` and are rejected by this check — retrain, or edit their `config.yaml` (and the `normalization_stats.npy` key) to `eef` if the raw-23 layout is unchanged.
-- One policy server per worker (the server-side executor is stateful); `multi_eval.sh` maps worker `i` → south port `SOUTH_PORT_BASE+i` (default 8848+i), matching `deploy.sh`'s `PORT_BASE+i`.
-- The bridge waits up to 300 s for the policy server's first ping (checkpoint load; the server only binds its port once the model is on the GPU) — not a hang. With `compile.enabled` left on, the compile warm-up is paid on each server's first `obs` request and is bounded by `--request-timeout` (300 s); the paper runs used `--compile-enabled false`. `--no-send-state` only for non-proprio checkpoints.
-- The bridge rebuilds its `EvalClient` and restarts the episode on any sim-side step failure; after `--max-reconnects` (20) failures in one run it exits non-zero instead of looping on a deterministic rejection.
-- `RuntimeError: Timed out waiting for reset result after 3000s` at start-up means the Isaac worker behind that worker id never finished loading its scene (the GenManip server replaces such workers itself and requeues their episodes). Relaunch that one bridge with the same `--worker-id` / `--run-id` — the server hands a re-registered worker the next unclaimed episode while the other workers keep running — and if the same worker id times out again, leave it out (`NUM_WORKERS` minus one); the run still completes on the remaining workers. For long runs wrap each bridge in a restart loop.
-- Behind a corporate proxy, unset `http_proxy` / `https_proxy` / `all_proxy` in the bridge shell (or put the sim host in `no_proxy`): the EvalClient's HTTP calls to the sim server honour them, while the WebSocket side to the policy server already bypasses proxies.
-- Arms are absolute EE poses; GenManip solves IK server-side and silently holds joints on IK failure — validate in local sim before online submissions. The EE-pose path depends on GenManip's IK stabilisation fixes (commit `fbf7acb`, 2026-08-26, or later): older GenManip checkouts terminate many long-horizon episodes with `arm_state_jump_too_large`.
-- Official online eval: `gmp online submit --base_url https://internrobotics.shlab.org.cn/eval --token $TOK --benchmark_set ebench_generalist --model_name ... --model_type WAM --submitter_name ... --submitter_homepage ... --is_public 0` → endpoint + `task_id`; then `single_eval.sh --url "$ENDPOINT" --token "$TOK" --run-id "$TASK_ID"`. ≤16 workers per run, 10-min inactivity disconnect (warm up the policy server first); failed runs resume with the same `task_id`. See the [Challenge guide](https://internrobotics.github.io/EBench-doc/challenge/).
-- Budget: `test_mini` is 510 episodes with per-task step limits of 600–5000 sim steps (worst case ≈ 1.15 M steps, one policy call each); with 4 workers on 8× RTX 4090 the full split took about a day. The three public splits together (`val_train` 130 + `val_unseen` 154 + `test_mini` 510) are the "794 task instances" quoted by EBench.
+- Pass `--ckpt-config` when available; it verifies `dataloader.type=ebench`, `action_mode=eef`, and `unify_action=true`.
+- Use one policy server per worker. The bridge may wait up to 300 s for startup; `--compile-enabled false` avoids compile warm-up during evaluation.
+- A failed sim step resets the episode and retries up to `--max-reconnects` (20), then exits non-zero.
+- If reset times out, restart the affected worker with the same `--worker-id` and `--run-id`; reduce `NUM_WORKERS` if it continues to fail.
+- Arms are absolute EE poses and GenManip performs IK server-side; validate the checkpoint in local simulation first.
+- Online runs allow at most 16 workers and disconnect after 10 minutes of inactivity; failed runs can resume with the same `task_id`. See the [Challenge guide](https://internrobotics.github.io/EBench-doc/challenge/).
+- `test_mini` contains 510 episodes; use parallel workers for long runs.
 
 </details>
 

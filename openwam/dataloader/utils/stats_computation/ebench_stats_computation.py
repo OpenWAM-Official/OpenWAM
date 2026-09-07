@@ -1,65 +1,8 @@
 #!/usr/bin/env python3
-"""Compute EBench action-normalization stats from a full parquet scan.
+"""Build EBench raw-23 normalization stats by scanning parquet rows.
 
-The EBench reader (:mod:`openwam.dataloader.ebench`) normally derives its
-raw-23 stats online at construction time by merging the per-episode summary
-moments in each bucket's ``meta/episodes_stats.jsonl``. That derivation is
-exact for min-max / z-score, but summaries carry no true quantiles (so
-``normalize_mode="quantile"`` is refused without a prebuilt file) and the
-scalar-gripper stats lean on the two-finger-equality invariant that the
-reader only spot-checks (3 episodes x 64 rows). This offline module scans
-every action row the reader actually emits and adds what the summaries
-cannot provide:
-
-  * true ``q01``/``q99`` from the row stream — unlocking
-    ``normalize_mode="quantile"`` for EBench;
-  * a dataset-wide certificate of the reader's data contract (finite values,
-    unit quaternions, gripper commands within ``EBENCH_GRIPPER_CMD_RANGE``,
-    per-hand finger commands equal within
-    ``EBENCH_FINGER_GAP_TOLERANCE``) for every episode training can serve,
-    instead of the sampled init check — episodes in
-    ``meta/excluded_episodes.json`` are tolerated, not certified;
-  * a prebuilt cache, so training ranks cache-hit instead of every rank
-    re-merging the summaries at construction.
-
-Alignment notes (family = robocoin/behavior stats modules):
-
-  * the row stream is projected with the READER'S OWN helpers
-    (``_raw23_from_frame`` -> ``_ee_pose_gripper_base_to_raw23``: wxyz
-    quat->rot6d, two-finger averaging, base column passthrough) so the stats
-    are computed over byte-identical numbers to what the reader feeds the
-    model — zero layout drift;
-  * moments accumulate in RoboCOIN's streaming :class:`Accumulator` (exact
-    mean/std/min/max, reservoir q01/q99) and the 12 rot6d dims (3:9 / 13:19 —
-    the eef-20 layout EBench's raw-23 prefix shares) are pinned to identity
-    via the shared ``pin_rot6d_identity`` (``--no-rot6d-identity`` opt-out);
-  * ``pool="action"`` — the ACTION stream only, deliberately NOT behavior's
-    ``action+proprio``: the EBench reader normalizes proprio with the action
-    stats by design (measured state is rendered into the command space; see
-    configs/dataloader/ebench.yaml) and the online cache is action-only, so
-    this module must be a drop-in replacement with identical
-    mean/std/min/max. (libero is the family precedent for a documented
-    action-only pool.)
-  * episode coverage mirrors the reader's summary build
-    (``_build_stats_from_bucket``): every episode listed in
-    ``meta/episodes_stats.jsonl``, no split filtering, and excluded episodes
-    still accumulated when readable (the summary merge pools their moments
-    too) — both producers agree on coverage, and the cache fingerprint
-    (reused verbatim from the reader) stays valid for either. Excluded
-    episodes that cannot be read cleanly are warn-skipped (they never train;
-    blocking the scan on them would make quantile permanently unreachable).
-
-Output: the reader's own cache schema
-``{<action_mode>: {mean,std,min,max,q01,q99}, num_timesteps,
-raw_action_dim_mask, fingerprint}`` written atomically to ``--output``
-(default ``<dataset_dir>/meta/ebench_normalization_stats.npy``, the ebench.yaml
-convention). The reader accepts the file unchanged for every mode, and the
-same file doubles as the deploy denormalization artifact (the trainer copies
-it into the checkpoint as ``normalization_stats.npy``).
-
-Usage:
-    python -m openwam.dataloader.utils.stats_computation.ebench_stats_computation \
-        --dataset_dir /path/to/data_lake/EBench-Dataset
+The scan provides true quantiles, validates each usable episode, and writes
+the reader-compatible cache with the reader's projection and fingerprint.
 """
 
 import argparse
@@ -71,9 +14,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-# Reuse the reader's own constants/helpers so the scan and the reader cannot
-# drift: same column keys, same raw-23 projection, same episode-path
-# resolution, same cache fingerprint/payload/atomic writer.
+# Reuse reader helpers to keep the scan and reader in sync.
 from openwam.dataloader.ebench import (
     EBENCH_ACTION_KEYS,
     EBENCH_FINGER_GAP_TOLERANCE,
@@ -99,16 +40,7 @@ from openwam.dataloader.utils.stats_computation.robocoin_stats_computation impor
 
 
 def _validated_raw23(frame: pd.DataFrame, action_keys: Sequence[str], ctx: str) -> np.ndarray:
-    """Project an episode's action columns to raw-23, enforcing the reader's
-    data contract on EVERY row.
-
-    The reader's init check samples 3 episodes x 64 rows and windows are never
-    re-validated at __getitem__, so bad values in a training-served episode
-    would both skew the stats and reach the model silently — surfacing them at
-    scan time is the dataset-wide certificate this module provides. Fail-fast
-    applies only to episodes training can serve; the caller handles excluded
-    episodes leniently (they never train).
-    """
+    """Project action columns to raw-23 and validate every row."""
     ee = _column_matrix(frame, action_keys[0], 14)
     gripper = _column_matrix(frame, action_keys[1], 4)
     base = _column_matrix(frame, action_keys[2], 3)
@@ -118,7 +50,7 @@ def _validated_raw23(frame: pd.DataFrame, action_keys: Sequence[str], ctx: str) 
     assert_unit_quaternion(ee[:, 3:7], sample_n=len(ee))
     assert_unit_quaternion(ee[:, 10:14], sample_n=len(ee))
     lo_cmd, hi_cmd = EBENCH_GRIPPER_CMD_RANGE
-    eps = 1e-4  # same slack the reader's _validate_episode_rows applies
+    eps = 1e-4
     if gripper.min() < lo_cmd - eps or gripper.max() > hi_cmd + eps:
         raise ValueError(
             f"{ctx} {action_keys[1]} outside [{lo_cmd - eps}, {hi_cmd + eps}]: "
@@ -137,16 +69,7 @@ def _validated_raw23(frame: pd.DataFrame, action_keys: Sequence[str], ctx: str) 
 
 
 def _scan_bucket(bucket: Path, action_keys: Sequence[str], acc: Accumulator) -> Tuple[int, int]:
-    """Stream every episode of one bucket into ``acc``.
-
-    Returns ``(n_files, n_skipped)``. Episodes listed in
-    ``meta/excluded_episodes.json`` never train, but the online summary merge
-    still pools their moments (episodes_stats.jsonl carries no exclusion
-    filtering), so they are accumulated for coverage parity — leniently:
-    whatever got an episode excluded (missing/corrupt parquet, contract
-    violations) warn-skips that episode instead of blocking the whole scan.
-    Episodes training can serve keep the strict fail-fast validation.
-    """
+    """Scan one bucket and return ``(n_files, n_skipped)``."""
     stats_meta = bucket / "meta" / "episodes_stats.jsonl"
     if not stats_meta.exists():
         raise FileNotFoundError(f"EBench stats file missing: {stats_meta}")
@@ -168,7 +91,7 @@ def _scan_bucket(bucket: Path, action_keys: Sequence[str], acc: Accumulator) -> 
                 raw23 = _raw23_from_frame(frame, action_keys)
                 if not np.isfinite(raw23).all():
                     raise ValueError("non-finite values")
-            except Exception as e:  # noqa: BLE001 — excluded data must not block the scan
+            except Exception as e:  # noqa: BLE001
                 print(f"  Warning: skipping excluded {ctx}: {e} (stats will drift slightly from the summary merge)")
                 n_skipped += 1
                 continue
@@ -186,14 +109,7 @@ def compute_ebench_stats(
     *,
     rot6d_identity: bool = True,
 ) -> Tuple[dict, int, int]:
-    """Full parquet scan over ``buckets`` -> raw-23 action stats.
-
-    Returns ``(stats, num_timesteps, num_files)`` where ``stats`` carries all
-    six keys ``{mean, std, min, max, q01, q99}`` as float32 ``(23,)`` arrays.
-    mean/std/min/max are exact (streamed over every row) and match the
-    reader's summary merge; q01/q99 come from the Accumulator's bounded
-    reservoir (exact below 1M rows).
-    """
+    """Scan buckets and return raw-23 stats plus row and file counts."""
     acc = Accumulator(dim=EBENCH_RAW_ACTION_DIM)
     n_files = 0
     n_skipped = 0
@@ -207,15 +123,10 @@ def compute_ebench_stats(
         print(f"  Note: {n_skipped} excluded episode(s) skipped — expect small drift vs the summary merge.")
 
     stats = {k: np.asarray(v, dtype=np.float32) for k, v in acc.finalize().items()}
-    # Reader parity on degenerate dims: the summary paths floor std at
-    # EBENCH_STD_FLOOR, while Accumulator.finalize substitutes 1.0 below 1e-8
-    # — GenManip's constant commanded base deltas would hit exactly that
-    # difference. Recompute from the raw moments and apply the reader's floor.
+    # Match the reader's floor for constant dimensions.
     raw_std = np.sqrt(acc.m2 / max(acc.count, 1))
     stats["std"] = np.maximum(raw_std, EBENCH_STD_FLOOR).astype(np.float32)
     if rot6d_identity:
-        # EBench raw-23's [0:20) prefix is the family eef-20 layout, so the
-        # shared dim tuple applies directly; base dims 20:23 keep real stats.
         pin_rot6d_identity(stats, ROT6D_DIMS_EEF20)
     return stats, int(acc.count), n_files
 
@@ -227,19 +138,12 @@ def build_and_save_ebench_stats(
     action_mode: str = "eef",
     rot6d_identity: bool = True,
 ) -> Tuple[Path, dict]:
-    """Scan, cross-check against the summary merge, and write the reader cache.
-
-    Returns ``(output_path, stats)``.
-    """
+    """Scan, validate, and write the reader cache."""
     action_keys = EBENCH_ACTION_KEYS
     bucket_paths = discover_ebench_buckets(dataset_dir)
     stats, num_timesteps, n_files = compute_ebench_stats(bucket_paths, action_keys, rot6d_identity=rot6d_identity)
 
-    # Guardrail: the summary merge and the row scan must agree on
-    # mean/std/min/max (the scan is authoritative; a large gap means
-    # episodes_stats.jsonl no longer describes the parquet bytes — re-export).
-    # The summary path pins rot6d unconditionally, so compare only the dims
-    # both producers derive from data.
+    # Compare data-derived dimensions with the summary merge; rot6d is pinned there.
     summary = _merge_raw_stats([_build_stats_from_bucket(b, action_keys) for b in bucket_paths])
     compare = np.ones(EBENCH_RAW_ACTION_DIM, dtype=bool)
     compare[list(ROT6D_DIMS_EEF20)] = False
