@@ -187,6 +187,12 @@ def wan_blocks_compile_cfg(compile_cfg: Any) -> Any:
     return _fast_path_compile_cfg(compile_cfg, "wan_blocks", default_torch_mode="default")
 
 
+def cosmos3_blocks_compile_cfg(compile_cfg: Any) -> Any:
+    """Resolve Cosmos3 gen-block options; avoid per-block CUDA graphs by default."""
+
+    return _fast_path_compile_cfg(compile_cfg, "cosmos3_blocks", default_torch_mode="default")
+
+
 def section_enabled(cfg: Any, default: bool = False) -> bool:
     """Return whether a compile section is enabled."""
 
@@ -210,6 +216,7 @@ def torch_compile_kwargs(compile_cfg: Any, *, default_mode: str | None = None) -
 __all__ = [
     "as_bool",
     "compile_enabled",
+    "cosmos3_blocks_compile_cfg",
     "cross_attn_compile_cfg",
     "cfg_get",
     "cfg_namespace",

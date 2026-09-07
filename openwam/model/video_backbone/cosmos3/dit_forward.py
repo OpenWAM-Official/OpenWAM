@@ -25,7 +25,7 @@ never trained on; parity tests compare noisy frames only.
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -353,14 +353,20 @@ def _gen_block_forward(
     return residual + layer.mlp_moe_gen(layer.post_attention_layernorm_moe_gen(residual))
 
 
-def run_block(net, block_id: int, state: BlockLoopState) -> BlockLoopState:
+def run_block(
+    net,
+    block_id: int,
+    state: BlockLoopState,
+    *,
+    block_forward: Callable[..., Tensor] = _gen_block_forward,
+) -> BlockLoopState:
     layer = net.layers[block_id]
     k_und, v_und = state.extras["und_kv"][block_id]
     # Single-system mode rides the same block forward: action/state tokens are
     # just extra gen tokens (Cosmos3 has no AdaLN, so there is no per-frame
     # modulation to expand — unlike the predict2.5 shared path).
     state.hidden_states = gradient_checkpoint_forward(
-        _gen_block_forward,
+        block_forward,
         state.use_gradient_checkpointing,
         state.use_gradient_checkpointing_offload,
         layer,

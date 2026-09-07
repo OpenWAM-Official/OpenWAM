@@ -26,11 +26,17 @@ from __future__ import annotations
 
 import logging
 import random
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 import torch
 from torch import Tensor
 
+from openwam.model.compile_options import (
+    compile_enabled,
+    cosmos3_blocks_compile_cfg,
+    section_enabled,
+    torch_compile_kwargs,
+)
 from openwam.model.video_backbone.base import BlockLoopState, VideoBackbone
 from openwam.model.video_backbone.cosmos3 import dit_forward, text_pack
 from openwam.model.video_backbone.cosmos3.scheduler import Cosmos3FlowSchedulerAdapter
@@ -111,6 +117,9 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
         self._text_dropout_p = float(text_dropout_p)
         self._text_dropout_rng = random.Random(text_dropout_seed)
         self._pristine_inv_freq = self._capture_pristine_inv_freq()
+        self._gen_block_compile_enabled = False
+        self._gen_block_compile_kwargs: dict | None = None
+        self._compiled_gen_block: Callable[..., Tensor] | None = None
 
     def _capture_pristine_inv_freq(self) -> Optional[Tensor]:
         """Keep an fp32 copy of the rotary table that no dtype cast can reach.
@@ -399,7 +408,40 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
     def prepare(self, **pipeline_inputs) -> BlockLoopState:
         return dit_forward.prepare_block_loop(self.dit, **pipeline_inputs)
 
+    def apply_compile_optimizations(self, compile_cfg) -> None:
+        """Keep layers as arguments so compilation does not change checkpoint keys."""
+        self._compiled_gen_block = None
+        self._gen_block_compile_enabled = False
+        self._gen_block_compile_kwargs = None
+        if not compile_enabled(compile_cfg, default=False, strict=True):
+            return
+        section = cosmos3_blocks_compile_cfg(compile_cfg)
+        if not section_enabled(section, default=True):
+            return
+        self._gen_block_compile_kwargs = torch_compile_kwargs(section, default_mode="default")
+        self._gen_block_compile_enabled = True
+        logger.info("Enabled lazy Cosmos3 gen-block compile with kwargs=%s", self._gen_block_compile_kwargs)
+
     def run_block(self, block_id: int, state: BlockLoopState) -> BlockLoopState:
+        compile_allowed = (
+            self._gen_block_compile_enabled
+            and not self.training
+            and not torch.is_grad_enabled()
+            and not state.use_gradient_checkpointing
+            and not state.use_gradient_checkpointing_offload
+            and not torch.compiler.is_compiling()
+        )
+        if compile_allowed:
+            try:
+                if self._compiled_gen_block is None:
+                    self._compiled_gen_block = torch.compile(
+                        dit_forward._gen_block_forward, **(self._gen_block_compile_kwargs or {})
+                    )
+                return dit_forward.run_block(self.dit, block_id, state, block_forward=self._compiled_gen_block)
+            except Exception as exc:
+                self._compiled_gen_block = None
+                self._gen_block_compile_enabled = False
+                logger.warning("Cosmos3 gen-block compile failed at block %s; falling back to eager: %s", block_id, exc)
         return dit_forward.run_block(self.dit, block_id, state)
 
     def finalize(self, state: BlockLoopState) -> Tensor:
