@@ -14,28 +14,17 @@
   <img src="assets/repo_images/teaser.jpg" alt="OpenWAM teaser">
 </p>
 
-<!--
 ## What is OpenWAM
 
-OpenWAM is an open-source framework for **World-Action Models (WAMs)**: video-diffusion policies that jointly model future visual dynamics and robot actions.
+OpenWAM is an open research stack for systematically developing **World-Action Models (WAMs)**. It turns tightly coupled design choices into modular components and controlled experiments. It consists of:
 
-The repository is organized around the `openwam/` package and currently supports:
+- **OpenWAM-Infra:** A modular infrastructure for composing and comparing model, representation, training, inference, deployment, and evaluation choices.
+- **OpenWAM-Study:** Controlled studies that derive practical principles for inheriting world knowledge, coupling world and action learning, and scaling across domains.
+- **OpenWAM-α:** An open pretrained WAM that applies these principles at scale, trained on 518.5M frames (about 6,400 hours) of egocentric human and robot data.
 
-- Hydra-based training and deployment entrypoints
-- WAM-specific action/video scheduling and receding-horizon execution
-- RoboTwin dataset adapter with multi-task, multi-view support
-- Two WAM architecture families: dual-system and single system variants
-- A policy server for robot deployment workflows
-
-## What OpenWAM Focuses On
-
-OpenWAM is not a VLA clone. Its core direction is to use a video world model as the control backbone.
-
-- Backbone: Wan-family video diffusion models
-- Action modeling: flow-matched action generation coupled to video denoising
-- Strengths: temporal coherence, world-model-style rollout, flexible denoising schedules
-- Primary use cases: joint video-action generation, action-only rollout, robot deployment
--->
+<p align="center">
+  <img src="assets/repo_images/infra.jpg" alt="OpenWAM infrastructure overview">
+</p>
 
 <!--
 ## Repository Layout

@@ -17,9 +17,8 @@ from openwam.model.video_backbone import (
 )
 
 
-def test_cosmos_predict25_names_registered():
+def test_cosmos_predict25_name_registered():
     assert _VIDEO_BACKBONE_REGISTRY["cosmos_predict25_2b"] is CosmosPredict25VideoBackbone
-    assert _VIDEO_BACKBONE_REGISTRY["cosmos_predict25_14b"] is CosmosPredict25VideoBackbone
 
 
 def test_cosmos_predict25_build_with_bad_path_raises_clear_error():

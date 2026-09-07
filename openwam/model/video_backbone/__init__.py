@@ -49,7 +49,6 @@ register_video_backbone("wan21_i2v_14b_480p")(Wan21)
 from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone  # noqa: E402
 
 register_video_backbone("cosmos_predict25_2b")(CosmosPredict25VideoBackbone)
-register_video_backbone("cosmos_predict25_14b")(CosmosPredict25VideoBackbone)
 
 # Cosmos3-Edge backbone. CPU-only-CI safe — the vendored transformer (which
 # pulls ``diffusers``) is deferred to ``from_pretrained``.

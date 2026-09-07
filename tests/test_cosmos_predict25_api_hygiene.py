@@ -30,7 +30,7 @@ def test_subclasses_base_contract():
 
 
 def test_registered_under_expected_names():
-    for name in ("cosmos_predict25_2b", "cosmos_predict25_14b"):
+    for name in ("cosmos_predict25_2b",):
         assert _VIDEO_BACKBONE_REGISTRY[name] is CosmosPredict25VideoBackbone
 
 
