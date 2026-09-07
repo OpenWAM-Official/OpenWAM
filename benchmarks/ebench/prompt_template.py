@@ -9,8 +9,7 @@ training time, so eval-time prompts stay in-distribution.
 
 The wrapped string must stay byte-for-byte identical to
 ``openwam.dataloader.transforms.multiview.format_prompt_for_inference`` — the
-two are the eval and training ends of the same EBench contract. A regression
-test (``tests/benchmarks/test_ebench_bridge.py``) pins them together.
+two are the eval and training ends of the same EBench contract.
 
 Deliberately dependency-free (no ``openwam`` / torch imports) so it loads
 inside the thin EBench eval environment (genmanip-client + numpy/Pillow).

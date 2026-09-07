@@ -20,7 +20,7 @@ action dict (GenManip runs cuRobo IK server-side). Single-step ``step()`` only:
 one obs per popped action.
 
 Conversions live in ``benchmarks/utils/action_conversion.py`` and mirror the
-trainer's rendering byte-for-byte (pinned by tests/benchmarks/test_ebench_bridge.py).
+trainer's rendering byte-for-byte.
 The base slot is always the per-step delta command (``base_is_rel=True``), the
 only base mode the EBench dataloader trains.
 

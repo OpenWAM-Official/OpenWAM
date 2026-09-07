@@ -519,9 +519,7 @@ def libero_obs_to_eef10(
 # EBench (GenManip lift2/R5a dual-arm mobile manipulator)                      #
 # --------------------------------------------------------------------------- #
 # Mirrors of the trainer's rendering in openwam/dataloader/ebench.py — the
-# eval and training ends of the same contract. A regression test
-# (tests/benchmarks/test_ebench_bridge.py) pins each pair together byte-for-
-# byte; change them in lockstep.
+# eval and training ends of the same contract; keep them in lockstep.
 
 EBENCH_RAW_DIM = 23
 # GenManip lift2 gripper: 0.0 closed .. 0.044 open per finger (both fingers of
