@@ -50,6 +50,18 @@ WebSocket port 8848 by default (`--port` to change). Keep it running.
 
 ## 3. Run the Evaluation
 
+**Split and trials.**
+
+- `pretrain` (default) — the leaderboard / multi-task protocol: the 50 target tasks
+  evaluated in training-distribution kitchens (paper §4.1). All §4 numbers use this.
+- `target` — the foundation track: evaluate in the 10 held-out kitchens after
+  finetuning on target demos (§4.2). Pass it explicitly.
+- In `multi_eval.sh target`, that `target` is the task-list token, not the split.
+- The commands below run `num_trials: 5` per task (smoke scale, from
+  `policy_config.yml`); benchmark numbers use 50 rollouts/task
+  ([protocol](https://robocasa.ai/docs/build/html/benchmarking/benchmarking_overview.html)) —
+  copy `policy_config.yml`, set `num_trials: 50`, and point `ROBOCASA365_POLICY_CONFIG` at it.
+
 Single task (args: task, split, port, host):
 
 ```bash
@@ -78,7 +90,7 @@ bash benchmarks/robocasa365/run_eval.sh \
 
 - The server's ping must advertise representation `robocasa365` — the client hard-fails otherwise. The released checkpoint matches; your own must be trained on the robocasa365 conversion.
 - Rollout horizons come from robocasa's official task registry at runtime; leave `max_steps_override: null` in `policy_config.yml` for benchmark runs.
-- Client defaults live in `benchmarks/robocasa365/policy_config.yml` (5 trials/task, `pretrain` split). Splits: `pretrain` = training-distribution kitchens (layouts/styles 11-60), `target` = the official 10 held-out evaluation kitchens, `all` = everything; pass the split as arg 2 / `--split` / `SPLIT=` to switch. CLI flags and `ROBOCASA365_PORT` / `ROBOCASA365_POLICY_HOST` override; `ROBOCASA365_POLICY_CONFIG` points at a custom file.
+- Client defaults live in `benchmarks/robocasa365/policy_config.yml` (5 trials/task — smoke scale, see *Split and trials* above — and `pretrain` split). Splits: `pretrain` = training-distribution kitchens (layouts/styles 11-60), the leaderboard/multi-task protocol; `target` = the 10 held-out kitchens of the foundation-model (finetune) track; `all` = everything; pass the split as arg 2 / `--split` / `SPLIT=` to switch. CLI flags and `ROBOCASA365_PORT` / `ROBOCASA365_POLICY_HOST` override; `ROBOCASA365_POLICY_CONFIG` points at a custom file.
 - `multi_eval.sh` tasks: literal names, `target`/`all` (expands `target_tasks.txt`), or a file; per-task success rates aggregate into `<out>/summary_<split>.csv`.
 - `run_eval.sh` requires an explicit checkpoint filename (substitute your actual `checkpoint_step_*.safetensors`) and writes `server.log` / `client.log` / `tasks/summary_<split>.csv` under `outputs/robocasa365/<timestamp>` (override with `OUTPUT_DIR`); `scripts/deploy.sh` alone may omit `--ckpt-name` (picks the latest).
 
