@@ -58,10 +58,11 @@ LIBERO_PYTHON=/path/to/miniconda3/envs/libero/bin/python \
 LIBERO_PATH=/path/to/LIBERO \
 GPUS=0,1 REPLICAS_PER_GPU=1 \
 bash benchmarks/libero/run_eval.sh \
-  assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-LIBERO checkpoint_step_10000.safetensors
+  assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-LIBERO checkpoint_step_10690.safetensors \
+  --compile-enabled false --render-gpus 2,3
 ```
 
-Append `--smoke` first for a one-task end-to-end validation. Single suite against the running server from section 2 (args: suite, task id, port, host):
+Append `--smoke` first for a one-task end-to-end validation. The two trailing flags are the defensive settings described under *Notes & troubleshooting* — drop them once you have confirmed your driver and PyTorch build do not need them. Single suite against the running server from section 2 (args: suite, task id, port, host):
 
 ```bash
 LIBERO_PATH=/path/to/LIBERO LIBERO_PYTHON=/path/to/miniconda3/envs/libero/bin/python \
@@ -73,6 +74,8 @@ bash benchmarks/libero/single_eval.sh libero_spatial 0 8848 127.0.0.1
 
 - Always pass the checkpoint dir + filename explicitly (in-code defaults are placeholders); the dir must contain `config.yaml` and `normalization_stats.npy`, and the checkpoint must serve the `eef` representation — the client pings and refuses mismatches. Substitute your actual `checkpoint_step_*.safetensors` name.
 - Protocol is pinned and validated at launch: 50 trials/task, seed 42, `max_steps` 600 (700 for `libero_10`); deviations abort.
+- **Client dies with `exit=-6` and a log that stops after the `[OpenWAMLiberoPolicy]` line.** MuJoCo's EGL offscreen renderer aborts inside `mjr_readPixels` when it shares a physical GPU with sustained CUDA compute — a driver-level conflict, not a LIBERO or OpenWAM bug (reproduced on driver 570.124.06 by a bare `torch.matmul` loop in an unrelated process). Give the renderer its own GPUs with `--render-gpus`, e.g. `GPUS=0,1 ... --render-gpus 2,3`; the flag maps render devices onto policy-GPU slots and defaults to `--gpus`.
+- **Policy server dies with `Fatal Python error: none_dealloc: deallocating None`** inside a `torch._inductor` Triton launcher. Pass `--compile-enabled false` to run the server eager.
 - Suites: `libero_spatial`, `libero_object`, `libero_goal`, `libero_10` (aliases `spatial|object|goal|long`). Managed replicas use ports from 8920.
 - Resume: add `--output-dir outputs/libero/<run_name>` and rerun the same command — completed tasks are skipped after a signature check.
 - Results land in the output dir: `summary.csv`, `summary.json`, `manifest.json`, per-task `results.json`, client/server logs.
