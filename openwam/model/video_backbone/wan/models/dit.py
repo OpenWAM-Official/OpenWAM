@@ -39,7 +39,9 @@ def flash_attention(
     compatibility_mode=False,
     attn_mask: Optional[torch.Tensor] = None,
 ):
-    if compatibility_mode or attn_mask is not None:
+    # FA2/FA3/sage are CUDA half-precision kernels; they raise on anything else.
+    fused_ok = q.is_cuda and q.dtype in (torch.float16, torch.bfloat16)
+    if compatibility_mode or attn_mask is not None or not fused_ok:
         q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
         k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
         v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
