@@ -158,27 +158,34 @@ timestamp="$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="${ROBOTWIN_LOG_ROOT:-${CKPT_DIR}/robotwin_eval_logs/${POLICY_NAME}_${TASK_CONFIG}_${ckpt_label}_${timestamp}}"
 mkdir -p "${LOG_DIR}"
 
-# Freeze the client-side evaluation protocol next to the logs so a result
-# directory is self-describing. Server-side settings (denoise steps, DiT cache,
-# compile) come from configs/deploy.yaml unless overridden on scripts/deploy.sh;
-# they are printed in the deploy log, not visible from the client.
+# Record the client-side protocol next to the logs: run.env (shell-quoted, safe
+# to `source`) plus verbatim copies of the two config files it depends on.
+# Server-side settings are only visible in the deploy log.
 _git_head() { git -C "$1" rev-parse HEAD 2>/dev/null || echo "unknown"; }
-cat > "${LOG_DIR}/run.env" <<EOF
-timestamp=${timestamp}
-name=${POLICY_NAME}
-mode=${TASK_CONFIG}
-ckpt_dir=${CKPT_DIR}
-server=ws://${SERVER_HOST}:${PORT}
-gpu=${GPU_ID}
-seed=0
-test_num=${ROBOTWIN_TEST_NUM:-100}
-step_limit_overrides=$(grep -cvE '^\s*(#|$)' "${SCRIPT_DIR}/step_limits.yml" 2>/dev/null || true)  # entries in benchmarks/robotwin/step_limits.yml; 0 = RoboTwin upstream limits
-policy_config=${POLICY_CONFIG_PATH:-${SCRIPT_DIR}/policy_config.yml}
-robotwin_path=${ROBOTWIN_PATH:-}
-robotwin_commit=$(_git_head "${ROBOTWIN_PATH:-/nonexistent}")
-openwam_commit=$(_git_head "${SCRIPT_DIR}")
-tasks=${TASKS[*]}
-EOF
+_git_dirty() { git -C "$1" status --porcelain --untracked-files=no 2>/dev/null | wc -l; }
+_sha256() { if [[ -f "$1" ]]; then sha256sum "$1" | cut -d' ' -f1; else echo "missing"; fi; }
+_env() { printf '%s=%q\n' "$1" "$2"; }
+POLICY_CONFIG="${POLICY_CONFIG_PATH:-${SCRIPT_DIR}/policy_config.yml}"
+cp -f "${POLICY_CONFIG}" "${LOG_DIR}/policy_config.yml"
+cp -f "${SCRIPT_DIR}/step_limits.yml" "${LOG_DIR}/step_limits.yml" 2>/dev/null || true
+{
+    _env timestamp "${timestamp}"
+    _env name "${POLICY_NAME}"
+    _env mode "${TASK_CONFIG}"
+    _env ckpt_dir "${CKPT_DIR}"
+    _env server "ws://${SERVER_HOST}:${PORT}"
+    _env gpu "${GPU_ID}"
+    _env seed 0
+    _env test_num "${ROBOTWIN_TEST_NUM:-100}"
+    _env policy_config_sha256 "$(_sha256 "${POLICY_CONFIG}")"
+    _env step_limits_sha256 "$(_sha256 "${SCRIPT_DIR}/step_limits.yml")"
+    _env robotwin_path "${ROBOTWIN_PATH:-}"
+    _env robotwin_commit "$(_git_head "${ROBOTWIN_PATH:-/nonexistent}")"
+    _env robotwin_modified_files "$(_git_dirty "${ROBOTWIN_PATH:-/nonexistent}")"
+    _env openwam_commit "$(_git_head "${SCRIPT_DIR}")"
+    _env openwam_modified_files "$(_git_dirty "${SCRIPT_DIR}")"
+    _env tasks "${TASKS[*]}"
+} > "${LOG_DIR}/run.env"
 
 echo "[INFO] mode=${TASK_CONFIG}  name=${POLICY_NAME}"
 echo "[INFO] server=ws://${SERVER_HOST}:${PORT}  gpu=${GPU_ID}"
@@ -196,16 +203,18 @@ for task_name in "${TASKS[@]}"; do
     log_file="${LOG_DIR}/${task_name/\//_}_${TASK_CONFIG}.log"
     echo "[INFO] Starting task=${task_name}"
 
-    # Pipe to tee so the full output is saved; capture single_eval.sh's own exit code
-    # via PIPESTATUS[0] rather than grep's exit code.  grep is display-only and
-    # must not affect the success/failure decision.
+    # Pipe to tee so the full output is saved. Under `pipefail` a failing
+    # single_eval.sh fails the whole pipeline, so an `|| true` here would run
+    # and reset PIPESTATUS; disable errexit around the pipeline instead.
+    set +e
     ROBOTWIN_PORT="${PORT}" ROBOTWIN_POLICY_HOST="${SERVER_HOST}" \
     bash "${SCRIPT_DIR}/single_eval.sh" \
         "${task_name}" "${TASK_CONFIG}" "${POLICY_NAME}" \
         "${GPU_ID}" \
         "${PORT}" "${SERVER_HOST}" \
-        2>&1 | tee "${log_file}" || true
+        2>&1 | tee "${log_file}"
     eval_exit="${PIPESTATUS[0]}"
+    set -e
 
     grep --color=never "Success rate" "${log_file}" \
         | sed "s/^/[RESULT] ${task_name}: /" || true

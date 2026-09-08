@@ -364,12 +364,24 @@ _POST_DOWNLOAD = {
 }
 
 
+_RELOCATED_MARKER = ".relocated"
+
+
 def _already_relocated(bench: Benchmark, target: Path) -> bool:
-    """A strip_prefix benchmark whose content already sits at the folder root."""
+    """A strip_prefix benchmark whose relocation finished in an earlier run.
+
+    Requires the download scaffold (``<target>/<strip_prefix top>``) to be gone:
+    an interrupted relocation leaves it behind, and that run must resume the
+    download and finish moving files rather than be taken as complete.
+    """
     if bench.strip_prefix is None or not target.is_dir():
         return False
-    children = {c.name for c in target.iterdir()} - {".cache", "data"}
-    return bool(children)
+    if (target / bench.strip_prefix.split("/")[0]).exists():
+        return False
+    if (target / _RELOCATED_MARKER).is_file():
+        return True
+    # Relocated by an earlier version that did not write the marker.
+    return bool({c.name for c in target.iterdir()} - {".cache"})
 
 
 def _relocate(bench: Benchmark, target: Path) -> None:
@@ -385,9 +397,12 @@ def _relocate(bench: Benchmark, target: Path) -> None:
             print(yellow(f"  {dest} already exists — keeping it, skipping the fresh copy."))
             continue
         shutil.move(str(child), str(dest))
-    # Drop the now-empty scaffold (data/RoboDojo[/…]).
+    # Drop the now-empty scaffold (data/RoboDojo[/…]) and mark the relocation
+    # complete; the marker is only written once the scaffold is gone.
     top = target / bench.strip_prefix.split("/")[0]
     shutil.rmtree(top, ignore_errors=True)
+    if not top.exists():
+        (target / _RELOCATED_MARKER).write_text(f"{bench.strip_prefix}\n", encoding="utf-8")
 
 
 def download(bench: Benchmark, root: Path, expected: int) -> Path:

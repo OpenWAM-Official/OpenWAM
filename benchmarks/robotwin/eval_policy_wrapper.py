@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
 import subprocess
@@ -11,42 +12,61 @@ import tempfile
 import traceback
 import types
 
-# RoboTwin commit this adapter was last verified against (see the "Verified
-# versions" table in README.md). The adapter loads RoboTwin's
-# ``script/eval_policy.py`` by path and monkeypatches it, so an upstream change
-# can break it silently; a mismatch here is the first thing to suspect.
+# RoboTwin commit this adapter was verified against (README "Verified versions").
 VERIFIED_ROBOTWIN_COMMIT = "0aeea2d669c0f8516f4d5785f0aa33ba812c14b4"
+# RoboTwin paths the adapter depends on; local edits there invalidate the check.
+_ROBOTWIN_WATCHED_PATHS = ("script", "envs", "task_config", "policy")
+
+
+def _robotwin_git(robotwin_path: str, *args: str) -> str:
+    try:
+        return subprocess.run(
+            ["git", "-C", robotwin_path, *args], capture_output=True, text=True, timeout=10, check=False
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _file_sha256(path: str) -> str:
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
 
 
 def _warn_on_unverified_robotwin(robotwin_path: str) -> None:
-    """Print a warning when ``robotwin_path`` is not at the verified commit.
+    """Log RoboTwin provenance; warn when it differs from the verified state.
 
-    Non-fatal: other commits usually work, and ``ROBOTWIN_SKIP_VERSION_CHECK=1``
-    silences the check entirely (e.g. for a non-git RoboTwin copy).
+    Non-fatal. Checks the HEAD commit and local modifications under the paths
+    the adapter loads from, and always prints the hash of the
+    ``script/eval_policy.py`` actually loaded. ``ROBOTWIN_SKIP_VERSION_CHECK=1``
+    disables the git checks (e.g. for a non-git RoboTwin copy).
     """
+    script_path = os.path.join(robotwin_path, "script", "eval_policy.py")
+    script_sha = _file_sha256(script_path)[:16] if os.path.isfile(script_path) else "missing"
     if os.environ.get("ROBOTWIN_SKIP_VERSION_CHECK", "") == "1":
+        print(f"[eval_policy_wrapper] RoboTwin version check skipped; eval_policy.py sha256={script_sha}")
         return
-    try:
-        head = subprocess.run(
-            ["git", "-C", robotwin_path, "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        head = ""
+    head = _robotwin_git(robotwin_path, "rev-parse", "HEAD")
     if not head:
         print(
-            "[eval_policy_wrapper] WARNING: could not read the RoboTwin git commit "
-            f"(not a git checkout?); verified commit is {VERIFIED_ROBOTWIN_COMMIT[:12]}"
+            "[eval_policy_wrapper] WARNING: could not read the RoboTwin git commit (not a git checkout?); "
+            f"verified commit is {VERIFIED_ROBOTWIN_COMMIT[:12]}; eval_policy.py sha256={script_sha}"
         )
         return
+    modified = _robotwin_git(
+        robotwin_path, "status", "--porcelain", "--untracked-files=no", "--", *_ROBOTWIN_WATCHED_PATHS
+    ).splitlines()
+    print(f"[eval_policy_wrapper] RoboTwin commit={head[:12]} eval_policy.py sha256={script_sha}")
     if head != VERIFIED_ROBOTWIN_COMMIT:
         print(
-            f"[eval_policy_wrapper] WARNING: RoboTwin at {head[:12]} differs from the verified "
-            f"commit {VERIFIED_ROBOTWIN_COMMIT[:12]}; if eval breaks, check out the verified commit "
-            "first (set ROBOTWIN_SKIP_VERSION_CHECK=1 to silence)."
+            f"[eval_policy_wrapper] WARNING: RoboTwin at {head[:12]} differs from the verified commit "
+            f"{VERIFIED_ROBOTWIN_COMMIT[:12]}; if eval breaks, check out the verified commit first "
+            "(ROBOTWIN_SKIP_VERSION_CHECK=1 silences this)."
+        )
+    if modified:
+        shown = ", ".join(line.split(maxsplit=1)[-1] for line in modified[:5]) + (" …" if len(modified) > 5 else "")
+        print(
+            f"[eval_policy_wrapper] WARNING: RoboTwin has {len(modified)} locally modified file(s) under "
+            f"{'/'.join(_ROBOTWIN_WATCHED_PATHS)}: {shown}. Results may not match the verified stack."
         )
 
 

@@ -130,10 +130,8 @@ def load_from_checkpoint_dir(
         # ``ListConfig`` whose entries are ``DictConfig`` (NOT a ``dict``
         # subclass) — so ``isinstance(c, dict)`` would always be False
         # against the real saved config, silently skipping the marker.
-        # Require the ``source: state_dict`` marker, not just ``attr``: Wan
-        # checkpoints also carry a ``text_encoder`` component (umt5, an
-        # instantiation spec with ``model_class``), and matching on ``attr``
-        # alone logged a phantom ``<ckpt>/reason1`` dir for every Wan deploy.
+        # ``source: state_dict`` distinguishes the Reason1 marker from Wan's
+        # umt5 ``text_encoder`` component (a ``model_class`` instantiation spec).
         has_reason1_state_component = any(
             isinstance(c, dict) and c.get("attr") == "text_encoder" and c.get("source") == "state_dict"
             for c in (vb_cfg_dict.get("components") or [])

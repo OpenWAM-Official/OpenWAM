@@ -76,10 +76,10 @@ bash benchmarks/robotwin/multi_eval.sh -m demo_clean -n run1 \
   - `prewarmed CUDA/Curobo before SAPIEN import` — cuRobo must initialise CUDA before SAPIEN's Vulkan context exists, otherwise the first plan segfaults.
   - `patched warp.torch compatibility namespace` — cuRobo v0.7.8 still calls `warp.torch.*`, which warp ≥ 1.x no longer ships; the wrapper aliases the new top-level functions.
   - `SAPIEN EGL ICD: …` (from `single_eval.sh`) — SAPIEN's EGL probe crashes on images without `/usr/share/glvnd/egl_vendor.d`; the script points it at SAPIEN's bundled ICD instead.
-  - `WARNING: RoboTwin at … differs from the verified commit` — see the table above; check out the verified commit before debugging anything else.
+  - `RoboTwin commit=… eval_policy.py sha256=…` — provenance of the RoboTwin code actually loaded; a `WARNING` follows if the commit differs from the verified one or files under `script/ envs/ task_config/ policy/` are locally modified. Check out the verified commit before debugging anything else.
 - If cuRobo planning itself fails, set `ROBOTWIN_ENABLE_PLANNER_FALLBACK=1` to plan with `mplib_RRT` instead (slower, results not comparable to the tables below).
 - Read-only checkout? Set `ROBOTWIN_RUNTIME_ROOT` to a writable dir. Per-task step limits: `benchmarks/robotwin/step_limits.yml` (all commented out by default; read once at startup).
-- Results: RoboTwin's native `eval_result/` inside the checkout (or runtime root); `multi_eval.sh` also tees per-task logs under `<ckpt_dir>/robotwin_eval_logs/…`, writes the run parameters to `run.env` there, and prints each task's `Success rate`.
+- Results: RoboTwin's native `eval_result/` inside the checkout (or runtime root); `multi_eval.sh` also tees per-task logs under `<ckpt_dir>/robotwin_eval_logs/…`, records the run there (`run.env` — shell-quoted, `source`-able — plus verbatim copies of the `policy_config.yml` and `step_limits.yml` used), and prints each task's `Success rate`.
 
 </details>
 
