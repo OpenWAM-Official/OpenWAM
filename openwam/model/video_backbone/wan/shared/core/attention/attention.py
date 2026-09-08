@@ -1,7 +1,10 @@
+import logging
 import os
 
 import torch
 from einops import rearrange
+
+logger = logging.getLogger(__name__)
 
 try:
     import flash_attn_interface
@@ -32,19 +35,48 @@ except ModuleNotFoundError:
     XFORMERS_AVAILABLE = False
 
 
+def _available_implementations() -> dict:
+    """The implementation names this build can actually dispatch, in priority order."""
+    return {
+        "flash_attention_3": FLASH_ATTN_3_AVAILABLE,
+        "flash_attention_2": FLASH_ATTN_2_AVAILABLE,
+        "sage_attention": SAGE_ATTN_AVAILABLE,
+        "xformers": XFORMERS_AVAILABLE,
+        "torch": True,
+    }
+
+
 def initialize_attention_priority():
-    if os.environ.get("DIFFSYNTH_ATTENTION_IMPLEMENTATION") is not None:
-        return os.environ.get("DIFFSYNTH_ATTENTION_IMPLEMENTATION").lower()
-    elif FLASH_ATTN_3_AVAILABLE:
+    """Resolve the attention implementation, honouring an explicit env override.
+
+    An override is validated the way WAM_ATTENTION_IMPL is in
+    openwam/model/action_backbone/components.py: an unknown name raises, and a known
+    name whose library did not import warns and falls back to auto-detection rather
+    than failing later inside the kernel wrapper.
+    """
+    # An empty or whitespace-only value reads as "no override", matching the sibling.
+    override = os.environ.get("DIFFSYNTH_ATTENTION_IMPLEMENTATION", "").strip().lower()
+    if override:
+        available = _available_implementations()
+        if override not in available:
+            raise ValueError(
+                f"Unknown DIFFSYNTH_ATTENTION_IMPLEMENTATION='{override}'. Choose from: {sorted(available)}"
+            )
+        if available[override]:
+            return override
+        logger.warning(
+            "DIFFSYNTH_ATTENTION_IMPLEMENTATION='%s' requested but not available, falling back to auto-detect",
+            override,
+        )
+    if FLASH_ATTN_3_AVAILABLE:
         return "flash_attention_3"
-    elif FLASH_ATTN_2_AVAILABLE:
+    if FLASH_ATTN_2_AVAILABLE:
         return "flash_attention_2"
-    elif SAGE_ATTN_AVAILABLE:
+    if SAGE_ATTN_AVAILABLE:
         return "sage_attention"
-    elif XFORMERS_AVAILABLE:
+    if XFORMERS_AVAILABLE:
         return "xformers"
-    else:
-        return "torch"
+    return "torch"
 
 
 ATTENTION_IMPLEMENTATION = initialize_attention_priority()
