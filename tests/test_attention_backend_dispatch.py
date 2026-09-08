@@ -319,3 +319,96 @@ def test_wan_backend_names_match_their_sources():
     assert set(server._WAN_BACKENDS) == fused | {"xformers"}, (
         "a Wan backend was added or removed; classify it in _WAN_BACKENDS"
     )
+
+
+# ------------------------------------------- DIFFSYNTH_ATTENTION_IMPLEMENTATION validation
+
+
+_AVAILABILITY_FLAGS = (
+    "FLASH_ATTN_3_AVAILABLE",
+    "FLASH_ATTN_2_AVAILABLE",
+    "SAGE_ATTN_AVAILABLE",
+    "XFORMERS_AVAILABLE",
+)
+
+
+def _reinitialise(monkeypatch, shared, override, **available):
+    """Re-run initialize_attention_priority() under a given env value and flag set."""
+    if override is None:
+        monkeypatch.delenv("DIFFSYNTH_ATTENTION_IMPLEMENTATION", raising=False)
+    else:
+        monkeypatch.setenv("DIFFSYNTH_ATTENTION_IMPLEMENTATION", override)
+    for flag in _AVAILABILITY_FLAGS:
+        monkeypatch.setattr(shared, flag, available.get(flag, False))
+    return shared.initialize_attention_priority()
+
+
+def test_diffsynth_override_rejects_an_unknown_value(monkeypatch):
+    """A typo must not run a whole job on SDPA while reading like a fused backend."""
+    from openwam.model.video_backbone.wan.shared.core.attention import attention as shared
+
+    with pytest.raises(ValueError, match="bogus"):
+        _reinitialise(monkeypatch, shared, "bogus")
+
+
+def test_diffsynth_override_falls_back_when_the_library_is_missing(monkeypatch, caplog):
+    """Naming an uninstalled backend used to reach the kernel wrapper and raise NameError.
+
+    flash_attention_3() dereferences the module-level flash_attn_interface, which the
+    try/except import never bound, so dispatch died with a NameError rather than a
+    diagnosable message. The sibling WAM_ATTENTION_IMPL has always warned and fallen back.
+    """
+    from openwam.model.video_backbone.wan.shared.core.attention import attention as shared
+
+    with caplog.at_level(logging.WARNING):
+        implementation = _reinitialise(monkeypatch, shared, "flash_attention_3", FLASH_ATTN_2_AVAILABLE=True)
+
+    assert implementation == "flash_attention_2"
+    assert "flash_attention_3" in caplog.text
+
+
+def test_diffsynth_override_never_returns_an_unavailable_backend(monkeypatch):
+    """With nothing installed, every override degrades to plain torch."""
+    from openwam.model.video_backbone.wan.shared.core.attention import attention as shared
+
+    for override in shared.KNOWN_ATTENTION_IMPLEMENTATIONS:
+        assert _reinitialise(monkeypatch, shared, override) == "torch"
+
+
+def test_diffsynth_override_is_honoured_when_available(monkeypatch):
+    """A valid, installed override still wins over the auto-detection priority."""
+    from openwam.model.video_backbone.wan.shared.core.attention import attention as shared
+
+    picked = _reinitialise(
+        monkeypatch,
+        shared,
+        "sage_attention",
+        SAGE_ATTN_AVAILABLE=True,
+        FLASH_ATTN_2_AVAILABLE=True,  # higher priority, but not what was asked for
+    )
+    assert picked == "sage_attention"
+
+
+def test_diffsynth_override_ignores_blank_values_and_normalises_the_name(monkeypatch):
+    """An empty override is reachable: the old lookup guarded on `is not None`, not truthiness."""
+    from openwam.model.video_backbone.wan.shared.core.attention import attention as shared
+
+    for blank in ("", "   "):
+        assert _reinitialise(monkeypatch, shared, blank, FLASH_ATTN_2_AVAILABLE=True) == "flash_attention_2"
+
+    assert _reinitialise(monkeypatch, shared, "  SAGE_ATTENTION  ", SAGE_ATTN_AVAILABLE=True) == "sage_attention"
+
+
+def test_diffsynth_auto_detection_priority_is_unchanged(monkeypatch):
+    """Pin the pre-existing order, so validation did not quietly reshuffle it."""
+    from openwam.model.video_backbone.wan.shared.core.attention import attention as shared
+
+    expected = [
+        ({"FLASH_ATTN_3_AVAILABLE", "FLASH_ATTN_2_AVAILABLE", "SAGE_ATTN_AVAILABLE"}, "flash_attention_3"),
+        ({"FLASH_ATTN_2_AVAILABLE", "SAGE_ATTN_AVAILABLE", "XFORMERS_AVAILABLE"}, "flash_attention_2"),
+        ({"SAGE_ATTN_AVAILABLE", "XFORMERS_AVAILABLE"}, "sage_attention"),
+        ({"XFORMERS_AVAILABLE"}, "xformers"),
+        (set(), "torch"),
+    ]
+    for installed, winner in expected:
+        assert _reinitialise(monkeypatch, shared, None, **{f: True for f in installed}) == winner

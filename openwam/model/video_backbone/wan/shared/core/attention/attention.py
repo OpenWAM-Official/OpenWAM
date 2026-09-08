@@ -1,3 +1,4 @@
+import logging
 import os
 
 import torch
@@ -32,19 +33,57 @@ except ModuleNotFoundError:
     XFORMERS_AVAILABLE = False
 
 
+logger = logging.getLogger(__name__)
+
+# Highest priority first. "torch" is always available and terminates auto-detection.
+KNOWN_ATTENTION_IMPLEMENTATIONS = (
+    "flash_attention_3",
+    "flash_attention_2",
+    "sage_attention",
+    "xformers",
+    "torch",
+)
+
+
+def _implementation_available(implementation: str) -> bool:
+    """Whether the library backing ``implementation`` actually imported."""
+    return {
+        "flash_attention_3": FLASH_ATTN_3_AVAILABLE,
+        "flash_attention_2": FLASH_ATTN_2_AVAILABLE,
+        "sage_attention": SAGE_ATTN_AVAILABLE,
+        "xformers": XFORMERS_AVAILABLE,
+        "torch": True,
+    }[implementation]
+
+
 def initialize_attention_priority():
-    if os.environ.get("DIFFSYNTH_ATTENTION_IMPLEMENTATION") is not None:
-        return os.environ.get("DIFFSYNTH_ATTENTION_IMPLEMENTATION").lower()
-    elif FLASH_ATTN_3_AVAILABLE:
-        return "flash_attention_3"
-    elif FLASH_ATTN_2_AVAILABLE:
-        return "flash_attention_2"
-    elif SAGE_ATTN_AVAILABLE:
-        return "sage_attention"
-    elif XFORMERS_AVAILABLE:
-        return "xformers"
-    else:
-        return "torch"
+    """Pick the attention implementation, honouring DIFFSYNTH_ATTENTION_IMPLEMENTATION.
+
+    The override is validated the way ``WAM_ATTENTION_IMPL`` is in
+    ``openwam/model/action_backbone/components.py``: an unknown name raises, and a known
+    name whose library is missing warns and falls back to auto-detection. Returning it
+    unchecked let a typo run a whole job on SDPA while looking like a fused backend, and
+    let a name like "flash_attention_3" reach the kernel wrapper and raise NameError.
+    """
+    override = os.environ.get("DIFFSYNTH_ATTENTION_IMPLEMENTATION", "").strip().lower()
+
+    if override:
+        if override not in KNOWN_ATTENTION_IMPLEMENTATIONS:
+            raise ValueError(
+                f"Unknown DIFFSYNTH_ATTENTION_IMPLEMENTATION='{override}'. "
+                f"Choose from: {list(KNOWN_ATTENTION_IMPLEMENTATIONS)}"
+            )
+        if _implementation_available(override):
+            return override
+        logger.warning(
+            "DIFFSYNTH_ATTENTION_IMPLEMENTATION='%s' requested but not available, falling back to auto-detect",
+            override,
+        )
+
+    for implementation in KNOWN_ATTENTION_IMPLEMENTATIONS:
+        if _implementation_available(implementation):
+            return implementation
+    return "torch"
 
 
 ATTENTION_IMPLEMENTATION = initialize_attention_priority()
