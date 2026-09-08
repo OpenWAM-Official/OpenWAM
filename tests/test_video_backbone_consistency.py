@@ -21,12 +21,13 @@ from safetensors.torch import load_file
 
 from openwam.model.video_backbone.wan._reference import model_fn_wan_video
 from openwam.model.video_backbone.wan_backbone import Wan21
+from tests._assets import asset_path
 
 # Override via env vars on machines that mount the checkpoints elsewhere; the
 # defaults match the shared dev box but skipif() makes a missing path a skip,
 # not a hard failure.
-WAN21_VACE_1_3B = os.environ.get("WAN21_VACE_1_3B", "/path/to/Wan2.1-VACE-1.3B")
-WAN22_TI2V_5B = os.environ.get("WAN22_TI2V_5B", "/path/to/Wan2.2-TI2V-5B")
+WAN21_VACE_1_3B = asset_path("OPENWAM_WAN21_VACE_1_3B")
+WAN22_TI2V_5B = asset_path("OPENWAM_WAN22_TI2V_5B")
 CUDA_AVAILABLE = torch.cuda.is_available()
 
 

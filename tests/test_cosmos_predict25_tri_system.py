@@ -40,9 +40,10 @@ import pytest
 import torch
 import torch.nn as nn
 
+from tests._assets import asset_path
 from tests.test_cosmos_predict25_joint_self_attn import _build_rich_wrapper
 
-COSMOS25_2B = os.environ.get("OPENWAM_COSMOS25_2B", "/path/to/assets/Cosmos-Predict2.5-2B")
+COSMOS25_2B = asset_path("OPENWAM_COSMOS25_2B")
 
 
 def _make_tri_arch(vb, *, action_dim=7, action_res_dim=24, und_dim=16, vlm_input_dim=20, device=None):

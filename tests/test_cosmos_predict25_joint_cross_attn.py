@@ -36,9 +36,10 @@ import os
 import pytest
 import torch
 
+from tests._assets import asset_path
 from tests.test_cosmos_predict25_joint_self_attn import _build_rich_wrapper
 
-COSMOS25_2B = os.environ.get("OPENWAM_COSMOS25_2B", "/path/to/assets/Cosmos-Predict2.5-2B")
+COSMOS25_2B = asset_path("OPENWAM_COSMOS25_2B")
 
 
 def _make_cosmos_cross_attn(num_blocks=2, *, action_dim=3, text_dim=12):

@@ -121,6 +121,8 @@ Then install OpenWAM:
 pip install -e .
 ```
 
+> `deepspeed` ships as a source distribution and is compiled during `pip install`, so a C compiler (`gcc`) must be on the PATH.
+
 <details>
 <summary><b>Cosmos-Predict2.5 Extras (Optional)</b> — needed only for experiments with the <code>cosmos_predict25_2b</code> video backbone</summary>
 
@@ -137,7 +139,7 @@ The script installs the upstream cosmos packages into the active environment and
 
 ## Assets Preparation
 
-The downloaders are interactive. Component downloaders store assets under
+The downloaders are interactive by default; every menu step also has a flag (`--name`, `--source`, `--root`, `--yes`, see `--help`) so they can run unattended, and the default storage location is resolved relative to the repository regardless of the working directory. Component downloaders store assets under
 `assets/` and update the matching YAML path; the released-checkpoint downloader
 keeps each checkpoint's self-contained config unchanged.
 

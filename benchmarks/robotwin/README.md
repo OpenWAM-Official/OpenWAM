@@ -15,8 +15,20 @@ git clone https://github.com/RoboTwin-Platform/RoboTwin.git /path/to/RoboTwin
 /path/to/miniconda3/envs/robotwin/bin/pip install websockets pyyaml   # client deps OpenWAM needs
 ```
 
-- `ROBOTWIN_PATH` → the checkout; `ROBOTWIN_PYTHON` → `/path/to/miniconda3/envs/robotwin/bin/python`. Every eval command needs both.
-- Headless node? Prefix commands with `xvfb-run -a` (SAPIEN needs a display).
+- `ROBOTWIN_PATH` → the checkout; `ROBOTWIN_PYTHON` → `/path/to/miniconda3/envs/robotwin/bin/python`. Every eval command needs both (`single_eval.sh` refuses to start without them).
+- Headless nodes normally work as-is: SAPIEN renders offscreen through its bundled Vulkan loader, no X server needed. Only if you hit a display/EGL error at SAPIEN import, prefix the command with `xvfb-run -a`.
+
+**Verified versions.** The adapter (`eval_policy_wrapper.py`) loads RoboTwin's `script/eval_policy.py` by path and patches it, so it is tied to the upstream layout. The combination below is what the released checkpoints were evaluated with; other versions may work but are unverified (the wrapper prints a warning when the RoboTwin commit differs, `ROBOTWIN_SKIP_VERSION_CHECK=1` silences it).
+
+| Component | Version |
+|---|---|
+| RoboTwin | commit `0aeea2d669c0f8516f4d5785f0aa33ba812c14b4` (2026-04-19) |
+| Python (RoboTwin env) | 3.10 |
+| SAPIEN | 3.0.0b1 |
+| cuRobo | v0.7.8, built into `<RoboTwin>/envs/curobo` by RoboTwin's `script/_install.sh` |
+| warp-lang | 1.13.0 |
+| mplib | 0.2.1 |
+| torch (RoboTwin env) | 2.4.1 (the policy server uses OpenWAM's own env) |
 
 ## 2. Start the Policy Server
 
@@ -60,15 +72,22 @@ bash benchmarks/robotwin/multi_eval.sh -m demo_clean -n run1 \
 - Start the server first; the client health-checks it for up to 300 s, then aborts. Remote server: pass `[host]`/`[port]` (single) or `--host`/`--port` (multi); defaults `127.0.0.1:8848`.
 - `task_config` ∈ {`demo_clean`, `demo_randomized`}; `ckpt_setting` is only a label in RoboTwin's result filenames; `-d` is used for log placement — weights never load client-side.
 - `ROBOTWIN_TEST_NUM=5` caps episodes per task for a quick smoke run (default 100/task; the full `all` run takes many GPU-hours per mode).
-- Startup CUDA/cuRobo prewarm chatter from `eval_policy_wrapper.py` is expected; don't call RoboTwin's `eval_policy.py` directly. If cuRobo planning fails, set `ROBOTWIN_ENABLE_PLANNER_FALLBACK=1`.
+- Don't call RoboTwin's `eval_policy.py` directly — go through `eval_policy_wrapper.py`. Its startup messages are expected; each one works around a known crash in the verified stack:
+  - `prewarmed CUDA/Curobo before SAPIEN import` — cuRobo must initialise CUDA before SAPIEN's Vulkan context exists, otherwise the first plan segfaults.
+  - `patched warp.torch compatibility namespace` — cuRobo v0.7.8 still calls `warp.torch.*`, which warp ≥ 1.x no longer ships; the wrapper aliases the new top-level functions.
+  - `SAPIEN EGL ICD: …` (from `single_eval.sh`) — SAPIEN's EGL probe crashes on images without `/usr/share/glvnd/egl_vendor.d`; the script points it at SAPIEN's bundled ICD instead.
+  - `RoboTwin commit=… eval_policy.py sha256=…` — provenance of the RoboTwin code actually loaded; a `WARNING` follows if the commit differs from the verified one or files under `script/ envs/ task_config/ policy/` are locally modified. Check out the verified commit before debugging anything else.
+- If cuRobo planning itself fails, set `ROBOTWIN_ENABLE_PLANNER_FALLBACK=1` to plan with `mplib_RRT` instead (slower, results not comparable to the tables below).
 - Read-only checkout? Set `ROBOTWIN_RUNTIME_ROOT` to a writable dir. Per-task step limits: `benchmarks/robotwin/step_limits.yml` (all commented out by default; read once at startup).
-- Results: RoboTwin's native `eval_result/` inside the checkout (or runtime root); `multi_eval.sh` also tees per-task logs under `<ckpt_dir>/robotwin_eval_logs/…` and prints each task's `Success rate`.
+- Results: RoboTwin's native `eval_result/` inside the checkout (or runtime root); `multi_eval.sh` also tees per-task logs under `<ckpt_dir>/robotwin_eval_logs/…`, records the run there (`run.env` — shell-quoted, `source`-able — plus verbatim copies of the `policy_config.yml` and `step_limits.yml` used), and prints each task's `Success rate`.
 
 </details>
 
 ## 4. Results
 
 Scores from the OpenWAM paper. **Bold** = best, <u>underline</u> = second best; Type distinguishes WAM vs VLA.
+
+Evaluation protocol for the OpenWAM-α rows (reproduce with the commands in §3): released checkpoint served with `scripts/deploy.sh` defaults from `configs/deploy.yaml` — `denoise_steps: 10`, `denoise_mode: sync`, DiT velocity cache **on** (`cosine_threshold: 0.99`, `max_skips: 3`), `torch.compile` on — 100 episodes per task at seed 0, RoboTwin's upstream per-task step limits (`step_limits.yml` empty), and the versions in §1. Changing any of these (in particular disabling the DiT cache) changes the numbers.
 
 **RoboTwin2.0-Clean2Random** (fine-tune on clean only; OOD probe):
 

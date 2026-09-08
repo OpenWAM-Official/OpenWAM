@@ -9,6 +9,7 @@ without manual editing.
 
 Usage:
     python scripts/download_assets/download_visual_encoder.py
+    python scripts/download_assets/download_visual_encoder.py --name dinov3-vitb16-pretrain-lvd1689m --source modelscope --yes   # non-interactive; omitted flags are asked
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import os
 # Must be set before huggingface_hub is imported anywhere.
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
+import argparse
 import json
 import re
 import sys
@@ -31,7 +33,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG_DIR = REPO_ROOT / "configs" / "model" / "video_backbone" / "encoder"
-DEFAULT_ROOT = Path.cwd() / "assets" / "visual_encoder_ckpt"
+DEFAULT_ROOT = REPO_ROOT / "assets" / "visual_encoder_ckpt"
 
 VJEPA_MANIFEST = {
     "arch_name": "vit_giant_xformers_rope",
@@ -160,7 +162,11 @@ def ask_yes_no(prompt: str, default_yes: bool) -> bool:
 
 
 # ── steps ────────────────────────────────────────────────────────────────────
-def choose_storage_root() -> Path:
+def choose_storage_root(preset: str | None = None, use_default: bool = False) -> Path:
+    if preset or use_default:
+        root = Path(preset).expanduser() if preset else DEFAULT_ROOT
+        root.mkdir(parents=True, exist_ok=True)
+        return root
     print(bold("Storage location"))
     print(f"  Default: {DEFAULT_ROOT}")
     answer = ask("Storage path (press Enter for the default): ")
@@ -177,7 +183,13 @@ def choose_storage_root() -> Path:
     return root
 
 
-def choose_model() -> Model:
+def choose_model(preset: str | None = None) -> Model:
+    if preset:
+        for m in MODELS.values():
+            if m.name.lower() == preset.lower():
+                return m
+        print(red(f"Error: unknown model {preset!r}. Choose from: " + ", ".join(m.name for m in MODELS.values())))
+        sys.exit(2)
     key = ask_choice(
         "Select the model to download",
         [f"({k}) {m.name}" for k, m in MODELS.items()],
@@ -186,7 +198,7 @@ def choose_model() -> Model:
     return MODELS[key]
 
 
-def choose_source(model: Model) -> str:
+def choose_source(model: Model, preset: str | None = None) -> str:
     if model.direct_url:
         print()
         print(
@@ -196,6 +208,12 @@ def choose_source(model: Model) -> str:
             )
         )
         return "direct"
+    if preset:
+        if preset == "huggingface" and model.hf_gated:
+            print(
+                yellow(f"Note: on HuggingFace this repo is {model.hf_gated}; ModelScope hosts the same files ungated.")
+            )
+        return preset
     key = ask_choice(
         "Select the download source",
         ["(1) huggingface", "(2) modelscope"],
@@ -360,18 +378,37 @@ def write_config(model: Model, target: Path) -> None:
     print(green(f"Updated {rel}: model_path -> {value}"))
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Download a visual encoder. Flags skip the matching menu step; omitted steps are asked interactively.",
+    )
+    parser.add_argument("--name", help="model name, e.g. " + ", ".join(m.name for m in MODELS.values()))
+    parser.add_argument(
+        "--source", choices=("huggingface", "modelscope"), help="download source (ignored for direct-URL models)"
+    )
+    parser.add_argument("--root", help=f"storage directory (default: {DEFAULT_ROOT})")
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="accept defaults (storage root, huggingface source) and start without confirmation",
+    )
+    return parser.parse_args(argv)
+
+
 def main() -> None:
+    args = parse_args()
     print(bold("OpenWAM visual-encoder checkpoint downloader"))
     print()
-    root = choose_storage_root()
-    model = choose_model()
-    source = choose_source(model)
+    root = choose_storage_root(args.root, use_default=args.yes)
+    model = choose_model(args.name)
+    source = choose_source(model, args.source or ("huggingface" if args.yes else None))
 
     expected, live = query_size_bytes(model, source)
     origin = "" if live else " (approximate)"
     print()
     print(yellow(f"{model.name} needs about {expected / 1e9:.1f} GB{origin} under {root}."))
-    if not ask_yes_no("Start the download? ", default_yes=True):
+    if not args.yes and not ask_yes_no("Start the download? ", default_yes=True):
         print(cyan("Aborted — nothing downloaded."))
         sys.exit(0)
 

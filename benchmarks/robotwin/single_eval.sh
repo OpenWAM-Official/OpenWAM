@@ -40,7 +40,10 @@ port="${5:-${ROBOTWIN_PORT:-8848}}"
 host="${6:-${ROBOTWIN_POLICY_HOST:-127.0.0.1}}"
 seed="0"
 
-robotwin_python="${ROBOTWIN_PYTHON:-python}"
+# Fail fast: silently falling back to the current `python` (usually the OpenWAM
+# env) only surfaces much later as a SAPIEN/RoboTwin import error.
+robotwin_python="${ROBOTWIN_PYTHON:?ROBOTWIN_PYTHON must point to the RoboTwin env python (e.g. /path/to/miniconda3/envs/robotwin/bin/python)}"
+[[ -x "${robotwin_python}" ]] || { echo "[ERROR] ROBOTWIN_PYTHON is not executable: ${robotwin_python}" >&2; exit 1; }
 policy_config_template="${POLICY_CONFIG_PATH:-${SCRIPT_DIR}/policy_config.yml}"
 
 [[ -f "${policy_config_template}" ]] || {

@@ -15,11 +15,18 @@ finetuning start (training.finetune_ckpt_path in configs/train.yaml), not
 for direct deployment.
 
 Usage:
-    python scripts/download_assets/download_openwam_checkpoints.py
+    python scripts/download_assets/download_openwam_checkpoints.py            # interactive menu
+    python scripts/download_assets/download_openwam_checkpoints.py \\
+        --family alpha --name OpenWAM-Alpha-Sim-RoboTwin-Full --yes         # non-interactive
+    python scripts/download_assets/download_openwam_checkpoints.py \\
+        --family study --study-type attention_mask --name robotwin_dual_system_joint_self_attention_mutual --yes
+
+Any menu step not covered by a flag is still asked interactively.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 
 # HuggingFace downloads render their own stack of progress bars (including the
@@ -34,7 +41,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-ASSETS_ROOT = Path.cwd() / "assets" / "openwam_ckpt"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+ASSETS_ROOT = REPO_ROOT / "assets" / "openwam_ckpt"
 
 # ── terminal colors ──────────────────────────────────────────────────────────
 _USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
@@ -207,7 +215,32 @@ def ask_yes_no(prompt: str, default_yes: bool) -> bool:
 
 
 # ── steps ────────────────────────────────────────────────────────────────────
-def choose_group() -> Group:
+def _study_group_by_key(key: str) -> Group:
+    """Resolve ``--study-type`` given as a 1-based index or a (sub)string of the title."""
+    if key.isdigit() and 1 <= int(key) <= len(STUDY_GROUPS):
+        return STUDY_GROUPS[int(key) - 1]
+    needle = key.lower().replace("-", "_").replace(" ", "_")
+    matches = [g for g in STUDY_GROUPS if needle in g.title.lower().replace("-", "_").replace(" ", "_")]
+    if len(matches) == 1:
+        return matches[0]
+    print(red(f"Error: --study-type {key!r} does not identify one study type. Choose from:"))
+    for i, g in enumerate(STUDY_GROUPS, 1):
+        print(f"  ({i}) {g.title}")
+    sys.exit(2)
+
+
+def choose_group(family: str | None = None, study_type: str | None = None) -> Group:
+    if family == "alpha":
+        return ALPHA
+    if family == "study" and study_type:
+        return _study_group_by_key(study_type)
+    if family == "study":
+        type_key = ask_choice(
+            "Select the study type",
+            [f"({i}) {g.title}" for i, g in enumerate(STUDY_GROUPS, 1)],
+            "Type number: ",
+        )
+        return STUDY_GROUPS[int(type_key) - 1]
     key = ask_choice(
         "Select the checkpoint family",
         [
@@ -226,8 +259,12 @@ def choose_group() -> Group:
     return STUDY_GROUPS[int(type_key) - 1]
 
 
-def choose_storage_root(group: Group) -> Path:
+def choose_storage_root(group: Group, preset: str | None = None, use_default: bool = False) -> Path:
     default_root = ASSETS_ROOT / group.subdir
+    if preset or use_default:
+        root = Path(preset).expanduser() if preset else default_root
+        root.mkdir(parents=True, exist_ok=True)
+        return root
     print()
     print(bold("Storage location"))
     print(f"  Default: {default_root}")
@@ -245,7 +282,15 @@ def choose_storage_root(group: Group) -> Path:
     return root
 
 
-def choose_ckpt(group: Group) -> Ckpt:
+def choose_ckpt(group: Group, preset: str | None = None) -> Ckpt:
+    if preset:
+        for c in group.ckpts:
+            if c.name.lower() == preset.lower():
+                return c
+        print(red(f"Error: no checkpoint named {preset!r} in {group.title}. Choose from:"))
+        for c in group.ckpts:
+            print(f"  {c.name}")
+        sys.exit(2)
     key = ask_choice(
         f"Select the checkpoint to download from {group.title}",
         [f"({i}) {c.label}" for i, c in enumerate(group.ckpts, 1)],
@@ -338,18 +383,37 @@ def final_hint(ckpt: Ckpt, target: Path) -> list[str]:
     return [f"Deploy it with: {bold(f'bash scripts/deploy.sh {target}')}"]
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Download a released OpenWAM checkpoint. Flags skip the matching menu step; "
+        "omitted steps are asked interactively.",
+    )
+    parser.add_argument("--family", choices=("alpha", "study"), help="checkpoint family")
+    parser.add_argument("--study-type", help="study type (1-based index or part of its title); implies --family study")
+    parser.add_argument("--name", help="checkpoint name, e.g. OpenWAM-Alpha-Sim-RoboTwin-Full")
+    parser.add_argument("--root", help=f"storage directory (default: {ASSETS_ROOT}/<family subdir>)")
+    parser.add_argument(
+        "-y", "--yes", action="store_true", help="accept the default storage root and start without confirmation"
+    )
+    args = parser.parse_args(argv)
+    if args.study_type and not args.family:
+        args.family = "study"
+    return args
+
+
 def main() -> None:
+    args = parse_args()
     print(bold("OpenWAM released-checkpoint downloader"))
     print()
-    group = choose_group()
-    root = choose_storage_root(group)
-    ckpt = choose_ckpt(group)
+    group = choose_group(args.family, args.study_type)
+    root = choose_storage_root(group, args.root, use_default=args.yes)
+    ckpt = choose_ckpt(group, args.name)
 
     expected, live = query_download_size(ckpt)
     origin = "" if live else " (approximate)"
     print()
     print(yellow(f"{ckpt.label} needs about {expected / 1e9:.1f} GB{origin} under {root}."))
-    if not ask_yes_no("Start the download? ", default_yes=True):
+    if not args.yes and not ask_yes_no("Start the download? ", default_yes=True):
         print(cyan("Aborted — nothing downloaded."))
         sys.exit(0)
 

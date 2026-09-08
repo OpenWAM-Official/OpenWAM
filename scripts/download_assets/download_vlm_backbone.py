@@ -8,6 +8,7 @@ download so training picks it up without manual editing.
 
 Usage:
     python scripts/download_assets/download_vlm_backbone.py
+    python scripts/download_assets/download_vlm_backbone.py --name Qwen3-VL-2B-Instruct --source huggingface --yes   # non-interactive; omitted flags are asked
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import os
 # Must be set before huggingface_hub is imported anywhere.
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
+import argparse
 import re
 import sys
 import threading
@@ -29,7 +31,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG_DIR = REPO_ROOT / "configs" / "model" / "vlm_backbone"
-DEFAULT_ROOT = Path.cwd() / "assets" / "vlm_backbone_ckpt"
+DEFAULT_ROOT = REPO_ROOT / "assets" / "vlm_backbone_ckpt"
 
 # ── terminal colors ──────────────────────────────────────────────────────────
 _USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
@@ -118,7 +120,11 @@ def ask_yes_no(prompt: str, default_yes: bool) -> bool:
 
 
 # ── steps ────────────────────────────────────────────────────────────────────
-def choose_storage_root() -> Path:
+def choose_storage_root(preset: str | None = None, use_default: bool = False) -> Path:
+    if preset or use_default:
+        root = Path(preset).expanduser() if preset else DEFAULT_ROOT
+        root.mkdir(parents=True, exist_ok=True)
+        return root
     print(bold("Storage location"))
     print(f"  Default: {DEFAULT_ROOT}")
     answer = ask("Storage path (press Enter for the default): ")
@@ -135,7 +141,13 @@ def choose_storage_root() -> Path:
     return root
 
 
-def choose_model() -> Model:
+def choose_model(preset: str | None = None) -> Model:
+    if preset:
+        for m in MODELS.values():
+            if m.name.lower() == preset.lower():
+                return m
+        print(red(f"Error: unknown model {preset!r}. Choose from: " + ", ".join(m.name for m in MODELS.values())))
+        sys.exit(2)
     key = ask_choice(
         "Select the model to download",
         [f"({k}) {m.name}" for k, m in MODELS.items()],
@@ -144,7 +156,12 @@ def choose_model() -> Model:
     return MODELS[key]
 
 
-def choose_source(model: Model) -> str:
+def choose_source(model: Model, preset: str | None = None) -> str:
+    if preset:
+        if preset == "modelscope" and model.hf_only:
+            print(yellow(f"{model.name} is not available on ModelScope; downloading from HuggingFace instead."))
+            return "huggingface"
+        return preset
     key = ask_choice(
         "Select the download source",
         ["(1) huggingface", "(2) modelscope"],
@@ -274,18 +291,35 @@ def write_config(model: Model, targets: list[Path]) -> None:
     config_path.write_text(text, encoding="utf-8")
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Download a VLM backbone. Flags skip the matching menu step; omitted steps are asked interactively.",
+    )
+    parser.add_argument("--name", help="model name, e.g. " + ", ".join(m.name for m in MODELS.values()))
+    parser.add_argument("--source", choices=("huggingface", "modelscope"), help="download source")
+    parser.add_argument("--root", help=f"storage directory (default: {DEFAULT_ROOT})")
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="accept defaults (storage root, huggingface source) and start without confirmation",
+    )
+    return parser.parse_args(argv)
+
+
 def main() -> None:
+    args = parse_args()
     print(bold("OpenWAM VLM-backbone checkpoint downloader"))
     print()
-    root = choose_storage_root()
-    model = choose_model()
-    source = choose_source(model)
+    root = choose_storage_root(args.root, use_default=args.yes)
+    model = choose_model(args.name)
+    source = choose_source(model, args.source or ("huggingface" if args.yes else None))
 
     sizes, live = query_download_sizes(model, source)
     origin = "" if live else " (approximate)"
     print()
     print(yellow(f"{model.name} needs about {sum(sizes) / 1e9:.1f} GB{origin} under {root}."))
-    if not ask_yes_no("Start the download? ", default_yes=True):
+    if not args.yes and not ask_yes_no("Start the download? ", default_yes=True):
         print(cyan("Aborted — nothing downloaded."))
         sys.exit(0)
 

@@ -30,8 +30,9 @@ from openwam.model.video_backbone.base import BlockLoopState
 from openwam.model.video_backbone.wan.models.dit import DiTBlock
 from openwam.model.video_backbone.wan_backbone import Wan21
 from openwam.model.vlm_backbone import Qwen3VLBackbone
+from tests._assets import asset_path
 
-WAN22_TI2V_5B = os.environ.get("OPENWAM_WAN22_TI2V_5B", "/path/to/Wan2.2-TI2V-5B")
+WAN22_TI2V_5B = asset_path("OPENWAM_WAN22_TI2V_5B")
 
 
 # ---------------------------------------------------------------------------

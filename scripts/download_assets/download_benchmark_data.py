@@ -8,6 +8,7 @@ openwam/dataloader/utils/stats_computation/ when they are missing.
 
 Usage:
     python scripts/download_assets/download_benchmark_data.py
+    python scripts/download_assets/download_benchmark_data.py --name RoboTwin2.0 --yes   # non-interactive; omitted flags are asked
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import os
 # Must be set before huggingface_hub is imported anywhere.
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
+import argparse
 import re
 import shutil
 import subprocess
@@ -31,7 +33,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG_DIR = REPO_ROOT / "configs" / "dataloader"
-DEFAULT_ROOT = Path.cwd() / "assets" / "benchmark_data"
+DEFAULT_ROOT = REPO_ROOT / "assets" / "benchmark_data"
 
 # ── terminal colors ──────────────────────────────────────────────────────────
 _USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
@@ -172,7 +174,11 @@ def ask_yes_no(prompt: str, default_yes: bool) -> bool:
 
 
 # ── steps ────────────────────────────────────────────────────────────────────
-def choose_storage_root() -> Path:
+def choose_storage_root(preset: str | None = None, use_default: bool = False) -> Path:
+    if preset or use_default:
+        root = Path(preset).expanduser() if preset else DEFAULT_ROOT
+        root.mkdir(parents=True, exist_ok=True)
+        return root
     print(bold("Storage location"))
     print(f"  Default: {DEFAULT_ROOT}")
     answer = ask("Storage path (press Enter for the default): ")
@@ -189,7 +195,15 @@ def choose_storage_root() -> Path:
     return root
 
 
-def choose_benchmark() -> Benchmark:
+def choose_benchmark(preset: str | None = None) -> Benchmark:
+    if preset:
+        for b in BENCHMARKS.values():
+            if b.name.lower() == preset.lower():
+                return b
+        print(
+            red(f"Error: unknown benchmark {preset!r}. Choose from: " + ", ".join(b.name for b in BENCHMARKS.values()))
+        )
+        sys.exit(2)
     key = ask_choice(
         "Select the benchmark to download",
         [f"({k}) {b.name}" for k, b in BENCHMARKS.items()],
@@ -350,12 +364,24 @@ _POST_DOWNLOAD = {
 }
 
 
+_RELOCATED_MARKER = ".relocated"
+
+
 def _already_relocated(bench: Benchmark, target: Path) -> bool:
-    """A strip_prefix benchmark whose content already sits at the folder root."""
+    """A strip_prefix benchmark whose relocation finished in an earlier run.
+
+    Requires the download scaffold (``<target>/<strip_prefix top>``) to be gone:
+    an interrupted relocation leaves it behind, and that run must resume the
+    download and finish moving files rather than be taken as complete.
+    """
     if bench.strip_prefix is None or not target.is_dir():
         return False
-    children = {c.name for c in target.iterdir()} - {".cache", "data"}
-    return bool(children)
+    if (target / bench.strip_prefix.split("/")[0]).exists():
+        return False
+    if (target / _RELOCATED_MARKER).is_file():
+        return True
+    # Relocated by an earlier version that did not write the marker.
+    return bool({c.name for c in target.iterdir()} - {".cache"})
 
 
 def _relocate(bench: Benchmark, target: Path) -> None:
@@ -371,9 +397,12 @@ def _relocate(bench: Benchmark, target: Path) -> None:
             print(yellow(f"  {dest} already exists — keeping it, skipping the fresh copy."))
             continue
         shutil.move(str(child), str(dest))
-    # Drop the now-empty scaffold (data/RoboDojo[/…]).
+    # Drop the now-empty scaffold (data/RoboDojo[/…]) and mark the relocation
+    # complete; the marker is only written once the scaffold is gone.
     top = target / bench.strip_prefix.split("/")[0]
     shutil.rmtree(top, ignore_errors=True)
+    if not top.exists():
+        (target / _RELOCATED_MARKER).write_text(f"{bench.strip_prefix}\n", encoding="utf-8")
 
 
 def download(bench: Benchmark, root: Path, expected: int) -> Path:
@@ -592,17 +621,30 @@ def write_config(bench: Benchmark, target: Path) -> None:
         print(yellow(f"Note: {bench.config_note}"))
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Download benchmark data. Flags skip the matching menu step; omitted steps are asked interactively.",
+    )
+    parser.add_argument("--name", help="benchmark name, e.g. " + ", ".join(b.name for b in BENCHMARKS.values()))
+    parser.add_argument("--root", help=f"storage directory (default: {DEFAULT_ROOT})")
+    parser.add_argument(
+        "-y", "--yes", action="store_true", help="accept the default storage root and start without confirmation"
+    )
+    return parser.parse_args(argv)
+
+
 def main() -> None:
+    args = parse_args()
     print(bold("OpenWAM benchmark data downloader"))
     print()
-    root = choose_storage_root()
-    bench = choose_benchmark()
+    root = choose_storage_root(args.root, use_default=args.yes)
+    bench = choose_benchmark(args.name)
 
     expected, live = query_download_size(bench)
     origin = "" if live else " (approximate)"
     print()
     print(yellow(f"{bench.name} needs about {expected / 1e9:.1f} GB{origin} under {root}."))
-    if not ask_yes_no("Start the download? ", default_yes=True):
+    if not args.yes and not ask_yes_no("Start the download? ", default_yes=True):
         print(cyan("Aborted — nothing downloaded."))
         sys.exit(0)
 
