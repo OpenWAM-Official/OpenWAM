@@ -176,7 +176,7 @@ def test_video_only_path_matches_full_forward_video():
 
 
 @pytest.mark.gpu
-def test_joint_cross_attn_forward_on_real_cosmos():
+def test_joint_cross_attn_forward_on_real_cosmos(stub_reason1):
     """joint_cross_attn + real Cosmos-Predict2.5-2B: one forward restores 5D
     video, yields a finite action prediction, and preserves the cross-attn
     isolation invariant (video independent of the action input)."""
@@ -205,7 +205,7 @@ def test_joint_cross_attn_forward_on_real_cosmos():
             overrides=[
                 "model=dual_system",
                 "model.architecture.variant=joint_cross_attn",
-                "model/video_backbone=cosmos_predict25",
+                "model/video_backbone=cosmos_predict25_2b",
                 f"model.video_backbone.model_path={COSMOS25_2B}",
             ],
         )
