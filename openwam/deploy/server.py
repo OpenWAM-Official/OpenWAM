@@ -354,29 +354,39 @@ def build_server_from_config(
     return PolicyServer(engine=engine, cfg=merged)
 
 
-# Backends that run their fused kernel only for some inputs and quietly fall back to
-# SDPA for the rest. Each subsystem names them differently: the Wan paths use the
-# ATTENTION_IMPLEMENTATION spelling, while the ActionDiT closures are named after their
-# _BACKEND_MAP key (see openwam/model/action_backbone/components.py).
-_HALF_PRECISION_CUDA_BACKENDS = frozenset(
-    {"flash_attention_3", "flash_attention_2", "sage_attention", "_flash3", "_flash2", "_sage"}
-)
-_CUDA_ONLY_BACKENDS = frozenset({"xformers", "_xformers"})
+_HALF_PRECISION_CUDA_ONLY = " (CUDA fp16/bf16 only; torch_sdpa otherwise)"
+_CUDA_ONLY = " (CUDA only; torch_sdpa otherwise)"
+
+# Backends that run their fused kernel only for some inputs and quietly fall back to SDPA for the
+# rest, keyed by the restriction to report. The two subsystems spell them differently -- the Wan
+# paths use the ATTENTION_IMPLEMENTATION spelling, the ActionDiT closures are named after their
+# _BACKEND_MAP key (see openwam/model/action_backbone/components.py) -- and the two namespaces are
+# kept apart deliberately: ATTENTION_IMPLEMENTATION is an open set, so one flat table would let
+# "_flash2" arrive through the env var and be annotated as though it were a real Wan backend.
+_WAN_BACKENDS = {
+    "flash_attention_3": _HALF_PRECISION_CUDA_ONLY,
+    "flash_attention_2": _HALF_PRECISION_CUDA_ONLY,
+    "sage_attention": _HALF_PRECISION_CUDA_ONLY,
+    "xformers": _CUDA_ONLY,
+}
+_ACTION_BACKENDS = {
+    "_flash3": _HALF_PRECISION_CUDA_ONLY,
+    "_flash2": _HALF_PRECISION_CUDA_ONLY,
+    "_sage": _HALF_PRECISION_CUDA_ONLY,
+    "_xformers": _CUDA_ONLY,
+}
 
 
-def _qualify_backend(name: str) -> str:
+def _qualify_backend(name: str, known: dict) -> str:
     """Annotate a backend name with the inputs its fused kernel actually serves.
 
-    Anything unlisted is reported as-is. That covers plain SDPA, which has no
-    restriction to report, and any unrecognized DIFFSYNTH_ATTENTION_IMPLEMENTATION
-    value, which attention_forward also runs as plain SDPA — neither should be
-    labelled with a restriction it does not have.
+    ``known`` is the table for the calling subsystem's namespace, so a name is only
+    annotated where it means something. Anything unlisted is reported as-is: that
+    covers plain SDPA, which has no restriction to report, and any unrecognized
+    DIFFSYNTH_ATTENTION_IMPLEMENTATION value, which attention_forward also runs as
+    plain SDPA — neither should be labelled with a restriction it does not have.
     """
-    if name in _HALF_PRECISION_CUDA_BACKENDS:
-        return f"{name} (CUDA fp16/bf16 only; torch_sdpa otherwise)"
-    if name in _CUDA_ONLY_BACKENDS:
-        return f"{name} (CUDA only; torch_sdpa otherwise)"
-    return name
+    return f"{name}{known[name]}" if name in known else name
 
 
 def _log_attention_backends(logger):
@@ -393,7 +403,7 @@ def _log_attention_backends(logger):
 
         fn = get_attention_fn()
         name = fn.__name__ if hasattr(fn, "__name__") else repr(fn)
-        lines.append(f"  ActionDiT          : {_qualify_backend(name)}")
+        lines.append(f"  ActionDiT          : {_qualify_backend(name, _ACTION_BACKENDS)}")
     except Exception as e:
         lines.append(f"  ActionDiT          : ERROR ({e})")
 
@@ -401,7 +411,7 @@ def _log_attention_backends(logger):
     try:
         import openwam.model.video_backbone.wan.models.dit as _vdit
 
-        lines.append(f"  Video DiT          : {_qualify_backend(_vdit.fused_backend_name())}")
+        lines.append(f"  Video DiT          : {_qualify_backend(_vdit.fused_backend_name(), _WAN_BACKENDS)}")
     except Exception as e:
         lines.append(f"  Video DiT          : ERROR ({e})")
 
@@ -409,7 +419,7 @@ def _log_attention_backends(logger):
     try:
         from openwam.model.video_backbone.wan.shared.core.attention.attention import ATTENTION_IMPLEMENTATION
 
-        lines.append(f"  Wan shared core    : {_qualify_backend(ATTENTION_IMPLEMENTATION)}")
+        lines.append(f"  Wan shared core    : {_qualify_backend(ATTENTION_IMPLEMENTATION, _WAN_BACKENDS)}")
     except Exception as e:
         lines.append(f"  Wan shared core    : ERROR ({e})")
 

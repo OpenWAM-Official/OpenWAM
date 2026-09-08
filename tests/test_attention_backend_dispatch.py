@@ -222,14 +222,32 @@ def test_qualifier_is_not_attached_to_backends_that_have_no_restriction():
     against _BACKEND_MAP -- and attention_forward's else-branch runs anything it does
     not recognize through torch_sdpa. Such a run must not be reported as restricted.
     """
-    from openwam.deploy.server import _qualify_backend
+    from openwam.deploy.server import _WAN_BACKENDS, _qualify_backend
 
     # "" is reachable: the env lookup guards on `is not None`, not truthiness.
-    for unrestricted in ("torch", "torch_sdpa", "sdpa", "_sdpa", "", "some_future_backend"):
-        assert _qualify_backend(unrestricted) == unrestricted
+    for unrestricted in ("torch", "torch_sdpa", "sdpa", "", "some_future_backend"):
+        assert _qualify_backend(unrestricted, _WAN_BACKENDS) == unrestricted
 
-    assert _qualify_backend("flash_attention_2") == "flash_attention_2 (CUDA fp16/bf16 only; torch_sdpa otherwise)"
-    assert _qualify_backend("xformers") == "xformers (CUDA only; torch_sdpa otherwise)"
+    assert (
+        _qualify_backend("flash_attention_2", _WAN_BACKENDS)
+        == "flash_attention_2 (CUDA fp16/bf16 only; torch_sdpa otherwise)"
+    )
+    assert _qualify_backend("xformers", _WAN_BACKENDS) == "xformers (CUDA only; torch_sdpa otherwise)"
+
+
+def test_a_name_from_one_namespace_is_not_qualified_in_the_other():
+    """The two subsystems' spellings must not cross-annotate.
+
+    ATTENTION_IMPLEMENTATION is an open set, so an ActionDiT closure name reaches the
+    Wan path through the env var. attention_forward runs it as plain SDPA, so reporting
+    it as a fused backend would be the very defect this module exists to prevent.
+    """
+    from openwam.deploy.server import _ACTION_BACKENDS, _WAN_BACKENDS, _qualify_backend
+
+    for action_name in _ACTION_BACKENDS:
+        assert _qualify_backend(action_name, _WAN_BACKENDS) == action_name
+    for wan_name in _WAN_BACKENDS:
+        assert _qualify_backend(wan_name, _ACTION_BACKENDS) == wan_name
 
 
 def test_action_dit_line_is_qualified_like_the_others(monkeypatch, caplog):
@@ -262,10 +280,10 @@ def test_action_dit_backend_names_match_components():
     from openwam.model.action_backbone import components
 
     restricted = {
-        "flash3": server._HALF_PRECISION_CUDA_BACKENDS,
-        "flash2": server._HALF_PRECISION_CUDA_BACKENDS,
-        "sage": server._HALF_PRECISION_CUDA_BACKENDS,
-        "xformers": server._CUDA_ONLY_BACKENDS,
+        "flash3": server._HALF_PRECISION_CUDA_ONLY,
+        "flash2": server._HALF_PRECISION_CUDA_ONLY,
+        "sage": server._HALF_PRECISION_CUDA_ONLY,
+        "xformers": server._CUDA_ONLY,
     }
     unrestricted = {"sdpa"}  # plain SDPA has no restriction to report
 
@@ -273,9 +291,31 @@ def test_action_dit_backend_names_match_components():
         "_BACKEND_MAP changed; classify the new backend in the diagnostics whitelist"
     )
 
-    # Per-set, not against the union: a backend in the *wrong* set mislabels the report.
+    # Per-restriction, not merely "is it listed": the wrong note mislabels the report.
     for key, expected in restricted.items():
-        assert f"_{key}" in expected, f"_{key} is missing from {expected!r}"
-    both = server._HALF_PRECISION_CUDA_BACKENDS | server._CUDA_ONLY_BACKENDS
+        assert server._ACTION_BACKENDS.get(f"_{key}") == expected, f"_{key} carries the wrong restriction"
     for key in unrestricted:
-        assert f"_{key}" not in both
+        assert f"_{key}" not in server._ACTION_BACKENDS
+
+
+def test_wan_backend_names_match_their_sources():
+    """The Wan table's counterpart pin, over both names that reach it.
+
+    fused_backend_name() and initialize_attention_priority() are the two sources of the
+    Wan spellings; a backend added to either without a table entry silently loses its
+    qualifier, which is the bug this module exists to prevent.
+    """
+    from openwam.deploy import server
+
+    fused = {"flash_attention_3", "flash_attention_2", "sage_attention"}
+    unrestricted = {"torch", "torch_sdpa"}  # the two "no fused kernel" spellings
+
+    for name in fused:
+        assert server._WAN_BACKENDS.get(name) == server._HALF_PRECISION_CUDA_ONLY
+    assert server._WAN_BACKENDS.get("xformers") == server._CUDA_ONLY
+    for name in unrestricted:
+        assert name not in server._WAN_BACKENDS
+
+    assert set(server._WAN_BACKENDS) == fused | {"xformers"}, (
+        "a Wan backend was added or removed; classify it in _WAN_BACKENDS"
+    )
