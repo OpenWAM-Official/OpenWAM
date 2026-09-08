@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import bisect
 import hashlib
-import io
 import json
 import os
 import time
@@ -30,6 +29,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import cv2
 import h5py
 import numpy as np
 import torch
@@ -357,14 +357,28 @@ def _jpeg_bytes(value: Any) -> bytes:
 
 
 def _decode_jpeg(value: Any, *, source: str) -> Image.Image:
+    """Decode JPEG bytes from HDF5 to a PIL RGB image.
+
+    RoboDojo encodes frames by passing RGB arrays directly to ``cv2.imencode``
+    (which expects BGR), so R and B channels are swapped inside the JPEG. Using
+    ``cv2.imdecode`` reverses this swap, giving back the original RGB order — no
+    further conversion needed. This is the same convention ``robotwin.py``
+    documents for the RoboTwin corpus.
+
+    Decoding with PIL instead returns the stored order, i.e. R and B swapped,
+    which is what this reader did until this was caught: the model trained on
+    channel-swapped frames while the deploy path (which decodes whatever the
+    eval client encodes, and every in-repo client encodes true RGB) served
+    correct ones. Confirmed against the corpora's own ``preview_video/*.mp4``,
+    which match this decoder and not PIL's, on both the sim and real corpora.
+    """
     encoded = _jpeg_bytes(value)
     if not encoded:
         raise ValueError(f"{source}: JPEG entry is empty")
-    try:
-        with Image.open(io.BytesIO(encoded)) as image:
-            return image.convert("RGB").copy()
-    except Exception as error:
-        raise ValueError(f"{source}: could not decode JPEG") from error
+    array = cv2.imdecode(np.frombuffer(encoded, np.uint8), cv2.IMREAD_COLOR)
+    if array is None:
+        raise ValueError(f"{source}: could not decode JPEG")
+    return Image.fromarray(array)
 
 
 def discover_robodojo_tasks(
