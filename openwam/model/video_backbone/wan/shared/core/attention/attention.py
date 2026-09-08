@@ -170,6 +170,21 @@ def xformers_attention(
     return out
 
 
+def resolve_implementation(q: torch.Tensor) -> str:
+    """Narrow ATTENTION_IMPLEMENTATION to one this input can actually run.
+
+    FA2/FA3/sage are CUDA half-precision kernels and xformers is CUDA-only; all of
+    them raise rather than degrade, so anything they cannot take falls back to SDPA.
+    xformers keeps its fp32 support, hence the separate check.
+    """
+    if ATTENTION_IMPLEMENTATION in ("flash_attention_3", "flash_attention_2", "sage_attention"):
+        if not (q.is_cuda and q.dtype in (torch.float16, torch.bfloat16)):
+            return "torch"
+    elif ATTENTION_IMPLEMENTATION == "xformers" and not q.is_cuda:
+        return "torch"
+    return ATTENTION_IMPLEMENTATION
+
+
 def attention_forward(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -186,13 +201,14 @@ def attention_forward(
     if compatibility_mode or (attn_mask is not None):
         return torch_sdpa(q, k, v, q_pattern, k_pattern, v_pattern, out_pattern, dims, attn_mask=attn_mask, scale=scale)
     else:
-        if ATTENTION_IMPLEMENTATION == "flash_attention_3":
+        impl = resolve_implementation(q)
+        if impl == "flash_attention_3":
             return flash_attention_3(q, k, v, q_pattern, k_pattern, v_pattern, out_pattern, dims, scale=scale)
-        elif ATTENTION_IMPLEMENTATION == "flash_attention_2":
+        elif impl == "flash_attention_2":
             return flash_attention_2(q, k, v, q_pattern, k_pattern, v_pattern, out_pattern, dims, scale=scale)
-        elif ATTENTION_IMPLEMENTATION == "sage_attention":
+        elif impl == "sage_attention":
             return sage_attention(q, k, v, q_pattern, k_pattern, v_pattern, out_pattern, dims, scale=scale)
-        elif ATTENTION_IMPLEMENTATION == "xformers":
+        elif impl == "xformers":
             return xformers_attention(q, k, v, q_pattern, k_pattern, v_pattern, out_pattern, dims, scale=scale)
         else:
             return torch_sdpa(q, k, v, q_pattern, k_pattern, v_pattern, out_pattern, dims, scale=scale)

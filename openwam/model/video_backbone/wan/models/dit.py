@@ -31,6 +31,17 @@ except ModuleNotFoundError:
     SAGE_ATTN_AVAILABLE = False
 
 
+def fused_backend_name() -> str:
+    """Fused backend used for CUDA fp16/bf16 input. Anything else falls back to SDPA."""
+    if FLASH_ATTN_3_AVAILABLE:
+        return "flash_attention_3"
+    if FLASH_ATTN_2_AVAILABLE:
+        return "flash_attention_2"
+    if SAGE_ATTN_AVAILABLE:
+        return "sage_attention"
+    return "torch_sdpa"
+
+
 def flash_attention(
     q: torch.Tensor,
     k: torch.Tensor,

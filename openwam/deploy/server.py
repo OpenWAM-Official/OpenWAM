@@ -376,14 +376,9 @@ def _log_attention_backends(logger):
     try:
         import openwam.model.video_backbone.wan.models.dit as _vdit
 
-        if getattr(_vdit, "FLASH_ATTN_3_AVAILABLE", False):
-            vdit_backend = "flash_attention_3"
-        elif getattr(_vdit, "FLASH_ATTN_2_AVAILABLE", False):
-            vdit_backend = "flash_attention_2"
-        elif getattr(_vdit, "SAGE_ATTN_AVAILABLE", False):
-            vdit_backend = "sage_attention"
-        else:
-            vdit_backend = "torch_sdpa"
+        vdit_backend = _vdit.fused_backend_name()
+        if vdit_backend != "torch_sdpa":
+            vdit_backend += " (CUDA fp16/bf16 only; torch_sdpa otherwise)"
         lines.append(f"  Video DiT          : {vdit_backend}")
     except Exception as e:
         lines.append(f"  Video DiT          : ERROR ({e})")
@@ -392,7 +387,12 @@ def _log_attention_backends(logger):
     try:
         from openwam.model.video_backbone.wan.shared.core.attention.attention import ATTENTION_IMPLEMENTATION
 
-        lines.append(f"  Wan shared core    : {ATTENTION_IMPLEMENTATION}")
+        shared_backend = ATTENTION_IMPLEMENTATION
+        if shared_backend == "xformers":
+            shared_backend += " (CUDA only; torch_sdpa otherwise)"
+        elif shared_backend != "torch":
+            shared_backend += " (CUDA fp16/bf16 only; torch_sdpa otherwise)"
+        lines.append(f"  Wan shared core    : {shared_backend}")
     except Exception as e:
         lines.append(f"  Wan shared core    : ERROR ({e})")
 
