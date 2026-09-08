@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
+import cv2
 import h5py
 import numpy as np
 import pytest
@@ -59,10 +60,18 @@ def write_calibration(root: Path) -> Path:
 
 
 def encode_jpeg(color: tuple[int, int, int], height: int = 18, width: int = 20) -> bytes:
-    image = Image.new("RGB", (width, height), color)
-    buffer = io.BytesIO()
-    image.save(buffer, format="JPEG", quality=100, subsampling=0)
-    return buffer.getvalue()
+    """Encode ``color`` (RGB) the way the RoboDojo recorder does.
+
+    It hands an RGB array straight to ``cv2.imencode``, which expects BGR, so R
+    and B end up swapped inside the file. Fixtures have to reproduce that or the
+    reader's ``cv2.imdecode`` — which exists to undo it — looks wrong under test
+    while being right on real data.
+    """
+    rgb = np.zeros((height, width, 3), dtype=np.uint8)
+    rgb[:, :] = color
+    ok, buffer = cv2.imencode(".jpg", rgb, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+    assert ok, "cv2.imencode failed"
+    return buffer.tobytes()
 
 
 def source_arrays(T: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -856,3 +865,25 @@ def test_registry_constructs_robodojo_and_exports_classes(tmp_path: Path):
     assert isinstance(dataset, MultiTaskRoboDojoDataset)
     assert isinstance(dataset._sub_datasets[0], RoboDojoDataset)
     assert dataset[0]["action"].shape == (2, 80)
+
+
+def test_decode_jpeg_undoes_the_recorder_channel_swap():
+    """The reader must return true RGB, not the stored order.
+
+    RoboDojo writes its JPEGs with ``cv2.imencode`` fed an RGB array, so the file
+    holds R and B swapped. Decoding with PIL returns that stored order and feeds
+    the model channel-swapped frames, which is what this reader did until it was
+    caught against the corpora's own preview videos. Pinned here because CI never
+    sees a real episode.
+    """
+    from openwam.dataloader.robodojo import _decode_jpeg
+
+    red = (230, 20, 15)
+    frame = np.asarray(_decode_jpeg(encode_jpeg(red), source="test"))
+
+    assert frame[0, 0, 0] > 200, "red must come back in channel 0"
+    assert frame[0, 0, 2] < 60, "blue must not have been swapped into channel 0"
+
+    # And the PIL reading of the very same bytes is the swap this guards against.
+    stored = np.asarray(Image.open(io.BytesIO(encode_jpeg(red))).convert("RGB"))
+    assert stored[0, 0, 2] > 200 and stored[0, 0, 0] < 60
