@@ -398,6 +398,18 @@ Installation and Assets Preparation above cover environment setup and model or
 dataset downloads. Benchmark-specific environment and evaluation details remain
 in the benchmarks directory.
 
+## Star History
+
+<p align="center">
+  <a href="https://star-history.com/#OpenWAM-Official/OpenWAM&Date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=OpenWAM-Official/OpenWAM&amp;type=Date&amp;theme=dark">
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=OpenWAM-Official/OpenWAM&amp;type=Date">
+      <img src="https://api.star-history.com/svg?repos=OpenWAM-Official/OpenWAM&amp;type=Date" alt="Star history of OpenWAM-Official/OpenWAM" width="70%">
+    </picture>
+  </a>
+</p>
+
 ## License
 
 OpenWAM is released under the [Apache License 2.0](LICENSE).
