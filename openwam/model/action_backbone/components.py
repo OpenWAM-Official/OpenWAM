@@ -272,12 +272,17 @@ class ActionOutputMLP(nn.Module):
 _ATTENTION_FN: Callable | None = None
 
 
+def _fused_kernel_usable(q: Tensor) -> bool:
+    """FA2/FA3/sage are CUDA half-precision kernels; they raise on anything else."""
+    return q.is_cuda and q.dtype in (torch.float16, torch.bfloat16)
+
+
 def _try_flash_attn_3() -> Callable | None:
     try:
         from flash_attn_interface import flash_attn_func as flash3_fn  # type: ignore
 
         def _flash3(q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-            if q.device.type != "cuda":
+            if not _fused_kernel_usable(q):
                 return _sdpa(q, k, v)
             q = q.transpose(1, 2)
             k = k.transpose(1, 2)
@@ -295,7 +300,7 @@ def _try_flash_attn_2() -> Callable | None:
         from flash_attn import flash_attn_func  # type: ignore
 
         def _flash2(q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-            if q.device.type != "cuda":
+            if not _fused_kernel_usable(q):
                 return _sdpa(q, k, v)
             q = q.transpose(1, 2)
             k = k.transpose(1, 2)
@@ -313,7 +318,7 @@ def _try_sage_attention() -> Callable | None:
         from sageattention import sageattn  # type: ignore
 
         def _sage(q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-            if q.device.type != "cuda":
+            if not _fused_kernel_usable(q):
                 return _sdpa(q, k, v)
             return sageattn(q, k, v)
 
