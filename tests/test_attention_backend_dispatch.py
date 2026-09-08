@@ -212,3 +212,70 @@ def test_diagnostics_do_not_claim_a_backend_unconditionally(monkeypatch, caplog)
     video_line = next(line for line in caplog.text.splitlines() if "Video DiT" in line)
     assert "flash_attention_2" in video_line
     assert "CUDA fp16/bf16 only" in video_line
+
+
+def test_qualifier_is_not_attached_to_backends_that_have_no_restriction():
+    """ATTENTION_IMPLEMENTATION is an open set: an unknown value runs as plain SDPA.
+
+    initialize_attention_priority() lowercases DIFFSYNTH_ATTENTION_IMPLEMENTATION
+    but does not otherwise check it -- unlike WAM_ATTENTION_IMPL, which is validated
+    against _BACKEND_MAP -- and attention_forward's else-branch runs anything it does
+    not recognize through torch_sdpa. Such a run must not be reported as restricted.
+    """
+    from openwam.deploy.server import _qualify_backend
+
+    # "" is reachable: the env lookup guards on `is not None`, not truthiness.
+    for unrestricted in ("torch", "torch_sdpa", "sdpa", "_sdpa", "", "some_future_backend"):
+        assert _qualify_backend(unrestricted) == unrestricted
+
+    assert _qualify_backend("flash_attention_2") == "flash_attention_2 (CUDA fp16/bf16 only; torch_sdpa otherwise)"
+    assert _qualify_backend("xformers") == "xformers (CUDA only; torch_sdpa otherwise)"
+
+
+def test_action_dit_line_is_qualified_like_the_others(monkeypatch, caplog):
+    """The ActionDiT closures fall back exactly as the Wan paths do, so they read alike."""
+    from openwam.deploy.server import _log_attention_backends
+    from openwam.model.action_backbone import components
+
+    def _flash2(q, k, v):
+        # The report reads __name__ only; a body that raises pins that it stays that way.
+        raise AssertionError("diagnostics must not call the backend")
+
+    monkeypatch.setattr(components, "_ATTENTION_FN", _flash2)
+
+    with caplog.at_level(logging.INFO):
+        _log_attention_backends(logging.getLogger(__name__))
+
+    action_line = next(line for line in caplog.text.splitlines() if "ActionDiT" in line)
+    assert "_flash2" in action_line
+    assert "CUDA fp16/bf16 only" in action_line
+
+
+def test_action_dit_backend_names_match_components():
+    """Pin the ActionDiT spellings, so the whitelist cannot drift from _BACKEND_MAP.
+
+    This pins the naming convention -- a closure named after its key -- rather than the
+    closure objects, since each factory needs its library importable to hand one back
+    and CI has none of them installed.
+    """
+    from openwam.deploy import server
+    from openwam.model.action_backbone import components
+
+    restricted = {
+        "flash3": server._HALF_PRECISION_CUDA_BACKENDS,
+        "flash2": server._HALF_PRECISION_CUDA_BACKENDS,
+        "sage": server._HALF_PRECISION_CUDA_BACKENDS,
+        "xformers": server._CUDA_ONLY_BACKENDS,
+    }
+    unrestricted = {"sdpa"}  # plain SDPA has no restriction to report
+
+    assert set(restricted) | unrestricted == set(components._BACKEND_MAP), (
+        "_BACKEND_MAP changed; classify the new backend in the diagnostics whitelist"
+    )
+
+    # Per-set, not against the union: a backend in the *wrong* set mislabels the report.
+    for key, expected in restricted.items():
+        assert f"_{key}" in expected, f"_{key} is missing from {expected!r}"
+    both = server._HALF_PRECISION_CUDA_BACKENDS | server._CUDA_ONLY_BACKENDS
+    for key in unrestricted:
+        assert f"_{key}" not in both

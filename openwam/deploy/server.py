@@ -354,6 +354,31 @@ def build_server_from_config(
     return PolicyServer(engine=engine, cfg=merged)
 
 
+# Backends that run their fused kernel only for some inputs and quietly fall back to
+# SDPA for the rest. Each subsystem names them differently: the Wan paths use the
+# ATTENTION_IMPLEMENTATION spelling, while the ActionDiT closures are named after their
+# _BACKEND_MAP key (see openwam/model/action_backbone/components.py).
+_HALF_PRECISION_CUDA_BACKENDS = frozenset(
+    {"flash_attention_3", "flash_attention_2", "sage_attention", "_flash3", "_flash2", "_sage"}
+)
+_CUDA_ONLY_BACKENDS = frozenset({"xformers", "_xformers"})
+
+
+def _qualify_backend(name: str) -> str:
+    """Annotate a backend name with the inputs its fused kernel actually serves.
+
+    Anything unlisted is reported as-is. That covers plain SDPA, which has no
+    restriction to report, and any unrecognized DIFFSYNTH_ATTENTION_IMPLEMENTATION
+    value, which attention_forward also runs as plain SDPA — neither should be
+    labelled with a restriction it does not have.
+    """
+    if name in _HALF_PRECISION_CUDA_BACKENDS:
+        return f"{name} (CUDA fp16/bf16 only; torch_sdpa otherwise)"
+    if name in _CUDA_ONLY_BACKENDS:
+        return f"{name} (CUDA only; torch_sdpa otherwise)"
+    return name
+
+
 def _log_attention_backends(logger):
     """Log which attention backend is active for each subsystem.
 
@@ -368,7 +393,7 @@ def _log_attention_backends(logger):
 
         fn = get_attention_fn()
         name = fn.__name__ if hasattr(fn, "__name__") else repr(fn)
-        lines.append(f"  ActionDiT          : {name}")
+        lines.append(f"  ActionDiT          : {_qualify_backend(name)}")
     except Exception as e:
         lines.append(f"  ActionDiT          : ERROR ({e})")
 
@@ -376,10 +401,7 @@ def _log_attention_backends(logger):
     try:
         import openwam.model.video_backbone.wan.models.dit as _vdit
 
-        vdit_backend = _vdit.fused_backend_name()
-        if vdit_backend != "torch_sdpa":
-            vdit_backend += " (CUDA fp16/bf16 only; torch_sdpa otherwise)"
-        lines.append(f"  Video DiT          : {vdit_backend}")
+        lines.append(f"  Video DiT          : {_qualify_backend(_vdit.fused_backend_name())}")
     except Exception as e:
         lines.append(f"  Video DiT          : ERROR ({e})")
 
@@ -387,12 +409,7 @@ def _log_attention_backends(logger):
     try:
         from openwam.model.video_backbone.wan.shared.core.attention.attention import ATTENTION_IMPLEMENTATION
 
-        shared_backend = ATTENTION_IMPLEMENTATION
-        if shared_backend == "xformers":
-            shared_backend += " (CUDA only; torch_sdpa otherwise)"
-        elif shared_backend != "torch":
-            shared_backend += " (CUDA fp16/bf16 only; torch_sdpa otherwise)"
-        lines.append(f"  Wan shared core    : {shared_backend}")
+        lines.append(f"  Wan shared core    : {_qualify_backend(ATTENTION_IMPLEMENTATION)}")
     except Exception as e:
         lines.append(f"  Wan shared core    : ERROR ({e})")
 
