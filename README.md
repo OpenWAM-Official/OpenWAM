@@ -430,3 +430,26 @@ If you use OpenWAM, please cite:
   journal = {arXiv preprint arXiv: 2609.07398}
 }
 ```
+
+## Contact
+
+Have a question, want to share results, or just follow development? Join us:
+
+<table align="center">
+  <tr>
+    <td align="center" width="360">
+      <img src="assets/repo_images/WeChat_Group.png" alt="OpenWAM WeChat group QR code" height="300">
+      <br><br>
+      <b>WeChat Group</b>
+      <br>
+      Scan to join
+    </td>
+    <td align="center" width="360">
+      <a href="https://discord.gg/yRSqhpNXu"><img src="assets/repo_images/Discord_QRCode.png" alt="OpenWAM Discord QR code" height="300"></a>
+      <br><br>
+      <b>Discord</b>
+      <br>
+      <a href="https://discord.gg/yRSqhpNXu">discord.gg/yRSqhpNXu</a>
+    </td>
+  </tr>
+</table>
