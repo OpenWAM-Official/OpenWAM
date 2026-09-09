@@ -213,3 +213,6 @@ assets/*
 # Versioned repository images.
 !assets/repo_images/
 !assets/repo_images/**
+# Versioned RoboDojo score verification (see issue #23).
+!assets/robodojo_verification/
+!assets/robodojo_verification/**
