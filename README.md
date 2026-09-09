@@ -88,6 +88,7 @@ All architectures are selected via `configs/model/<framework>.yaml` with `archit
 -->
 
 ## News
+- **[2026/09/09]** 📄 OpenWAM [Paper](https://arxiv.org/pdf/2609.07398) is released on arXiv.
 - **[2026/09/06]** 🤖 OpenWAM is integrated into [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab).
 - **[2026/09/06]** 🤗 We release all pretrained and finetuned models on [huggingface](https://huggingface.co/OpenWAM).
 - **[2026/09/06]** 🔥 OpenWAM Codebase Release！
