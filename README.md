@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://openwam-official.github.io/"><img src="https://img.shields.io/badge/Project%20Page-OPENWAM--OFFICIAL.GITHUB.IO-blue?style=flat&amp;logo=github" alt="Project Page"></a>
-  <img src="https://img.shields.io/badge/arXiv-XXXX.XXXXXX-red?style=flat&amp;logo=arxiv" alt="Technical Report (pending)">
+  <a href="https://arxiv.org/abs/2609.07398"><img src="https://img.shields.io/badge/arXiv-2609.07398-red?style=flat&amp;logo=arxiv" alt="Paper on arXiv"></a>
   <a href="https://huggingface.co/OpenWAM"><img src="https://img.shields.io/badge/HuggingFace-Model%20%26%20Data-orange?style=flat&amp;logo=huggingface" alt="Model &amp; Data on Hugging Face"></a>
 </p>
 
@@ -422,5 +422,10 @@ OpenWAM is released under the [Apache License 2.0](LICENSE).
 If you use OpenWAM, please cite:
 
 ```bibtex
-TODO
+@article{wang2026openwam,
+  title   = {OpenWAM: An Open, Modular Exploration Towards Systematic World-Action Model Pretraining},
+  author  = {Yuran Wang and Siqiao Huang and Mingleyang Li and Chenhao Zhang and Jiaqi Liang and Weiyang Jin and Yue Chen and Xuemin Chi and Donghao Zhou and Qize Yu and Yu-Kai Wang and Yuhan Rui and Shenzhe Yao and Zhen Yuan and Zhenhao Shen and Kefei Zhu and Zijie Zhu and Ning Gao and Xiaowei Chi and Guanqi He and Shanghang Zhang and Hao Dong and Lin Shao and Hang Zhao},
+  year    = {2026},
+  journal = {arXiv preprint arXiv: 2609.07398}
+}
 ```
