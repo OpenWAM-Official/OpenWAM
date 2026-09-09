@@ -1,0 +1,120 @@
+{
+  "policy": "OpenWAM-α",
+  "benchmark": "RoboDojo",
+  "source_summary": "_summary_New_OpenWAM_RoboDojo_SFT_60k.md",
+  "leaderboard_generated_at": "2026-09-05",
+  "seeds": [0, 1, 2],
+  "episodes": {
+    "standalone_task": 50,
+    "paired_half": 25,
+    "paired_total": 50
+  },
+  "note": "generalization holds the two 25-episode halves of each paired task. merged_all_tasks holds the 50-episode value the leaderboard reports per task; for the 12 generalization tasks it equals (standard + random) / 2.",
+
+  "generalization": {
+    "stack_bowls": {
+      "standard": {"sr": [88, 92, 84], "score": [89.80, 93.20, 85.80]},
+      "random":   {"sr": [4, 0, 4],    "score": [13.00, 6.60, 11.20]}
+    },
+    "push_T": {
+      "standard": {"sr": [0, 0, 0], "score": [0.00, 0.00, 0.00]},
+      "random":   {"sr": [0, 0, 0], "score": [0.00, 0.00, 0.00]}
+    },
+    "pack_objects_into_box": {
+      "standard": {"sr": [4, 12, 12], "score": [29.40, 30.60, 32.00]},
+      "random":   {"sr": [0, 0, 0],   "score": [10.60, 15.80, 16.40]}
+    },
+    "fold_clothes": {
+      "standard": {"sr": [92, 80, 88],  "score": [92.00, 82.40, 90.40]},
+      "random":   {"sr": [16, 20, 36],  "score": [19.20, 22.40, 38.40]}
+    },
+    "hang_mugs": {
+      "standard": {"sr": [16, 12, 4], "score": [32.40, 31.00, 24.80]},
+      "random":   {"sr": [0, 0, 0],   "score": [0.60, 4.80, 4.20]}
+    },
+    "sweep_blocks": {
+      "standard": {"sr": [0, 8, 0], "score": [0.00, 8.00, 0.00]},
+      "random":   {"sr": [0, 0, 0], "score": [0.00, 0.00, 0.00]}
+    },
+    "pour_liquid_into_cup": {
+      "standard": {"sr": [56, 64, 44], "score": [56.00, 64.00, 44.00]},
+      "random":   {"sr": [16, 16, 12], "score": [16.00, 16.00, 12.00]}
+    },
+    "make_toast": {
+      "standard": {"sr": [0, 8, 4], "score": [12.00, 18.00, 18.00]},
+      "random":   {"sr": [0, 4, 0], "score": [7.00, 12.00, 8.00]}
+    },
+    "arrange_largest_number": {
+      "standard": {"sr": [0, 0, 4], "score": [7.60, 4.60, 11.20]},
+      "random":   {"sr": [0, 0, 0], "score": [1.60, 2.80, 1.80]}
+    },
+    "sort_nesting_dolls_by_size": {
+      "standard": {"sr": [8, 8, 12], "score": [8.00, 8.00, 12.00]},
+      "random":   {"sr": [0, 0, 0],  "score": [0.00, 0.00, 0.00]}
+    },
+    "store_laptop_and_headphones": {
+      "standard": {"sr": [28, 36, 12], "score": [44.00, 48.80, 40.00]},
+      "random":   {"sr": [4, 4, 12],   "score": [9.60, 20.80, 20.00]}
+    },
+    "stack_blocks": {
+      "standard": {"sr": [16, 8, 20], "score": [25.60, 20.60, 29.60]},
+      "random":   {"sr": [0, 0, 0],   "score": [0.00, 3.00, 3.60]}
+    }
+  },
+
+  "merged_all_tasks": {
+    "align_blocks":                 {"sr": [0, 0, 0],    "score": [0.00, 0.00, 0.00]},
+    "arrange_largest_number":       {"sr": [0, 0, 2],    "score": [4.60, 3.70, 6.50]},
+    "build_tower":                  {"sr": [38, 42, 36], "score": [52.40, 54.80, 50.40]},
+    "classify_objects":             {"sr": [0, 0, 4],    "score": [4.00, 5.40, 7.20]},
+    "classify_objects_by_language": {"sr": [0, 0, 0],    "score": [0.80, 2.40, 0.80]},
+    "cover_blocks":                 {"sr": [16, 12, 22], "score": [22.00, 17.60, 27.10]},
+    "deposit_coin":                 {"sr": [2, 2, 6],    "score": [7.60, 7.20, 12.40]},
+    "fasten_screws":                {"sr": [6, 4, 2],    "score": [25.00, 26.20, 22.80]},
+    "fill_egg_holder":              {"sr": [0, 0, 0],    "score": [5.50, 4.70, 7.20]},
+    "fill_pen_holder":              {"sr": [2, 10, 6],   "score": [12.90, 18.00, 15.20]},
+    "fold_clothes":                 {"sr": [54, 50, 62], "score": [55.60, 52.40, 64.40]},
+    "general_pickup":               {"sr": [6, 8, 12],   "score": [6.00, 8.00, 12.00]},
+    "hang_mugs":                    {"sr": [8, 6, 2],    "score": [16.50, 17.90, 14.50]},
+    "imitate_sorting_sequence":     {"sr": [2, 0, 0],    "score": [5.10, 1.70, 1.90]},
+    "insert_key":                   {"sr": [0, 0, 0],    "score": [13.20, 14.10, 13.80]},
+    "insert_tubes":                 {"sr": [8, 4, 8],    "score": [24.80, 25.20, 28.80]},
+    "make_kong":                    {"sr": [30, 36, 30], "score": [30.00, 36.00, 30.00]},
+    "make_toast":                   {"sr": [0, 6, 2],    "score": [9.50, 15.00, 13.00]},
+    "match_and_pick_from_conveyor": {"sr": [42, 38, 30], "score": [42.00, 38.00, 30.00]},
+    "organize_table":               {"sr": [16, 8, 16],  "score": [64.50, 57.50, 65.50]},
+    "pack_objects_into_box":        {"sr": [2, 6, 6],    "score": [20.00, 23.20, 24.20]},
+    "pick_from_conveyor_by_image":  {"sr": [0, 0, 0],    "score": [0.00, 0.00, 0.00]},
+    "play_Xylophone":               {"sr": [0, 0, 0],    "score": [0.00, 0.00, 0.00]},
+    "play_stacking_toy":            {"sr": [0, 0, 0],    "score": [0.20, 0.20, 0.00]},
+    "play_tic_tac_toe":             {"sr": [54, 52, 70], "score": [60.50, 57.70, 74.00]},
+    "plug_in_charger":              {"sr": [0, 4, 8],    "score": [0.00, 4.00, 8.00]},
+    "pour_balls_into_vase":         {"sr": [16, 16, 20], "score": [16.00, 16.00, 20.00]},
+    "pour_by_language":             {"sr": [0, 0, 0],    "score": [0.00, 0.00, 0.00]},
+    "pour_liquid_into_cup":         {"sr": [36, 40, 28], "score": [36.00, 40.00, 28.00]},
+    "press_by_number":              {"sr": [0, 0, 0],    "score": [0.00, 0.00, 0.00]},
+    "push_T":                       {"sr": [0, 0, 0],    "score": [0.00, 0.00, 0.00]},
+    "put_bottles_into_dustbin":     {"sr": [98, 88, 88], "score": [98.00, 92.20, 91.90]},
+    "solve_equation":               {"sr": [0, 0, 0],    "score": [0.00, 0.00, 0.00]},
+    "sort_nesting_dolls_by_size":   {"sr": [4, 4, 6],    "score": [4.00, 4.00, 6.00]},
+    "stack_blocks":                 {"sr": [8, 4, 10],   "score": [12.80, 11.80, 16.60]},
+    "stack_blocks_by_language":     {"sr": [0, 0, 0],    "score": [1.20, 0.80, 0.80]},
+    "stack_bowls":                  {"sr": [46, 46, 44], "score": [51.40, 49.90, 48.50]},
+    "store_laptop_and_headphones":  {"sr": [16, 20, 12], "score": [26.80, 34.80, 30.00]},
+    "store_tools_in_toolbox":       {"sr": [0, 0, 0],    "score": [1.00, 0.00, 0.00]},
+    "swap_T":                       {"sr": [0, 0, 0],    "score": [0.00, 0.00, 0.00]},
+    "swap_blocks":                  {"sr": [0, 2, 0],    "score": [0.00, 2.00, 0.00]},
+    "sweep_blocks":                 {"sr": [0, 4, 0],    "score": [0.00, 4.00, 0.00]}
+  },
+
+  "published_aggregates": {
+    "generalization_merged": {"sr": 14.83, "score": 20.71},
+    "generalization_standard": {"sr": 25.56, "score": 33.16},
+    "generalization_random": {"sr": 4.11, "score": 8.26},
+    "precision": {"sr": 9.25, "score": 18.45},
+    "long_horizon": {"sr": 25.33, "score": 34.93},
+    "memory": {"sr": 9.11, "score": 10.41},
+    "open": {"sr": 1.08, "score": 1.41},
+    "average": {"sr": 11.92, "score": 17.18}
+  }
+}
