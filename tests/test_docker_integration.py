@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -320,31 +321,49 @@ class DockerIntegrationTests(unittest.TestCase):
             'org.opencontainers.image.revision="integration-release"\n'
             'COPY payload /opt/openwam\nCMD ["/bin/true"]\n'
         )
-        tag = "openwam-bundle-test:" + uuid.uuid4().hex
+        # A registry port must not be mistaken for a tag. These images stay local.
+        repository = "localhost:5000/openwam-bundle-test-" + uuid.uuid4().hex
+        tag = repository + ":latest"
         self.run_command([*DOCKER, "build", "--platform", "linux/amd64", "-t", tag, str(context)])
         self.addCleanup(self.run_command, [*DOCKER, "image", "rm", tag])
         # Export must ignore even subsequent changes to the image's build context.
         frozen.write_text("new checkout configuration that must not be exported\n")
-        bundle = self.directory / "bundle"
-        self.run_command(
-            [
-                sys.executable,
-                str(ROOT / "docker/offline.py"),
-                "--docker",
-                shlex.join(DOCKER),
-                "export",
-                tag,
-                str(bundle),
-            ]
-        )
-        self.assertIn("# frozen image configuration", (bundle / "compose.yaml").read_text())
-        manifest = json.loads((bundle / "manifest.json").read_text())
-        self.assertEqual(manifest["revision"], "integration-release")
-        self.assertIn("OPENWAM_IMAGE=" + tag, (bundle / ".env.example").read_text())
-        self.run_command([*DOCKER, "image", "rm", tag])
-        self.run_command(
-            [sys.executable, str(bundle / "docker/offline.py"), "--docker", shlex.join(DOCKER), "load", "."], cwd=bundle
-        )
+        other_tag = repository + ":other"
+        self.run_command([*DOCKER, "build", "--platform", "linux/amd64", "-t", other_tag, str(context)])
+        self.addCleanup(self.run_command, [*DOCKER, "image", "rm", other_tag])
+        other_identity = offline.image_identity(offline.inspect_image(other_tag, DOCKER))
+
+        for selection, image in (("explicit", tag), ("implicit", repository)):
+            with self.subTest(selection=selection):
+                bundle = self.directory / selection
+                self.run_command(
+                    [
+                        sys.executable,
+                        str(ROOT / "docker/offline.py"),
+                        "--docker",
+                        shlex.join(DOCKER),
+                        "export",
+                        image,
+                        str(bundle),
+                    ]
+                )
+                # Inspect the real archive, not just the exporter's manifest:
+                # bare `docker save repository` would include the other version.
+                with tarfile.open(bundle / "image.tar.gz", "r:gz") as archive:
+                    images = json.load(archive.extractfile("manifest.json"))
+                self.assertEqual(len(images), 1)
+                self.assertEqual(images[0]["RepoTags"], [tag])
+                self.assertIn("# frozen image configuration", (bundle / "compose.yaml").read_text())
+                manifest = json.loads((bundle / "manifest.json").read_text())
+                self.assertEqual(manifest["revision"], "integration-release")
+                self.assertEqual(manifest["image"], tag)
+                self.assertIn("OPENWAM_IMAGE=" + tag + "\n", (bundle / ".env.example").read_text())
+                self.run_command([*DOCKER, "image", "rm", tag])
+                self.run_command(
+                    [sys.executable, str(bundle / "docker/offline.py"), "--docker", shlex.join(DOCKER), "load", "."],
+                    cwd=bundle,
+                )
+                self.assertEqual(offline.image_identity(offline.inspect_image(other_tag, DOCKER)), other_identity)
 
     def test_validation_configuration_follows_image_gpus_and_host_port(self):
         self.env.update(OPENWAM_IMAGE="openwam:validation-tag", OPENWAM_TRAIN_GPUS="1,3", OPENWAM_PORT="18848")

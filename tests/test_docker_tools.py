@@ -14,6 +14,8 @@ import pytest
 from websockets.sync.server import serve
 
 ROOT = Path(__file__).resolve().parents[1]
+CONFIG_ID = "sha256:" + "a" * 64
+INDEX_ID = "sha256:" + "b" * 64
 
 
 def load_tool(name):
@@ -55,7 +57,8 @@ def fake_docker(tmp_path, monkeypatch):
         "    if loaded.exists() and os.environ.get('DOCKER_TEST_CORRUPT') == 'layer':\n"
         "        layers = ['sha256:other']\n"
         "    print(json.dumps([{'Os':'linux', 'Architecture':'amd64',\n"
-        "        'Id': 'sha256:config' if loaded.exists() else 'sha256:index',\n"
+        f"        'Id': {CONFIG_ID!r} if loaded.exists() else {INDEX_ID!r},\n"
+        "        'RepoTags': json.loads(os.environ.get('DOCKER_TEST_TAGS', '[]')),\n"
         "        'Config': config, 'RootFS': {'Layers': layers}}]))\n"
         "elif sys.argv[1:3] == ['image', 'save']:\n"
         "    sys.stdout.buffer.write(b'test image layers')\n"
@@ -64,7 +67,7 @@ def fake_docker(tmp_path, monkeypatch):
         "    assert Path(sys.argv[-1]).is_file()\n"
         "    loaded.touch()\n"
         "elif sys.argv[1] == 'create':\n"
-        "    assert sys.argv[-1] == 'sha256:index'\n"
+        f"    assert sys.argv[-1] == {INDEX_ID!r}\n"
         "    print('temporary-container')\n"
         "elif sys.argv[1] == 'cp':\n"
         "    source = sys.argv[2].split(':/opt/openwam/')[1]\n"
@@ -87,16 +90,32 @@ def run_bundle(*args):
     )
 
 
-def test_offline_roundtrip_and_image_identity(tmp_path, fake_docker):
+@pytest.mark.parametrize(
+    "image,expected",
+    [
+        ("openwam", "openwam:latest"),
+        ("openwam:revision", "openwam:revision"),
+        ("example.test/team/openwam", "example.test/team/openwam:latest"),
+        ("localhost:5000/team/openwam", "localhost:5000/team/openwam:latest"),
+        ("localhost:5000/team/openwam:revision", "localhost:5000/team/openwam:revision"),
+        ("[::1]:5000/team/openwam", "[::1]:5000/team/openwam:latest"),
+        ("openwam@" + INDEX_ID, "openwam@" + INDEX_ID),
+        (INDEX_ID, INDEX_ID),
+        ("b" * 64, "b" * 64),
+        ("b" * 12, "b" * 12),
+    ],
+)
+def test_offline_roundtrip_and_image_identity(tmp_path, fake_docker, image, expected):
     destination = tmp_path / "bundle with spaces"
-    result = run_bundle("export", "openwam:revision", destination)
+    result = run_bundle("export", image, destination)
     assert result.returncode == 0, result.stderr
     assert gzip.decompress((destination / "image.tar.gz").read_bytes()) == b"test image layers"
-    assert "OPENWAM_IMAGE=openwam:revision\n" in (destination / ".env.example").read_text()
+    assert "OPENWAM_IMAGE=" + expected + "\n" in (destination / ".env.example").read_text()
     assert "# configuration frozen in the image" in (destination / "compose.yaml").read_text()
     manifest = json.loads((destination / "manifest.json").read_text())
     assert manifest["revision"] == "image-commit"
     assert manifest["schema"] == 2
+    assert manifest["image"] == expected
     # The copied importer is standalone; it does not depend on this repository.
     result = subprocess.run(
         [sys.executable, str(destination / "docker/offline.py"), "load", str(destination)],
@@ -106,10 +125,22 @@ def test_offline_roundtrip_and_image_identity(tmp_path, fake_docker):
     )
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in fake_docker.read_text().splitlines()]
+    assert ["image", "save", expected] in calls
     assert ["image", "load", "--input", str(destination / "image.tar.gz")] in calls
-    assert calls[-1] == ["image", "inspect", "openwam:revision"]
-    assert ["create", "--pull=never", "--network", "none", "--entrypoint", "/bin/true", "sha256:index"] in calls
+    assert calls[-1] == ["image", "inspect", expected]
+    assert ["create", "--pull=never", "--network", "none", "--entrypoint", "/bin/true", INDEX_ID] in calls
     assert ["rm", "temporary-container"] in calls
+
+
+def test_repository_name_matching_id_prefix_still_selects_latest(tmp_path, fake_docker, monkeypatch):
+    image = "b" * 12
+    monkeypatch.setenv("DOCKER_TEST_TAGS", json.dumps([image + ":latest", image + ":other"]))
+    destination = tmp_path / "bundle"
+    result = run_bundle("export", image, destination)
+    assert result.returncode == 0, result.stderr
+    assert json.loads((destination / "manifest.json").read_text())["image"] == image + ":latest"
+    calls = [json.loads(line) for line in fake_docker.read_text().splitlines()]
+    assert ["image", "save", image + ":latest"] in calls
 
 
 @pytest.mark.parametrize(

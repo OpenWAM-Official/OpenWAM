@@ -285,6 +285,8 @@ rsync -a --partial assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-RoboTwin-
 
 Each export requires a new destination; set `DOCKER_BUNDLE=dist/my-new-bundle`
 for another export. The image archive excludes datasets, weights and run outputs.
+If `OPENWAM_IMAGE` names a repository without a tag, such as `openwam`, export
+selects `openwam:latest` and excludes other tags in that repository.
 
 ### On the offline GPU server
 

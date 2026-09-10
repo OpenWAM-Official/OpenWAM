@@ -92,6 +92,13 @@ def export_bundle(image, destination, docker=("docker",)):
     if destination.exists():
         raise ValueError("bundle destination already exists: " + str(destination))
     metadata = inspect_image(image, docker)
+    # Inspect selects :latest for a bare repository; save would include every
+    # tag. Make that default explicit while preserving digest and image-ID inputs.
+    is_image_id = metadata["Id"].split(":", 1)[-1].startswith(image) and image + ":latest" not in (
+        metadata.get("RepoTags") or []
+    )
+    if not is_image_id and "@" not in image and ":" not in image.rsplit("/", 1)[-1]:
+        image += ":latest"
     revision = release_revision(metadata)
     # Configuration and the standalone importer come from the selected image,
     # never from the checkout running this exporter. Extraction needs no GPU.
