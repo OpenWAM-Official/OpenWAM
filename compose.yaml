@@ -1,0 +1,116 @@
+# Compose derives the project name from this directory. Set COMPOSE_PROJECT_NAME
+# in .env (or use -p) when multiple checkouts have the same directory basename.
+x-openwam: &openwam
+  image: ${OPENWAM_IMAGE:-openwam:cu128}
+  platform: linux/amd64
+  pull_policy: never
+  init: true
+  user: "${OPENWAM_UID:-1000}:${OPENWAM_GID:-1000}"
+  shm_size: ${OPENWAM_SHM_SIZE:-16gb}
+  environment: &environment
+    HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
+    TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-1}
+    WANDB_MODE: ${WANDB_MODE:-offline}
+    OPENWAM_CUDA_COMPAT: ${OPENWAM_CUDA_COMPAT:-0}
+  volumes:
+    - type: bind
+      source: ${OPENWAM_CACHE_DIR:-./.cache/docker}
+      target: /cache
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${OPENWAM_OUTPUT_DIR:-./outputs}
+      target: /outputs
+      bind:
+        create_host_path: false
+
+services:
+  serve:
+    <<: *openwam
+    runtime: nvidia
+    environment:
+      <<: *environment
+      OPENWAM_SERVER_URL: ws://127.0.0.1:8848
+    command: [serve, --ckpt-dir, /checkpoint, --device, "cuda:0", --host, 0.0.0.0, --port, "8848"]
+    ports:
+      - "${OPENWAM_BIND_HOST:-127.0.0.1}:${OPENWAM_PORT:-8848}:8848"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${OPENWAM_GPU_ID:-0}"]
+              capabilities: [gpu]
+    volumes:
+      - type: bind
+        source: ${OPENWAM_CACHE_DIR:-./.cache/docker}
+        target: /cache
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OPENWAM_OUTPUT_DIR:-./outputs}
+        target: /outputs
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OPENWAM_CHECKPOINT_DIR:-./assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-RoboTwin-Full}
+        target: /checkpoint
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: [CMD, python, /opt/openwam/docker/healthcheck.py, --timeout, "120"]
+      interval: 60s
+      timeout: 245s
+      start_period: 10m
+      retries: 5
+    stop_grace_period: 60s
+
+  train:
+    <<: *openwam
+    runtime: nvidia
+    profiles: [train]
+    command: [train]
+    gpus: all
+    environment:
+      <<: *environment
+      CUDA_VISIBLE_DEVICES: ${OPENWAM_TRAIN_GPUS:-0}
+    volumes:
+      - type: bind
+        source: ${OPENWAM_CACHE_DIR:-./.cache/docker}
+        target: /cache
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OPENWAM_OUTPUT_DIR:-./outputs}
+        target: /outputs
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OPENWAM_ASSETS_DIR:-./assets}
+        target: /opt/openwam/assets
+        bind:
+          create_host_path: false
+    stop_grace_period: 120s
+
+  # CPU development shell; compose.dev.yaml adds the source mounts. For GPU
+  # development use that overlay with `run --rm train bash` instead.
+  dev:
+    <<: *openwam
+    profiles: [dev]
+    command: [bash]
+    stdin_open: true
+    tty: true
+
+  # No weights or dataset mount: validate exactly the image and GPUs selected
+  # in .env, including multi-GPU NCCL when more than one device is selected.
+  gpu-check:
+    <<: *openwam
+    profiles: [check]
+    runtime: nvidia
+    gpus: all
+    network_mode: none
+    environment:
+      <<: *environment
+      CUDA_VISIBLE_DEVICES: ${OPENWAM_TRAIN_GPUS:-0}
+    command: [python, /opt/openwam/docker/gpu_smoke.py, --all-visible, --deepspeed]

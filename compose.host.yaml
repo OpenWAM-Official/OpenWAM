@@ -1,0 +1,25 @@
+# Optional Linux host networking when host-to-bridge traffic is unavailable.
+# Use with: docker compose -f compose.yaml -f compose.host.yaml ...
+services:
+  serve:
+    network_mode: host
+    ports: !reset []
+    environment:
+      OPENWAM_SERVER_URL: ws://${OPENWAM_BIND_HOST:-127.0.0.1}:${OPENWAM_PORT:-8848}
+    command:
+      - serve
+      - --ckpt-dir
+      - /checkpoint
+      - --device
+      - cuda:0
+      - --host
+      - ${OPENWAM_BIND_HOST:-127.0.0.1}
+      - --port
+      - "${OPENWAM_PORT:-8848}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /opt/openwam/docker/healthcheck.py
+        - --timeout
+        - "120"
