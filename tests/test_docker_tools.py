@@ -45,7 +45,10 @@ def fake_docker(tmp_path, monkeypatch):
         "with open(os.environ['DOCKER_TEST_CALLS'], 'a') as log:\n"
         "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
         "loaded = Path(os.environ['DOCKER_TEST_CALLS'] + '.loaded')\n"
+        "tagged = Path(os.environ['DOCKER_TEST_CALLS'] + '.tagged')\n"
         "if sys.argv[1:3] == ['image', 'inspect']:\n"
+        "    if sys.argv[-1].startswith('openwam-bundle:') and not (tagged.exists() or loaded.exists()):\n"
+        "        sys.exit(1)\n"
         "    config = {'Env': ['TEST=1']} if loaded.exists() else {'Env': ['TEST=1'], 'Cmd': None}\n"
         "    config['Labels'] = {'io.openwam.bundle.schema': os.environ.get('DOCKER_TEST_SCHEMA', '2'),\n"
         "        'org.opencontainers.image.revision': os.environ.get('DOCKER_TEST_REVISION', 'image-commit')}\n"
@@ -56,6 +59,8 @@ def fake_docker(tmp_path, monkeypatch):
         "        config['Env'] = ['TEST=2']\n"
         "    if loaded.exists() and os.environ.get('DOCKER_TEST_CORRUPT') == 'layer':\n"
         "        layers = ['sha256:other']\n"
+        "    if sys.argv[-1].startswith('openwam-bundle:') and os.environ.get('DOCKER_TEST_TAG_CONFLICT'):\n"
+        "        layers = ['sha256:unrelated']\n"
         "    print(json.dumps([{'Os':'linux', 'Architecture':'amd64',\n"
         f"        'Id': {CONFIG_ID!r} if loaded.exists() else {INDEX_ID!r},\n"
         "        'RepoTags': json.loads(os.environ.get('DOCKER_TEST_TAGS', '[]')),\n"
@@ -66,6 +71,9 @@ def fake_docker(tmp_path, monkeypatch):
         "elif sys.argv[1:3] == ['image', 'load']:\n"
         "    assert Path(sys.argv[-1]).is_file()\n"
         "    loaded.touch()\n"
+        "elif sys.argv[1:3] == ['image', 'tag']:\n"
+        f"    assert sys.argv[3] == {INDEX_ID!r}\n"
+        "    tagged.write_text(sys.argv[4])\n"
         "elif sys.argv[1] == 'create':\n"
         f"    assert sys.argv[-1] == {INDEX_ID!r}\n"
         "    print('temporary-container')\n"
@@ -99,20 +107,26 @@ def run_bundle(*args):
         ("localhost:5000/team/openwam", "localhost:5000/team/openwam:latest"),
         ("localhost:5000/team/openwam:revision", "localhost:5000/team/openwam:revision"),
         ("[::1]:5000/team/openwam", "[::1]:5000/team/openwam:latest"),
-        ("openwam@" + INDEX_ID, "openwam@" + INDEX_ID),
-        (INDEX_ID, INDEX_ID),
-        ("b" * 64, "b" * 64),
-        ("b" * 12, "b" * 12),
+        ("openwam@" + INDEX_ID, None),
+        ("localhost:5000/team/openwam:release@" + INDEX_ID, None),
+        (INDEX_ID, None),
+        ("b" * 64, None),
+        ("b" * 12, None),
     ],
 )
 def test_offline_roundtrip_and_image_identity(tmp_path, fake_docker, image, expected):
     destination = tmp_path / "bundle with spaces"
     result = run_bundle("export", image, destination)
     assert result.returncode == 0, result.stderr
+    manifest = json.loads((destination / "manifest.json").read_text())
+    if expected is None:
+        expected = manifest["image"]
+        assert expected.startswith("openwam-bundle:sha256-")
+        assert len(expected.rsplit("-", 1)[-1]) == 64
     assert gzip.decompress((destination / "image.tar.gz").read_bytes()) == b"test image layers"
     assert "OPENWAM_IMAGE=" + expected + "\n" in (destination / ".env.example").read_text()
     assert "# configuration frozen in the image" in (destination / "compose.yaml").read_text()
-    manifest = json.loads((destination / "manifest.json").read_text())
+    assert manifest["source_image"] == image
     assert manifest["revision"] == "image-commit"
     assert manifest["schema"] == 2
     assert manifest["image"] == expected
@@ -130,6 +144,26 @@ def test_offline_roundtrip_and_image_identity(tmp_path, fake_docker, image, expe
     assert calls[-1] == ["image", "inspect", expected]
     assert ["create", "--pull=never", "--network", "none", "--entrypoint", "/bin/true", INDEX_ID] in calls
     assert ["rm", "temporary-container"] in calls
+
+
+def test_digest_delivery_tag_is_stable_and_never_overwrites_another_image(tmp_path, fake_docker, monkeypatch):
+    references = ["openwam@" + INDEX_ID, INDEX_ID, "b" * 12]
+    tags = []
+    for index, reference in enumerate(references):
+        destination = tmp_path / str(index)
+        result = run_bundle("export", reference, destination)
+        assert result.returncode == 0, result.stderr
+        tags.append(json.loads((destination / "manifest.json").read_text())["image"])
+    assert len(set(tags)) == 1
+    calls = fake_docker.read_text()
+    assert calls.count('["image", "tag",') == 1
+    monkeypatch.setenv("DOCKER_TEST_TAG_CONFLICT", "1")
+    destination = tmp_path / "conflict"
+    result = run_bundle("export", references[0], destination)
+    assert result.returncode != 0
+    assert "delivery tag already points to a different image" in result.stderr
+    assert not destination.exists()
+    assert fake_docker.read_text().count('["image", "tag",') == 1
 
 
 def test_repository_name_matching_id_prefix_still_selects_latest(tmp_path, fake_docker, monkeypatch):

@@ -1,18 +1,24 @@
 """Opt-in Docker regressions; run `make docker-integration-check` (no GPU needed)."""
 
+import gzip
+import hashlib
 import importlib.util
+import io
 import json
 import os
 import shlex
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import unittest
 import uuid
 import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -364,6 +370,174 @@ class DockerIntegrationTests(unittest.TestCase):
                     cwd=bundle,
                 )
                 self.assertEqual(offline.image_identity(offline.inspect_image(other_tag, DOCKER)), other_identity)
+
+    def test_digest_bundle_loads_without_the_source_registry(self):
+        # Serve a tiny real image from a loopback registry. Unlike locally built
+        # images, a pull records a repository digest on both Docker image stores.
+        spec = importlib.util.spec_from_file_location("offline", ROOT / "docker/offline.py")
+        offline = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(offline)
+        payload = self.directory / "payload"
+        for source in offline.CONFIG_FILES.values():
+            target = payload / source
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / source, target)
+        raw_layer = io.BytesIO()
+        with tarfile.open(fileobj=raw_layer, mode="w") as archive:
+            archive.add(payload, arcname="opt/openwam")
+
+        def digest(data):
+            return "sha256:" + hashlib.sha256(data).hexdigest()
+
+        layer = gzip.compress(raw_layer.getvalue())
+        config = json.dumps(
+            {
+                "os": "linux",
+                "architecture": "amd64",
+                "rootfs": {"type": "layers", "diff_ids": [digest(raw_layer.getvalue())]},
+                "config": {
+                    "Cmd": ["/bin/true"],
+                    "Labels": {
+                        offline.SCHEMA_LABEL: "2",
+                        offline.REVISION_LABEL: "digest-test-" + uuid.uuid4().hex,
+                    },
+                },
+            }
+        ).encode()
+        media_type = "application/vnd.docker.distribution.manifest.v2+json"
+        manifest = json.dumps(
+            {
+                "schemaVersion": 2,
+                "mediaType": media_type,
+                "config": {
+                    "mediaType": "application/vnd.docker.container.image.v1+json",
+                    "digest": digest(config),
+                    "size": len(config),
+                },
+                "layers": [
+                    {
+                        "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                        "digest": digest(layer),
+                        "size": len(layer),
+                    }
+                ],
+            }
+        ).encode()
+        resources = {
+            "/v2/": (b"{}", "application/json"),
+            "/v2/openwam/manifests/" + digest(manifest): (manifest, media_type),
+            "/v2/openwam/blobs/" + digest(config): (config, "application/octet-stream"),
+            "/v2/openwam/blobs/" + digest(layer): (layer, "application/octet-stream"),
+        }
+
+        class Registry(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path not in resources:
+                    self.send_error(404)
+                    return
+                body, content_type = resources[self.path]
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Docker-Content-Digest", digest(body))
+                self.send_header("Docker-Distribution-API-Version", "registry/2.0")
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(body)
+
+            do_HEAD = do_GET
+
+            def log_message(self, *args):
+                pass
+
+        # Docker treats loopback registries as insecure (self-signed TLS is
+        # accepted), but recent containerd stores still attempt HTTPS first.
+        certificates = self.directory / "certificates"
+        certificates.mkdir()
+        self.run_command(
+            [
+                *DOCKER,
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--user",
+                f"{os.getuid()}:{os.getgid()}",
+                "--mount",
+                f"type=bind,source={certificates},target=/certificates",
+                IMAGE,
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                "-keyout",
+                "/certificates/key.pem",
+                "-out",
+                "/certificates/cert.pem",
+            ]
+        )
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(certificates / "cert.pem", certificates / "key.pem")
+        with ThreadingHTTPServer(("127.0.0.1", 0), Registry) as registry:
+            registry.socket = tls.wrap_socket(registry.socket, server_side=True)
+            worker = threading.Thread(target=registry.serve_forever, daemon=True)
+            worker.start()
+            reference = f"localhost:{registry.server_port}/openwam@{digest(manifest)}"
+            try:
+                self.run_command([*DOCKER, "pull", "--platform", "linux/amd64", reference])
+            finally:
+                registry.shutdown()
+                worker.join(timeout=5)
+
+        original = offline.inspect_image(reference, DOCKER)
+        self.addCleanup(subprocess.run, [*DOCKER, "image", "rm", original["Id"]], capture_output=True)
+        bundle = self.directory / "bundle"
+        self.run_command(
+            [
+                sys.executable,
+                str(ROOT / "docker/offline.py"),
+                "--docker",
+                shlex.join(DOCKER),
+                "export",
+                reference,
+                str(bundle),
+            ]
+        )
+        exported = offline.verify_bundle(bundle)
+        selected = exported["image"]
+        self.assertEqual(exported["source_image"], reference)
+        self.assertTrue(selected.startswith("openwam-bundle:sha256-"))
+        self.addCleanup(subprocess.run, [*DOCKER, "image", "rm", selected], capture_output=True)
+        with tarfile.open(bundle / "image.tar.gz", "r:gz") as archive:
+            images = json.load(archive.extractfile("manifest.json"))
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0]["RepoTags"], [selected])
+        self.run_command([*DOCKER, "image", "rm", selected, reference])
+        self.assertNotEqual(
+            subprocess.run([*DOCKER, "image", "inspect", original["Id"]], capture_output=True).returncode, 0
+        )
+        self.run_command(
+            [sys.executable, str(bundle / "docker/offline.py"), "--docker", shlex.join(DOCKER), "load", "."], cwd=bundle
+        )
+        self.assertEqual(
+            offline.image_identity(offline.inspect_image(selected, DOCKER)), offline.image_identity(original)
+        )
+        shutil.copy2(bundle / ".env.example", bundle / ".env")
+        (bundle / ".cache/docker").mkdir(parents=True)
+        (bundle / "outputs").mkdir()
+        # Resolve the delivered tag through the shipped Compose configuration.
+        self.env.pop("OPENWAM_IMAGE", None)
+        compose = [*DOCKER, "compose", "-f", str(bundle / "compose.yaml")]
+        self.addCleanup(self.run_command, [*compose, "down"], cwd=bundle)
+        self.run_command([*compose, "create", "dev"], cwd=bundle)
 
     def test_validation_configuration_follows_image_gpus_and_host_port(self):
         self.env.update(OPENWAM_IMAGE="openwam:validation-tag", OPENWAM_TRAIN_GPUS="1,3", OPENWAM_PORT="18848")

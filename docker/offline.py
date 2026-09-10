@@ -88,18 +88,36 @@ def copy_configuration(metadata, destination, docker=("docker",)):
         subprocess.run([*docker, "rm", container], check=True, stdout=subprocess.DEVNULL)
 
 
+def delivery_tag(metadata, docker=("docker",)):
+    """Give digest/ID selections a name that survives save/load across stores."""
+    identity = image_identity(metadata)
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    tag = "openwam-bundle:sha256-" + digest
+    existing = subprocess.run([*docker, "image", "inspect", tag], capture_output=True, text=True)
+    if existing.returncode == 0:
+        if image_identity(json.loads(existing.stdout)[0]) != identity:
+            raise ValueError("delivery tag already points to a different image: " + tag)
+    else:
+        subprocess.run([*docker, "image", "tag", metadata["Id"], tag], check=True)
+    return tag
+
+
 def export_bundle(image, destination, docker=("docker",)):
     if destination.exists():
         raise ValueError("bundle destination already exists: " + str(destination))
+    source_image = image
     metadata = inspect_image(image, docker)
-    # Inspect selects :latest for a bare repository; save would include every
-    # tag. Make that default explicit while preserving digest and image-ID inputs.
-    is_image_id = metadata["Id"].split(":", 1)[-1].startswith(image) and image + ":latest" not in (
-        metadata.get("RepoTags") or []
-    )
-    if not is_image_id and "@" not in image and ":" not in image.rsplit("/", 1)[-1]:
-        image += ":latest"
     revision = release_revision(metadata)
+    # Inspect selects :latest for a bare repository; save would include every
+    # tag. Digest/ID inputs need a portable name: save/load loses repository
+    # digests, and classic and containerd stores can report different image IDs.
+    is_image_id = image == metadata["Id"] or (
+        metadata["Id"].split(":", 1)[-1].startswith(image) and image + ":latest" not in (metadata.get("RepoTags") or [])
+    )
+    if is_image_id or "@" in image:
+        image = delivery_tag(metadata, docker)
+    elif ":" not in image.rsplit("/", 1)[-1]:
+        image += ":latest"
     # Configuration and the standalone importer come from the selected image,
     # never from the checkout running this exporter. Extraction needs no GPU.
     with tempfile.TemporaryDirectory(prefix="openwam-config-") as temporary:
@@ -123,6 +141,7 @@ def export_bundle(image, destination, docker=("docker",)):
     manifest = {
         "schema": SCHEMA,
         "image": image,
+        "source_image": source_image,
         "image_id": metadata["Id"],
         "image_identity": image_identity(metadata),
         "platform": "linux/amd64",

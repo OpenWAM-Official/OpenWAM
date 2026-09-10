@@ -287,6 +287,12 @@ Each export requires a new destination; set `DOCKER_BUNDLE=dist/my-new-bundle`
 for another export. The image archive excludes datasets, weights and run outputs.
 If `OPENWAM_IMAGE` names a repository without a tag, such as `openwam`, export
 selects `openwam:latest` and excludes other tags in that repository.
+For a digest reference (`repository@sha256:…`) or image ID, export creates a
+local `openwam-bundle:sha256-…` tag bound to the image's contents. The bundle
+uses this tag for loading and Compose; `manifest.json` keeps the original
+reference as `source_image`. The delivery tag remains on the build host and is
+reused for the same contents. On the offline server, use the tag from the
+bundle's `.env.example`, including when updating an existing `.env`.
 
 ### On the offline GPU server
 
