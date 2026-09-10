@@ -645,7 +645,10 @@ older 535/550 data-center drivers need validation with the image's CUDA 12.8
 libraries and `torch.compile`; successful `nvidia-smi` alone is not sufficient.
 NVIDIA Container Toolkit normally handles CUDA forward compatibility. If it
 does not, test `OPENWAM_CUDA_COMPAT=1` to select `/usr/local/cuda/compat`, then run
-the GPU check in this section. This does not install or replace the host kernel driver.
+the GPU check in this section. The normal image entrypoint initializes this
+selection for both the main process and later `docker exec` commands. Recreate
+containers after changing the setting. The default `0` leaves library selection
+to the Toolkit. This does not install or replace the host kernel driver.
 See [NVIDIA's compatibility guide](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html).
 
 </details>

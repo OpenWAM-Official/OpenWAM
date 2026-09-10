@@ -6,6 +6,27 @@ import tempfile
 from pathlib import Path
 
 
+def configure_cuda_compat():
+    # This directory is on the image's LD_LIBRARY_PATH for every process,
+    # including docker exec. Only the opt-in entrypoint creates the link.
+    link = Path("/tmp/openwam-runtime/cuda-compat")
+    try:
+        if os.environ.get("OPENWAM_CUDA_COMPAT", "0") != "1":
+            link.unlink(missing_ok=True)
+            return
+        compat = (Path(os.environ.get("CUDA_HOME", "/usr/local/cuda")) / "compat").resolve()
+        if not (compat / "libcuda.so.1").is_file():
+            raise SystemExit(f"OpenWAM: CUDA compatibility libraries missing from {compat}.")
+        link.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Atomic replacement also works when Docker restarts this container.
+        with tempfile.TemporaryDirectory(prefix=".cuda-compat-", dir=link.parent) as temporary:
+            staged = Path(temporary) / "compat"
+            staged.symlink_to(compat, target_is_directory=True)
+            staged.replace(link)
+    except OSError as error:
+        raise SystemExit(f"OpenWAM: cannot configure CUDA compatibility: {error}") from error
+
+
 def main():
     home = Path(os.environ["HOME"])
     try:
@@ -33,6 +54,8 @@ def main():
         temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
         temporary.write_text("\n".join([*lines, entry]) + "\n")
         temporary.replace(path)
+
+    configure_cuda_compat()
 
     # Start bash only after the account files exist: bash itself looks up the
     # current UID at startup. exec preserves signal handling and the exit code.

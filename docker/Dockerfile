@@ -65,6 +65,7 @@ ENV XDG_CACHE_HOME=/cache \
     LD_PRELOAD=libnss_wrapper.so \
     NSS_WRAPPER_PASSWD=/tmp/openwam-nss/passwd \
     NSS_WRAPPER_GROUP=/tmp/openwam-nss/group \
+    LD_LIBRARY_PATH="/tmp/openwam-runtime/cuda-compat:${LD_LIBRARY_PATH}" \
     RUFF_CACHE_DIR=/cache/ruff \
     CUDA_CACHE_PATH=/cache/cuda \
     HF_HOME=/cache/huggingface \

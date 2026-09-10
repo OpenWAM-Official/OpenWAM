@@ -12,17 +12,6 @@ for cache_dir in "${XDG_CACHE_HOME:-/cache}" "${RUFF_CACHE_DIR:-/cache/ruff}" \
     fi
 done
 
-# Usually handled by NVIDIA Container Toolkit. Opt in only when validating an
-# older data-center driver that needs the image's forward-compatibility libraries.
-if [[ "${OPENWAM_CUDA_COMPAT:-0}" == 1 ]]; then
-    compat_dir="${CUDA_HOME:-/usr/local/cuda}/compat"
-    if [[ ! -e "$compat_dir/libcuda.so.1" ]]; then
-        echo "OpenWAM: CUDA compatibility libraries missing from $compat_dir." >&2
-        exit 1
-    fi
-    export LD_LIBRARY_PATH="$compat_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-fi
-
 case "${1:-serve}" in
     serve)
         if (( $# )); then shift; fi

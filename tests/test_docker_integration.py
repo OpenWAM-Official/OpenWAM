@@ -662,6 +662,85 @@ class DockerIntegrationTests(unittest.TestCase):
                     ]
                 )
 
+    def test_cuda_compat_library_selection_survives_exec_and_restart(self):
+        probe = (
+            "import ctypes, json, os\n"
+            "from pathlib import Path\n"
+            "result = {'path': os.environ.get('LD_LIBRARY_PATH'), 'compat': os.environ.get('OPENWAM_CUDA_COMPAT')}\n"
+            "result['compat_directory'] = str((Path(os.environ['CUDA_HOME']) / 'compat').resolve())\n"
+            "try:\n"
+            "    library = ctypes.CDLL('libcuda.so.1')\n"
+            "    result['libraries'] = sorted({line.split()[-1] for line in Path('/proc/self/maps').read_text().splitlines() "
+            "if '/libcuda.so.' in line})\n"
+            "except OSError as error:\n"
+            "    result['error'] = str(error)\n"
+            "print(json.dumps(result), flush=True)\n"
+        )
+        for enabled in ("0", "1"):
+            with self.subTest(enabled=enabled):
+                options = ["--network", "none", "--user", "23456:23457", "-e", "OPENWAM_CUDA_COMPAT=" + enabled]
+                initial = json.loads(self.run_command([*DOCKER, "run", "--rm", *options, IMAGE, "python", "-c", probe]))
+                if enabled == "1":
+                    self.assertNotIn("error", initial)
+                    self.assertTrue(initial["libraries"])
+                    self.assertTrue(
+                        all(path.startswith(initial["compat_directory"] + "/") for path in initial["libraries"])
+                    )
+                name = "openwam-compat-" + uuid.uuid4().hex[:12]
+                self.run_command(
+                    [
+                        *DOCKER,
+                        "run",
+                        "-d",
+                        "--name",
+                        name,
+                        *options,
+                        IMAGE,
+                        "python",
+                        "-c",
+                        probe + "import time; time.sleep(300)\n",
+                    ]
+                )
+                self.addCleanup(self.run_command, [*DOCKER, "rm", "-f", name])
+
+                def wait_for_start(count):
+                    for _ in range(100):
+                        lines = self.run_command([*DOCKER, "logs", name]).splitlines()
+                        if len(lines) >= count:
+                            self.assertEqual(json.loads(lines[-1]), initial)
+                            return
+                        time.sleep(0.1)
+                    self.fail("compatibility probe did not start")
+
+                wait_for_start(1)
+                self.assertEqual(json.loads(self.run_command([*DOCKER, "exec", name, "python", "-c", probe])), initial)
+                self.run_command([*DOCKER, "restart", "--time", "1", name])
+                wait_for_start(2)
+                self.assertEqual(json.loads(self.run_command([*DOCKER, "exec", name, "python", "-c", probe])), initial)
+
+        missing = subprocess.run(
+            [
+                *DOCKER,
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "-e",
+                "OPENWAM_CUDA_COMPAT=1",
+                "-e",
+                "CUDA_HOME=/missing-cuda",
+                IMAGE,
+                "python",
+                "-c",
+                "print('must not start')",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("CUDA compatibility libraries missing", missing.stderr)
+        self.assertNotIn("must not start", missing.stdout)
+
     def test_bootstrap_pip_fallback_installs_the_locked_version(self):
         # Local PEP 503 indexes and real wheels make this deterministic/offline:
         # the primary lacks the package; the fallback has both 1.0 and 2.0.
