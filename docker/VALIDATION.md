@@ -1,51 +1,69 @@
 # Docker validation scope
 
-Results apply to the named revision or image, not every subsequent commit,
-driver or model. Use [README.md](README.md) for setup and test commands.
+Results apply to the named revision/image and environment. Use
+[README.md](README.md) for setup and test commands. No Cosmos or LIBERO assets
+were downloaded for the 2026-09-11 checks below.
 
-## GPU acceptance
+## Current checks (2026-09-11)
 
-Tested on 2026-09-10 at revision
-`9ef0cd98edb7899ddff1e38fbe7791005fd257ac`, using H100 80 GB GPUs,
-driver 550.54.14, NVIDIA Container Toolkit 1.18.1 and kernel 5.4.0.
-The standard Wan image used Python 3.12, PyTorch 2.7.1+cu128,
-Accelerate 1.14.0 and DeepSpeed 0.18.9.
+The standard Wan image was built from `24d88ec6712f53e6c925d8ada7a50badbfbd6811`.
+Its local image ID was
+`sha256:4a7059711b90df4fd0c8ef757fa675d6061b48ebe91bfcbbaf1d5081ff3952d5`.
 
-| Check | Result |
+| Check | Result and scope |
 | --- | --- |
-| Remote CUDA build | [Actions run 34466639632](https://github.com/KraHsu/OpenWAM-Official/actions/runs/34466639632): actual image built/loaded; pip/Ruff, 1,960 CPU tests and 4 integration tests passed. |
-| Offline transfer | Archive checksum and image layers/config matched across Docker 29.8.0/containerd and Docker 28.1.1/overlay2. |
-| GPU smoke | Two H100s: BF16, compiled forward/backward, FusedAdam and NCCL all-reduce passed without networking. |
-| Serving | Released RoboTwin checkpoint, one H100, host networking on loopback port 18848: health, prediction (20 action values) and reset passed. |
-| Training/resume | Four H100s: steps 1–10, stop after completed state, then a new container resumed at 11 and finished step 20 with exit code 0. |
+| Build and CPU checks | Actual CUDA image built; pip, serve CLI and Ruff passed. **1,990 CPU tests** passed; **12 Docker integration tests** passed separately. |
+| Additional CPU tests | All **38** non-GPU tests in `test_tri_system_smoke.py`, excluded by `docker-check`, passed separately. |
+| Dependency locking | `make docker-lock` resolved 118 packages and reproduced the committed file exactly in an isolated checkout. `--upgrade` resolved/wrote successfully; three changed packages were installed in a disposable container and passed pip/Ruff and 1,990 CPU tests. The repository lock stayed unchanged; no full upgraded-image build was claimed. |
+| Full offline delivery | The complete 9 GB compressed CUDA bundle was exported using schema 3, transferred to the offline H100 and loaded with its bundled importer. Checksums and image layers/config matched across Docker 29.8/containerd and 28.1.1/overlay2. |
+| Runtime compatibility | Real GPU compiler/backward/FusedAdam checks passed via `docker exec` before and after restart with `OPENWAM_CUDA_COMPAT=1`. |
+| GPU regressions | **7** lightweight GPU-related cases passed with the RAS adjustment below: five use real CUDA tensors and two use simulated dispatch inputs. These cover attention dispatch, train/deploy consistency and RoPE migration without downloaded checkpoints. |
+| Serving | Existing RoboTwin checkpoint: container-local bridge health/prediction/reset passed. Host-to-bridge access timed out on this server. The documented host-network overlay passed real ping/prediction/reset from the development machine over an SSH tunnel, including `OPENWAM_SERVER_URL`; predictions contained 20 action values. |
+| Training/resume | Four H100s and four existing real RoboTwin episodes: initial training used the source-mounted development shell entrypoint; a new image-only container restored completed step-10 state, ran steps 11–20 and exited 0. Both phases explicitly used `NCCL_RAS_ENABLE=0` and `NCCL_NVLS_ENABLE=0`. |
 
-Training used four real RoboTwin simulation episodes (583 timesteps / 579
-windows), about 6.02B trainable parameters, BF16, ZeRO-2, batch size 1 per GPU,
-gradient checkpointing, CPU model initialization and no optimizer offload.
-Both phases used `NCCL_NVLS_ENABLE=0`. The step-10 full state occupied **102.3 GiB**;
-final deployment weights occupied **23.1 GiB**. Verified metrics covered steps
-1–20 without gaps/duplicates, with finite losses and gradient norms.
+The H100 host used driver 550.54.14, Toolkit 1.18.1 and kernel 5.4.0.
+Training used 583 timesteps / 579 windows, about 6.02B trainable parameters,
+BF16, ZeRO-2, batch size 1 per GPU, gradient checkpointing, CPU initialization
+and no optimizer offload. Four optimizer shards and four RNG files were
+verified; full state was 102.3 GiB. Final weights were 23.1 GiB and differed
+from step 10; losses and gradient norms were finite. Debug mode used constant LR.
 
-Limits: two H100s ran out of memory for this setup; four-GPU NCCL needed the
-host-specific NVLS workaround. The intentionally stopped container exited with
-code 1; recovery was verified from actual artifacts and resumed steps, since a
-resume INFO log was missing. These results do not establish convergence,
-benchmark quality, bitwise equivalence to uninterrupted training, changing-LR
-scheduler recovery, full-dataset training, multi-node/RDMA or Cosmos GPU support.
+**Logging limitation:** the first container completed unsaved step 11 before
+receiving the stop signal. Resume correctly restarted at 11, but the append-only
+CSV retained both step-11 records. The strict no-duplicate-log assertion failed;
+an independent artifact verifier confirmed recovery while retaining this
+limitation. This does not establish clean, deduplicated metrics after rollback.
 
-## Later CPU/container checks
+## RAS shutdown fix found by GPU testing
 
-The local review image `openwam:docker-review`, ID
-`sha256:088aee706a114117d7a134072f19a81641293335e352ae5dcf6e5df337fd0e01`,
-was built from `b27be2f` plus the directory and review fixes. It passed pip/Ruff,
-**1,984 CPU tests** and **12 Docker integration tests**, including custom Compose
-image selection, relative mounts, Git worktrees, runtime UID/GID, CUDA library
-selection under `exec`, and schema 3 offline delivery. A separate cold-load check
-used the original schema 2 importer to verify backward compatibility.
+With NSS user/group lookup preloaded, both GPU workers completed the smoke
+calculations, then rank 0 exited with SIGSEGV. Disabling NVLS or enabling CUDA
+compatibility alone did not fix it. Disabling either NSS preload or NCCL RAS
+allowed a clean exit. The image now retains NSS and defaults `NCCL_RAS_ENABLE=0`.
 
-These later checks are local CPU/container evidence, not new GPU acceptance.
-Earlier iteration reports remain in Git history. For another revision, build it,
-run `make docker-check` and `make docker-integration-check PYTHON=python3`, then
-run GPU checks, real inference and training/resume on the destination host.
-Record the image/revision and driver/Toolkit alongside results; CPU CI alone
-does not establish GPU compatibility.
+The locally rebuilt fix image `openwam:24d88ec-ras-fix`, ID
+`sha256:ab59032106f82f8f7df914298367fc0d6e5e38025a765f869c131460e7cc034b`,
+passed pip/Ruff, 1,990 CPU tests and 12 Docker integration tests. The actual
+rebuilt image was then transferred to H100 over an SSH-forwarded local registry;
+its filesystem layers and runtime configuration matched the local build. With
+no RAS override, the default two-GPU smoke completed BF16, compiled backward,
+FusedAdam and NCCL all-reduce, and the launcher exited **0**. This verifies the
+image default, including process shutdown. Earlier GPU regression and training
+checks used an equivalent ENV-only image or an explicit RAS setting.
+
+## CI and remaining scope
+
+The original revision's [PR Docker CI](https://github.com/OpenWAM-Official/OpenWAM/actions/runs/34576398602)
+passed. Its [push run](https://github.com/OpenWAM-Official/OpenWAM/actions/runs/34576395292)
+first failed during Ubuntu index download with `Hash Sum mismatch`, before tests;
+its second attempt passed. These CI runs predate the RAS fix.
+
+Not validated: Cosmos image/GPU execution, LIBERO download-to-training workflow,
+full-dataset or long-running training, convergence/benchmark quality, changing-LR
+scheduler recovery, bitwise equality to uninterrupted training, multi-node/RDMA,
+or a broader GPU/driver matrix. CPU CI cannot establish these properties.
+
+The earlier `9ef0cd9` H100 acceptance and local review-image records remain in
+Git history; [its original CUDA CI](https://github.com/KraHsu/OpenWAM-Official/actions/runs/34466639632)
+also passed. Two H100s ran out of memory for the historical training setup;
+four-GPU initialization required the host-specific NVLS workaround.
