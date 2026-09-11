@@ -18,6 +18,7 @@ from openwam.dataloader.robotwin import (
     MultiTaskRoboTwinDataset,
     RoboTwinDataset,
 )
+from openwam.dataloader.wuji_real_task import WujiRealTaskDataset
 
 __all__ = [
     "BaseDataset",
@@ -35,4 +36,5 @@ __all__ = [
     "EEF_ACTION_DIM",
     "EEF_GRIPPER_INDICES",
     "JOINT_GRIPPER_INDICES",
+    "WujiRealTaskDataset",
 ]

@@ -1,0 +1,25 @@
+type: wuji_real_task
+dataset_dir: /gaozt-test1/fyhong/OpenWAM/data/grasp_anything/grasp_anything_eef_rot6d_col
+
+action_mode: eef
+rot6d_convention: column
+num_frames: 33
+video_stride: 4
+window_stride: 1
+height: 384
+width: 320
+multiview: true
+target_camera: observation.images.head_view
+camera_layout:
+  - observation.images.head_view
+  - observation.images.left_wrist_view
+  - observation.images.right_wrist_view
+normalize_mode: quantile
+enable_action_supervision: true
+unify_action: true
+unify_action_map:
+  - "0-8"
+  - "10-29"
+  - "34-42"
+  - "44-63"
+color_jitter: false
