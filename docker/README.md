@@ -349,6 +349,12 @@ revision and image layers/runtime configuration are verified across save/load.
 | Training OOM | Review GPU count, model size and distributed/offload settings; debug mode does not remove optimizer-state costs. |
 | Worktree Git fails | Ensure the selected workspace includes the main repository, Git metadata and worktree at their original absolute paths. |
 
+The image disables [NCCL RAS monitoring](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html#nccl-ras-enable)
+with `NCCL_RAS_ENABLE=0`: H100 testing reproduced a process-exit crash when RAS
+and the image's NSS user/group lookup library were both enabled. Collective
+communication remains enabled. Keep this default when using the supplied image;
+see [the validation record](VALIDATION.md) for the tested configuration.
+
 On the historical H100 setup, four-GPU NCCL initialization hung until NVLS was
 disabled. If a GPU check reproduces this, test:
 

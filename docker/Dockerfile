@@ -58,7 +58,10 @@ RUN python -m pip install --no-deps --no-build-isolation -e . \
     && install -d -m 1777 /cache /outputs \
     && ln -s /outputs /opt/openwam/outputs \
     && chmod +x docker/entrypoint.sh
-ENV XDG_CACHE_HOME=/cache \
+# NCCL RAS and the NSS preload reproduced a shutdown SIGSEGV on H100.
+# Keep user/group lookup; disable RAS monitoring until that interaction is fixed.
+ENV NCCL_RAS_ENABLE=0 \
+    XDG_CACHE_HOME=/cache \
     HOME=/cache/home \
     USER=openwam \
     LOGNAME=openwam \
