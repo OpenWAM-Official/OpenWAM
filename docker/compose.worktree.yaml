@@ -1,4 +1,4 @@
-# Add after compose.dev.yaml. Preserve the host paths of the main repository
+# Add after docker/compose.dev.yaml. Preserve the host paths of the main repository
 # and its linked worktrees so Git's metadata and back-pointers resolve unchanged.
 # Select a workspace containing both; OPENWAM_SOURCE_DIR must be absolute.
 x-worktree: &worktree

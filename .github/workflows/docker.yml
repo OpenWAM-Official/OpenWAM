@@ -25,9 +25,9 @@ jobs:
       - name: Validate configuration
         run: |
           docker compose --profile train config --quiet
-          docker compose -f compose.yaml -f compose.host.yaml config --quiet
-          docker compose -f compose.yaml -f compose.dev.yaml --profile dev --profile train config --quiet
-          OPENWAM_WORKSPACE_DIR=/tmp/openwam-workspace OPENWAM_SOURCE_DIR=/tmp/openwam-workspace/feature docker compose -f compose.yaml -f compose.dev.yaml -f compose.worktree.yaml --profile dev --profile train config --quiet
+          docker compose -f compose.yaml -f docker/compose.host.yaml config --quiet
+          docker compose -f compose.yaml -f docker/compose.dev.yaml --profile dev --profile train config --quiet
+          OPENWAM_WORKSPACE_DIR=/tmp/openwam-workspace OPENWAM_SOURCE_DIR=/tmp/openwam-workspace/feature docker compose -f compose.yaml -f docker/compose.dev.yaml -f docker/compose.worktree.yaml --profile dev --profile train config --quiet
           bash -n docker/entrypoint.sh docker/pip_install.sh docker/lock.sh scripts/train.sh
       # Only on this disposable GitHub-hosted runner. CUDA build + image load
       # need substantially more disk than a small Python application.

@@ -99,7 +99,7 @@ Choose one installation route:
 
 | Route | Use it when you want to… |
 |---|---|
-| [Docker](assets/openwam_usage_docs/docker.md) | run a CUDA policy server, train, develop in a container, or deploy to an offline GPU host |
+| [Docker](docker/README.md) | run a CUDA policy server, train, develop in a container, or deploy to an offline GPU host |
 | [Native Python environment](#native-python-environment) | manage Python and CUDA dependencies directly on your machine |
 
 Docker includes the project's Python environment. GPU hosts still need an
@@ -402,7 +402,7 @@ entry points for using and extending the repository:
 
 | Guide | Use it when you want to… |
 |---|---|
-| [Docker and offline deployment](assets/openwam_usage_docs/docker.md) | build an image, run a first policy, train, develop with Compose, or deploy to an offline GPU host |
+| [Docker and offline deployment](docker/README.md) | build an image, run a first policy, train, develop with Compose, or deploy to an offline GPU host |
 | [Training and deployment](assets/openwam_usage_docs/train-and-deploy.md) | choose a model/dataloader, prepare assets, train, fine-tune, resume, or deploy a policy |
 | [Architecture extension](assets/openwam_usage_docs/architecture-extension.md) | extend a video, visual, VLM, action backbone, or WAM architecture |
 | [Benchmark integration](assets/openwam_usage_docs/benchmark-integration.md) | extend a dataloader and connect a benchmark client to the WebSocket protocol |

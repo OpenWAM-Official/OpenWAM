@@ -93,7 +93,7 @@ services:
           create_host_path: false
     stop_grace_period: 120s
 
-  # CPU development shell; compose.dev.yaml adds the source mounts. For GPU
+  # CPU development shell; docker/compose.dev.yaml adds the source mounts. For GPU
   # development use that overlay with `run --rm train bash` instead.
   dev:
     <<: *openwam

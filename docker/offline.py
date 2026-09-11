@@ -10,10 +10,20 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-SCHEMA = 2
+SCHEMA = 3
 SCHEMA_LABEL = "io.openwam.bundle.schema"
 REVISION_LABEL = "org.opencontainers.image.revision"
 CONFIG_FILES = {
+    "compose.yaml": "compose.yaml",
+    "docker/compose.host.yaml": "docker/compose.host.yaml",
+    "docker/compose.dev.yaml": "docker/compose.dev.yaml",
+    "docker/.env.example": "docker/.env.example",
+    "docker/README.md": "docker/README.md",
+    "docker/VALIDATION.md": "docker/VALIDATION.md",
+    "docker/offline.py": "docker/offline.py",
+}
+# Older images keep their original paths and ship their original importer.
+LEGACY_CONFIG_FILES = {
     "compose.yaml": "compose.yaml",
     "compose.host.yaml": "compose.host.yaml",
     "compose.dev.yaml": "compose.dev.yaml",
@@ -21,6 +31,7 @@ CONFIG_FILES = {
     "docker.md": "assets/openwam_usage_docs/docker.md",
     "docker/offline.py": "docker/offline.py",
 }
+BUNDLE_CONFIG_FILES = {2: LEGACY_CONFIG_FILES, SCHEMA: CONFIG_FILES}
 FILES = ("image.tar.gz", *CONFIG_FILES)
 
 
@@ -59,10 +70,19 @@ def image_identity(metadata):
     }
 
 
-def release_revision(metadata):
+def image_schema(metadata):
     labels = metadata.get("Config", {}).get("Labels") or {}
-    if labels.get(SCHEMA_LABEL) != str(SCHEMA):
-        raise ValueError("image does not support bundle schema 2; rebuild it with make docker-build")
+    if not isinstance(labels, dict):
+        raise ValueError("invalid image labels")
+    for schema in BUNDLE_CONFIG_FILES:
+        if labels.get(SCHEMA_LABEL) == str(schema):
+            return schema
+    raise ValueError("image does not support bundle schema 2 or 3; rebuild it with make docker-build")
+
+
+def release_revision(metadata):
+    image_schema(metadata)
+    labels = metadata.get("Config", {}).get("Labels") or {}
     revision = labels.get(REVISION_LABEL)
     if not isinstance(revision, str) or not revision or revision == "unknown":
         raise ValueError("image has no source revision; build with make docker-build or --build-arg VCS_REF=<commit>")
@@ -80,7 +100,7 @@ def copy_configuration(metadata, destination, docker=("docker",)):
     )
     container = result.stdout.strip()
     try:
-        for name, source in CONFIG_FILES.items():
+        for name, source in BUNDLE_CONFIG_FILES[image_schema(metadata)].items():
             target = destination / name
             target.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run([*docker, "cp", container + ":/opt/openwam/" + source, str(target)], check=True)
@@ -108,6 +128,8 @@ def export_bundle(image, destination, docker=("docker",)):
     source_image = image
     metadata = inspect_image(image, docker)
     revision = release_revision(metadata)
+    schema = image_schema(metadata)
+    files = ("image.tar.gz", *BUNDLE_CONFIG_FILES[schema])
     # Inspect selects :latest for a bare repository; save would include every
     # tag. Digest/ID inputs need a portable name: save/load loses repository
     # digests, and classic and containerd stores can report different image IDs.
@@ -125,8 +147,9 @@ def export_bundle(image, destination, docker=("docker",)):
         copy_configuration(metadata, source, docker)
         destination.mkdir(parents=True, exist_ok=False)
         shutil.copytree(source, destination, dirs_exist_ok=True)
-    env_lines = (destination / ".env.example").read_text().splitlines()
-    (destination / ".env.example").write_text(
+    env_path = destination / (".env.example" if schema == 2 else "docker/.env.example")
+    env_lines = env_path.read_text().splitlines()
+    env_path.write_text(
         "\n".join("OPENWAM_IMAGE=" + image if line.startswith("OPENWAM_IMAGE=") else line for line in env_lines) + "\n"
     )
     print("Saving image (this can take several minutes)...", flush=True)
@@ -139,14 +162,14 @@ def export_bundle(image, destination, docker=("docker",)):
     if image_identity(inspect_image(image, docker)) != image_identity(metadata):
         raise ValueError("image tag changed while exporting; retry with a stable tag in a new directory")
     manifest = {
-        "schema": SCHEMA,
+        "schema": schema,
         "image": image,
         "source_image": source_image,
         "image_id": metadata["Id"],
         "image_identity": image_identity(metadata),
         "platform": "linux/amd64",
         "revision": revision,
-        "sha256": {name: sha256(destination / name) for name in FILES},
+        "sha256": {name: sha256(destination / name) for name in files},
     }
     # A manifest is only published after every file is complete.
     (destination / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -155,22 +178,30 @@ def export_bundle(image, destination, docker=("docker",)):
 
 def verify_bundle(directory):
     manifest = json.loads((directory / "manifest.json").read_text())
-    if manifest.get("schema") != SCHEMA or manifest.get("platform") != "linux/amd64":
+    if not isinstance(manifest, dict):
+        raise ValueError("bundle manifest must be a JSON object")
+    schema = manifest.get("schema")
+    if type(schema) is not int or schema not in BUNDLE_CONFIG_FILES or manifest.get("platform") != "linux/amd64":
         raise ValueError("unsupported bundle schema or platform; use the importer shipped with that bundle")
+    files = ("image.tar.gz", *BUNDLE_CONFIG_FILES[schema])
     checksums = manifest.get("sha256", {})
-    if set(checksums) != set(FILES):
+    if not isinstance(checksums, dict) or set(checksums) != set(files):
         raise ValueError("unexpected bundle file list")
-    for name in FILES:
+    for name in files:
         if sha256(directory / name) != checksums[name]:
             raise ValueError("SHA256 mismatch: " + name)
     if not isinstance(manifest.get("image"), str) or not isinstance(manifest.get("image_id"), str):
         raise ValueError("missing image identity")
-    if not isinstance(manifest.get("image_identity"), dict):
+    identity = manifest.get("image_identity")
+    if not isinstance(identity, dict) or not isinstance(identity.get("config"), dict):
         raise ValueError("missing image layer/config identity")
-    revision = release_revision({"Config": manifest["image_identity"].get("config", {})})
+    metadata = {"Config": identity["config"]}
+    revision = release_revision(metadata)
+    if image_schema(metadata) != schema:
+        raise ValueError("bundle schema does not match the image schema")
     if manifest.get("revision") != revision:
         raise ValueError("bundle revision does not match the image revision")
-    env_lines = (directory / ".env.example").read_text().splitlines()
+    env_lines = (directory / (".env.example" if schema == 2 else "docker/.env.example")).read_text().splitlines()
     selected_images = [line for line in env_lines if line.startswith("OPENWAM_IMAGE=")]
     if selected_images != ["OPENWAM_IMAGE=" + manifest["image"]]:
         raise ValueError("bundle environment does not select the bundled image")

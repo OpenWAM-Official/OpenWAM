@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from websockets.sync.server import serve
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 CONFIG_ID = "sha256:" + "a" * 64
 INDEX_ID = "sha256:" + "b" * 64
 
@@ -23,6 +23,27 @@ def load_tool(name):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize("target", [[], ["help"], ["docker-help"]])
+@pytest.mark.parametrize("selection", ["environment", "command-line"])
+def test_make_help_accepts_legacy_image_setting(monkeypatch, target, selection):
+    arguments = []
+    if selection == "environment":
+        monkeypatch.setenv("DOCKER_IMAGE", "openwam:legacy")
+    else:
+        arguments = ["DOCKER_IMAGE=openwam:legacy"]
+    # Help must not depend on Docker or a working Compose configuration.
+    result = subprocess.run(
+        ["make", "--no-print-directory", *target, *arguments, "DOCKER=false", "COMPOSE_FILE=/missing.yaml"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "make docker-build" in result.stdout
+    if target != ["docker-help"]:
+        assert "make test " in result.stdout
 
 
 @pytest.fixture
@@ -50,7 +71,7 @@ def fake_docker(tmp_path, monkeypatch):
         "    if sys.argv[-1].startswith('openwam-bundle:') and not (tagged.exists() or loaded.exists()):\n"
         "        sys.exit(1)\n"
         "    config = {'Env': ['TEST=1']} if loaded.exists() else {'Env': ['TEST=1'], 'Cmd': None}\n"
-        "    config['Labels'] = {'io.openwam.bundle.schema': os.environ.get('DOCKER_TEST_SCHEMA', '2'),\n"
+        "    config['Labels'] = {'io.openwam.bundle.schema': os.environ.get('DOCKER_TEST_SCHEMA', '3'),\n"
         "        'org.opencontainers.image.revision': os.environ.get('DOCKER_TEST_REVISION', 'image-commit')}\n"
         "    if Path(str(loaded) + '.saved').exists() and os.environ.get('DOCKER_TEST_RETAG'):\n"
         "        config['Env'] = ['RETAGGED=1']\n"
@@ -124,11 +145,11 @@ def test_offline_roundtrip_and_image_identity(tmp_path, fake_docker, image, expe
         assert expected.startswith("openwam-bundle:sha256-")
         assert len(expected.rsplit("-", 1)[-1]) == 64
     assert gzip.decompress((destination / "image.tar.gz").read_bytes()) == b"test image layers"
-    assert "OPENWAM_IMAGE=" + expected + "\n" in (destination / ".env.example").read_text()
+    assert "OPENWAM_IMAGE=" + expected + "\n" in (destination / "docker/.env.example").read_text()
     assert "# configuration frozen in the image" in (destination / "compose.yaml").read_text()
     assert manifest["source_image"] == image
     assert manifest["revision"] == "image-commit"
-    assert manifest["schema"] == 2
+    assert manifest["schema"] == 3
     assert manifest["image"] == expected
     # The copied importer is standalone; it does not depend on this repository.
     result = subprocess.run(
@@ -177,9 +198,45 @@ def test_repository_name_matching_id_prefix_still_selects_latest(tmp_path, fake_
     assert ["image", "save", image + ":latest"] in calls
 
 
-@pytest.mark.parametrize(
-    "filename", ["image.tar.gz", "compose.yaml", "compose.host.yaml", "compose.dev.yaml", ".env.example"]
-)
+def test_schema_two_image_keeps_legacy_bundle_paths(tmp_path, fake_docker, monkeypatch):
+    source = tmp_path / "legacy-image"
+    current_sources = {
+        "compose.yaml": "compose.yaml",
+        "compose.host.yaml": "docker/compose.host.yaml",
+        "compose.dev.yaml": "docker/compose.dev.yaml",
+        ".env.example": "docker/.env.example",
+        "docker.md": "docker/README.md",
+        "docker/offline.py": "docker/offline.py",
+    }
+    for name, legacy_path in load_tool("offline").LEGACY_CONFIG_FILES.items():
+        target = source / legacy_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((ROOT / current_sources[name]).read_text())
+    # Model the old image's self-contained instructions and overlay selection.
+    (source / "assets/openwam_usage_docs/docker.md").write_text("Legacy image instructions\n")
+    (source / "docker/.env.example").write_text(
+        "OPENWAM_IMAGE=openwam:old\nCOMPOSE_FILE=compose.yaml:compose.host.yaml\n"
+    )
+    monkeypatch.setenv("DOCKER_TEST_SOURCE", str(source))
+    monkeypatch.setenv("DOCKER_TEST_SCHEMA", "2")
+    destination = tmp_path / "legacy-bundle"
+    result = run_bundle("export", "openwam:old", destination)
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((destination / "manifest.json").read_text())
+    assert manifest["schema"] == 2
+    assert set(manifest["sha256"]) == {"image.tar.gz", *current_sources}
+    assert (destination / "docker.md").read_text() == "Legacy image instructions\n"
+    assert "COMPOSE_FILE=compose.yaml:compose.host.yaml" in (destination / ".env.example").read_text()
+    assert not (destination / "docker/README.md").exists()
+    result = run_bundle("load", destination)
+    assert result.returncode == 0, result.stderr
+    # New importers understand schema 2 without converting or modifying it.
+    manifest["schema"] = 3
+    (destination / "manifest.json").write_text(json.dumps(manifest))
+    assert run_bundle("verify", destination).returncode != 0
+
+
+@pytest.mark.parametrize("filename", list(load_tool("offline").FILES))
 def test_corrupt_bundle_never_reaches_docker_load(tmp_path, fake_docker, filename):
     destination = tmp_path / "bundle"
     assert run_bundle("export", "openwam:test", destination).returncode == 0
@@ -187,6 +244,36 @@ def test_corrupt_bundle_never_reaches_docker_load(tmp_path, fake_docker, filenam
     result = run_bundle("load", destination)
     assert result.returncode != 0
     assert "SHA256 mismatch" in result.stderr
+    assert '"load"' not in fake_docker.read_text()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        (None, []),
+        ("schema", []),
+        ("schema", {}),
+        ("schema", "3"),
+        ("schema", 3.0),
+        ("sha256", None),
+        ("image_identity", {"config": []}),
+        ("image_identity", {"config": {"Labels": ["invalid"]}}),
+    ],
+)
+def test_malformed_manifest_reports_error_before_loading(tmp_path, fake_docker, field, value):
+    destination = tmp_path / "bundle"
+    assert run_bundle("export", "openwam:test", destination).returncode == 0
+    path = destination / "manifest.json"
+    manifest = json.loads(path.read_text())
+    if field is None:
+        manifest = value
+    else:
+        manifest[field] = value
+    path.write_text(json.dumps(manifest))
+    result = run_bundle("load", destination)
+    assert result.returncode != 0
+    assert "OpenWAM offline bundle:" in result.stderr
+    assert "Traceback" not in result.stderr
     assert '"load"' not in fake_docker.read_text()
 
 

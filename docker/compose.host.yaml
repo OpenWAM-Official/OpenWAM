@@ -1,5 +1,5 @@
 # Optional Linux host networking when host-to-bridge traffic is unavailable.
-# Use with: docker compose -f compose.yaml -f compose.host.yaml ...
+# Use with: docker compose -f compose.yaml -f docker/compose.host.yaml ...
 services:
   serve:
     network_mode: host

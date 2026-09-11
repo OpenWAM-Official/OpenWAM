@@ -6,9 +6,6 @@
 !Makefile
 !pytest.ini
 !compose.yaml
-!compose.host.yaml
-!compose.dev.yaml
-!compose.worktree.yaml
 !openwam/**
 !configs/**
 !scripts/**

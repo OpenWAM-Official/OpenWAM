@@ -21,7 +21,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 IMAGE = os.environ.get("OPENWAM_DOCKER_TEST_IMAGE")
 DOCKER = shlex.split(os.environ.get("OPENWAM_DOCKER_COMMAND", "docker"))
 
@@ -33,24 +33,16 @@ class DockerIntegrationTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
         self.env = dict(os.environ)
-        for key in (
-            "OPENWAM_IMAGE",
-            "DOCKER_IMAGE",
-            "COMPOSE_FILE",
-            "COMPOSE_PROFILES",
-            "COMPOSE_ENV_FILES",
-            "COMPOSE_PROJECT_NAME",
-            "OPENWAM_CACHE_DIR",
-            "OPENWAM_OUTPUT_DIR",
-            "OPENWAM_UID",
-            "OPENWAM_GID",
-            "OPENWAM_SOURCE_DIR",
-            "OPENWAM_WORKSPACE_DIR",
-            "MAKEFLAGS",
-            "MFLAGS",
-            "MAKEOVERRIDES",
-        ):
-            self.env.pop(key, None)
+        # Tests select their own application settings. Preserve DOCKER_HOST /
+        # DOCKER_CONTEXT so the CLI still reaches the user's chosen daemon.
+        for key in list(self.env):
+            if key.startswith(("OPENWAM_", "COMPOSE_")) or key in (
+                "DOCKER_IMAGE",
+                "MAKEFLAGS",
+                "MFLAGS",
+                "MAKEOVERRIDES",
+            ):
+                self.env.pop(key)
         self.env.update(OPENWAM_IMAGE=IMAGE, DOCKER=shlex.join(DOCKER))
 
     def run_command(self, command, **kwargs):
@@ -60,7 +52,8 @@ class DockerIntegrationTests(unittest.TestCase):
         return result.stdout.strip()
 
     def test_make_and_compose_share_dotenv_and_environment_selection(self):
-        for name in ("Makefile", "compose.yaml"):
+        for name in ("Makefile", "compose.yaml", "docker/docker.mk"):
+            (self.directory / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, self.directory / name)
         self.env.pop("OPENWAM_IMAGE")
         (self.directory / ".env").write_text("OPENWAM_IMAGE=openwam:from-dotenv\n")
@@ -85,13 +78,15 @@ class DockerIntegrationTests(unittest.TestCase):
         self.assertIn("was replaced by OPENWAM_IMAGE", legacy.stderr)
 
     def test_make_and_compose_share_override_files(self):
-        for name in ("Makefile", "compose.yaml"):
+        for name in ("Makefile", "compose.yaml", "docker/docker.mk"):
+            (self.directory / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, self.directory / name)
         for selection in ("automatic", "dotenv", "environment", "make"):
             with self.subTest(selection=selection):
                 directory = self.directory / selection
                 directory.mkdir()
-                for name in ("Makefile", "compose.yaml"):
+                for name in ("Makefile", "compose.yaml", "docker/docker.mk"):
+                    (directory / name).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(ROOT / name, directory / name)
                 filename = "compose.override.yaml" if selection == "automatic" else "custom.yaml"
                 expected = "openwam:override-" + selection
@@ -126,7 +121,8 @@ class DockerIntegrationTests(unittest.TestCase):
                     "        log.write(json.dumps(['test-image', os.environ['OPENWAM_DOCKER_TEST_IMAGE']]) + '\\n')\n"
                 )
                 recorder.chmod(0o755)
-                for name in ("compose.dev.yaml", "compose.host.yaml", "compose.worktree.yaml"):
+                for name in ("docker/compose.dev.yaml", "docker/compose.host.yaml", "docker/compose.worktree.yaml"):
+                    (directory / name).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(ROOT / name, directory / name)
                 self.run_command(
                     [
@@ -186,7 +182,7 @@ class DockerIntegrationTests(unittest.TestCase):
             "-f",
             str(ROOT / "compose.yaml"),
             "-f",
-            str(ROOT / "compose.dev.yaml"),
+            str(ROOT / "docker/compose.dev.yaml"),
         ]
         self.addCleanup(self.run_command, [*compose, "down", "--remove-orphans"], cwd=ROOT)
         config = json.loads(self.run_command([*compose, "--profile", "train", "config", "--format", "json"], cwd=ROOT))
@@ -200,6 +196,34 @@ class DockerIntegrationTests(unittest.TestCase):
         self.assertEqual((cache / "probe.txt").read_text(), "persistent cache")
         self.assertEqual((output / "checkpoint.txt").stat().st_uid, os.getuid())
         self.assertFalse((checkout / "outputs/checkpoint.txt").exists())
+
+    def test_moved_overlays_keep_root_dotenv_and_relative_mounts(self):
+        for name in ("compose.yaml", "docker/compose.dev.yaml", "docker/compose.host.yaml"):
+            target = self.directory / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / name, target)
+        (self.directory / ".env").write_text(
+            "COMPOSE_FILE=compose.yaml:docker/compose.host.yaml:docker/compose.dev.yaml\nOPENWAM_PORT=18848\n"
+        )
+        config = json.loads(
+            self.run_command(
+                [*DOCKER, "compose", "--profile", "dev", "--profile", "train", "config", "--format", "json"],
+                cwd=self.directory,
+            )
+        )
+        for name in ("serve", "train", "dev"):
+            service = config["services"][name]
+            mounts = {volume["target"]: volume["source"] for volume in service["volumes"]}
+            self.assertEqual(mounts["/opt/openwam"], str(self.directory))
+            self.assertEqual(mounts["/cache"], str(self.directory / ".cache/docker"))
+            self.assertEqual(mounts["/outputs"], str(self.directory / "outputs"))
+            self.assertEqual(mounts["/opt/openwam/outputs"], mounts["/outputs"])
+            if name == "train":
+                self.assertEqual(mounts["/opt/openwam/assets"], str(self.directory / "assets"))
+        serve = config["services"]["serve"]
+        self.assertEqual(serve["network_mode"], "host")
+        self.assertNotIn("ports", serve)
+        self.assertEqual(serve["environment"]["OPENWAM_SERVER_URL"], "ws://127.0.0.1:18848")
 
     def test_linked_worktree_git_operations_preserve_host_repository(self):
         workspace = self.directory / "workspace with spaces"
@@ -245,7 +269,12 @@ class DockerIntegrationTests(unittest.TestCase):
         override = self.directory / "probe.yaml"
         override.write_text('services:\n  dev:\n    command: [sleep, "300"]\n    network_mode: none\n')
         compose = [*DOCKER, "compose", "-p", "openwam-worktree-" + uuid.uuid4().hex[:12]]
-        for filename in (ROOT / "compose.yaml", ROOT / "compose.dev.yaml", ROOT / "compose.worktree.yaml", override):
+        for filename in (
+            ROOT / "compose.yaml",
+            ROOT / "docker/compose.dev.yaml",
+            ROOT / "docker/compose.worktree.yaml",
+            override,
+        ):
             compose.extend(["-f", str(filename)])
         self.addCleanup(self.run_command, [*compose, "down", "--remove-orphans"])
         config = json.loads(
@@ -323,7 +352,7 @@ class DockerIntegrationTests(unittest.TestCase):
         frozen = context / "payload/compose.yaml"
         frozen.write_text(frozen.read_text() + "\n# frozen image configuration\n")
         (context / "Dockerfile").write_text(
-            'FROM scratch\nLABEL io.openwam.bundle.schema="2" '
+            'FROM scratch\nLABEL io.openwam.bundle.schema="3" '
             'org.opencontainers.image.revision="integration-release"\n'
             'COPY payload /opt/openwam\nCMD ["/bin/true"]\n'
         )
@@ -363,7 +392,7 @@ class DockerIntegrationTests(unittest.TestCase):
                 manifest = json.loads((bundle / "manifest.json").read_text())
                 self.assertEqual(manifest["revision"], "integration-release")
                 self.assertEqual(manifest["image"], tag)
-                self.assertIn("OPENWAM_IMAGE=" + tag + "\n", (bundle / ".env.example").read_text())
+                self.assertIn("OPENWAM_IMAGE=" + tag + "\n", (bundle / "docker/.env.example").read_text())
                 self.run_command([*DOCKER, "image", "rm", tag])
                 self.run_command(
                     [sys.executable, str(bundle / "docker/offline.py"), "--docker", shlex.join(DOCKER), "load", "."],
@@ -398,7 +427,7 @@ class DockerIntegrationTests(unittest.TestCase):
                 "config": {
                     "Cmd": ["/bin/true"],
                     "Labels": {
-                        offline.SCHEMA_LABEL: "2",
+                        offline.SCHEMA_LABEL: str(offline.SCHEMA),
                         offline.REVISION_LABEL: "digest-test-" + uuid.uuid4().hex,
                     },
                 },
@@ -530,7 +559,7 @@ class DockerIntegrationTests(unittest.TestCase):
         self.assertEqual(
             offline.image_identity(offline.inspect_image(selected, DOCKER)), offline.image_identity(original)
         )
-        shutil.copy2(bundle / ".env.example", bundle / ".env")
+        shutil.copy2(bundle / "docker/.env.example", bundle / ".env")
         (bundle / ".cache/docker").mkdir(parents=True)
         (bundle / "outputs").mkdir()
         # Resolve the delivered tag through the shipped Compose configuration.
@@ -543,7 +572,7 @@ class DockerIntegrationTests(unittest.TestCase):
         self.env.update(OPENWAM_IMAGE="openwam:validation-tag", OPENWAM_TRAIN_GPUS="1,3", OPENWAM_PORT="18848")
         compose = [*DOCKER, "compose", "-f", str(ROOT / "compose.yaml")]
         for host_network, endpoint in ((False, "ws://127.0.0.1:8848"), (True, "ws://127.0.0.1:18848")):
-            command = [*compose, *(["-f", str(ROOT / "compose.host.yaml")] if host_network else [])]
+            command = [*compose, *(["-f", str(ROOT / "docker/compose.host.yaml")] if host_network else [])]
             config = json.loads(self.run_command([*command, "--profile", "check", "config", "--format", "json"]))
             check = config["services"]["gpu-check"]
             self.assertEqual(check["image"], "openwam:validation-tag")
