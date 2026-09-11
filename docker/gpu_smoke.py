@@ -64,7 +64,7 @@ def main():
         finally:
             dist.destroy_process_group()
     torch.cuda.synchronize()
-    print("GPU smoke passed.", flush=True)
+    print(f"Rank {rank}: GPU computation checks completed.", flush=True)
 
 
 if __name__ == "__main__":

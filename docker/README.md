@@ -75,7 +75,9 @@ docker compose run --rm -T gpu-check
 
 This checks BF16, compiled forward/backward, DeepSpeed FusedAdam and multi-GPU
 NCCL all-reduce with networking disabled. It requires the cache/output mounts,
-but no weights or dataset. Follow it with real inference or training.
+but no weights or dataset. Success requires the entire command to exit with
+code 0: worker computation messages alone do not rule out a shutdown failure.
+Follow it with real inference or training.
 
 ## Serve
 
