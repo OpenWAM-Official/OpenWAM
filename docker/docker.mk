@@ -1,9 +1,10 @@
 .PHONY: docker-build docker-check docker-export docker-image docker-integration-check
-.PHONY: docker-gpu-check docker-health docker-help
+.PHONY: docker-gpu-check docker-health docker-help docker-lock
 
 DOCKER ?= docker
 DOCKER_BUNDLE ?= dist/openwam-offline
 DOCKER_BUILD_ARGS ?=
+DOCKER_LOCK_ARGS ?=
 VCS_REF ?= $(shell git rev-parse HEAD)$(if $(shell git status --porcelain --untracked-files=normal),-dirty)
 # Compose owns image interpolation, including .env. Do not reimplement dotenv in Make.
 ifneq ($(origin OPENWAM_IMAGE), undefined)
@@ -21,6 +22,7 @@ DOCKER_IMAGE_REF = "$$($(DOCKER) compose config --images serve)"
 
 docker-help:
 	@echo "make docker-build     - build the CUDA 12.8 image (network required)"
+	@echo "make docker-lock      - regenerate the CUDA dependency lock using the selected image"
 	@echo "make docker-check     - validate Compose and run container CPU checks"
 	@echo "make docker-export    - save image + run config as an offline bundle"
 	@echo "make docker-image     - show the image selected by Compose and Make"
@@ -30,6 +32,14 @@ docker-help:
 
 docker-build:
 	$(DOCKER) build --platform linux/amd64 --target openwam --build-arg VCS_REF="$(VCS_REF)" $(DOCKER_BUILD_ARGS) -f docker/Dockerfile -t $(DOCKER_IMAGE_REF) .
+
+docker-lock:
+	openwam_image=$(DOCKER_IMAGE_REF) && OPENWAM_IMAGE="$$openwam_image" $(DOCKER) compose -f compose.yaml -f docker/compose.dev.yaml run --rm -T dev \
+		uv pip compile pyproject.toml docker/requirements.in \
+		--extra dev --python-version 3.12 --python-platform x86_64-manylinux_2_39 \
+		--torch-backend cu128 --constraint docker/constraints-cu128.txt \
+		--output-file docker/requirements-cu128.txt \
+		--custom-compile-command 'make docker-lock' $(DOCKER_LOCK_ARGS)
 
 docker-image:
 	@$(DOCKER) compose config --images serve

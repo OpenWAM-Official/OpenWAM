@@ -113,12 +113,14 @@ class DockerIntegrationTests(unittest.TestCase):
                     f"#!{sys.executable}\n"
                     "import json, os, subprocess, sys\n"
                     f"docker = {DOCKER!r}\n"
-                    "if sys.argv[1] == 'compose':\n"
+                    "if sys.argv[1] == 'compose' and 'run' not in sys.argv:\n"
                     "    sys.exit(subprocess.call([*docker, *sys.argv[1:]]))\n"
                     f"with open({str(calls)!r}, 'a') as log:\n"
                     "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
                     "    if sys.argv[1] == '-m':\n"
                     "        log.write(json.dumps(['test-image', os.environ['OPENWAM_DOCKER_TEST_IMAGE']]) + '\\n')\n"
+                    "    if sys.argv[1] == 'compose':\n"
+                    "        log.write(json.dumps(['lock-image', os.environ['OPENWAM_IMAGE']]) + '\\n')\n"
                 )
                 recorder.chmod(0o755)
                 for name in ("docker/compose.dev.yaml", "docker/compose.host.yaml", "docker/compose.worktree.yaml"):
@@ -128,12 +130,14 @@ class DockerIntegrationTests(unittest.TestCase):
                     [
                         "make",
                         "docker-build",
+                        "docker-lock",
                         "docker-check",
                         "docker-export",
                         "docker-integration-check",
                         f"DOCKER={recorder}",
                         f"PYTHON={recorder}",
                         "VCS_REF=probe",
+                        "DOCKER_LOCK_ARGS=--upgrade",
                         *make_args,
                     ],
                     cwd=directory,
@@ -148,6 +152,12 @@ class DockerIntegrationTests(unittest.TestCase):
                 export = next(cmd for cmd in commands if cmd[0] == "docker/offline.py")
                 self.assertEqual(export[export.index("export") + 1], expected)
                 self.assertIn(["test-image", expected], commands)
+                lock = next(cmd for cmd in commands if cmd[0] == "compose")
+                self.assertIn(["lock-image", expected], commands)
+                self.assertIn("docker/compose.dev.yaml", lock)
+                self.assertEqual(lock[lock.index("uv") : lock.index("uv") + 3], ["uv", "pip", "compile"])
+                self.assertEqual(lock[lock.index("--output-file") + 1], "docker/requirements-cu128.txt")
+                self.assertEqual(lock[-1], "--upgrade")
 
     def test_development_source_and_outputs_survive_container_exit(self):
         checkout = self.directory / "checkout"

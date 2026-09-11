@@ -402,11 +402,11 @@ After editing dependencies in `pyproject.toml` or `docker/requirements.in`,
 regenerate the lock from the **connected host**, review it, then rebuild:
 
 ```bash
-docker compose -f compose.yaml -f docker/compose.dev.yaml run --rm dev bash docker/lock.sh
+make docker-lock
 make docker-build docker-check
 ```
 
-Append `--upgrade` after `docker/lock.sh` for deliberate upgrades;
+Use `make docker-lock DOCKER_LOCK_ARGS=--upgrade` for deliberate upgrades;
 `docker/constraints-cu128.txt` controls core versions. Recreate containers and
 repeat relevant GPU checks. Rebuild before exporting source edits, too.
 

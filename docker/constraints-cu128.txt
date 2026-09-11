@@ -1,5 +1,5 @@
 # Baseline from the existing OpenWAM CUDA 12.8 environment.
-# Resolve all transitive dependencies with docker/lock.sh.
+# Resolve all transitive dependencies with make docker-lock.
 torch==2.7.1+cu128
 torchvision==0.22.1+cu128
 torchaudio==2.7.1+cu128
