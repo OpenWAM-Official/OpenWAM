@@ -10,10 +10,20 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-SCHEMA = 3
+SCHEMA = 4
 SCHEMA_LABEL = "io.openwam.bundle.schema"
 REVISION_LABEL = "org.opencontainers.image.revision"
 CONFIG_FILES = {
+    "compose.yaml": "compose.yaml",
+    "docker/compose.host.yaml": "docker/compose.host.yaml",
+    "docker/compose.dev.yaml": "docker/compose.dev.yaml",
+    "docker/.env.example": "docker/.env.example",
+    "assets/openwam_usage_docs/docker.md": "assets/openwam_usage_docs/docker.md",
+    "assets/openwam_usage_docs/docker-validation.md": "assets/openwam_usage_docs/docker-validation.md",
+    "docker/offline.py": "docker/offline.py",
+}
+# Older images keep their original paths and ship their original importer.
+SCHEMA3_CONFIG_FILES = {
     "compose.yaml": "compose.yaml",
     "docker/compose.host.yaml": "docker/compose.host.yaml",
     "docker/compose.dev.yaml": "docker/compose.dev.yaml",
@@ -22,7 +32,6 @@ CONFIG_FILES = {
     "docker/VALIDATION.md": "docker/VALIDATION.md",
     "docker/offline.py": "docker/offline.py",
 }
-# Older images keep their original paths and ship their original importer.
 LEGACY_CONFIG_FILES = {
     "compose.yaml": "compose.yaml",
     "compose.host.yaml": "compose.host.yaml",
@@ -31,7 +40,7 @@ LEGACY_CONFIG_FILES = {
     "docker.md": "assets/openwam_usage_docs/docker.md",
     "docker/offline.py": "docker/offline.py",
 }
-BUNDLE_CONFIG_FILES = {2: LEGACY_CONFIG_FILES, SCHEMA: CONFIG_FILES}
+BUNDLE_CONFIG_FILES = {2: LEGACY_CONFIG_FILES, 3: SCHEMA3_CONFIG_FILES, SCHEMA: CONFIG_FILES}
 FILES = ("image.tar.gz", *CONFIG_FILES)
 # These files are never exported, but Compose can discover them automatically.
 # Host configuration belongs after import, not in an unverified reused bundle.
@@ -89,7 +98,7 @@ def image_schema(metadata):
     for schema in BUNDLE_CONFIG_FILES:
         if labels.get(SCHEMA_LABEL) == str(schema):
             return schema
-    raise ValueError("image does not support bundle schema 2 or 3; rebuild it with make docker-build")
+    raise ValueError("image does not support bundle schema 2, 3 or 4; rebuild it with make docker-build")
 
 
 def release_revision(metadata):

@@ -71,7 +71,7 @@ def fake_docker(tmp_path, monkeypatch):
         "    if sys.argv[-1].startswith('openwam-bundle:') and not (tagged.exists() or loaded.exists()):\n"
         "        sys.exit(1)\n"
         "    config = {'Env': ['TEST=1']} if loaded.exists() else {'Env': ['TEST=1'], 'Cmd': None}\n"
-        "    config['Labels'] = {'io.openwam.bundle.schema': os.environ.get('DOCKER_TEST_SCHEMA', '3'),\n"
+        "    config['Labels'] = {'io.openwam.bundle.schema': os.environ.get('DOCKER_TEST_SCHEMA', '4'),\n"
         "        'org.opencontainers.image.revision': os.environ.get('DOCKER_TEST_REVISION', 'image-commit')}\n"
         "    if Path(str(loaded) + '.saved').exists() and os.environ.get('DOCKER_TEST_RETAG'):\n"
         "        config['Env'] = ['RETAGGED=1']\n"
@@ -149,7 +149,7 @@ def test_offline_roundtrip_and_image_identity(tmp_path, fake_docker, image, expe
     assert "# configuration frozen in the image" in (destination / "compose.yaml").read_text()
     assert manifest["source_image"] == image
     assert manifest["revision"] == "image-commit"
-    assert manifest["schema"] == 3
+    assert manifest["schema"] == 4
     assert manifest["image"] == expected
     # The copied importer is standalone; it does not depend on this repository.
     result = subprocess.run(
@@ -205,7 +205,7 @@ def test_schema_two_image_keeps_legacy_bundle_paths(tmp_path, fake_docker, monke
         "compose.host.yaml": "docker/compose.host.yaml",
         "compose.dev.yaml": "docker/compose.dev.yaml",
         ".env.example": "docker/.env.example",
-        "docker.md": "docker/README.md",
+        "docker.md": "assets/openwam_usage_docs/docker.md",
         "docker/offline.py": "docker/offline.py",
     }
     for name, legacy_path in load_tool("offline").LEGACY_CONFIG_FILES.items():
@@ -231,9 +231,35 @@ def test_schema_two_image_keeps_legacy_bundle_paths(tmp_path, fake_docker, monke
     result = run_bundle("load", destination)
     assert result.returncode == 0, result.stderr
     # New importers understand schema 2 without converting or modifying it.
-    manifest["schema"] = 3
+    manifest["schema"] = 4
     (destination / "manifest.json").write_text(json.dumps(manifest))
     assert run_bundle("verify", destination).returncode != 0
+
+
+def test_schema_three_image_keeps_its_docker_documentation_paths(tmp_path, fake_docker, monkeypatch):
+    offline = load_tool("offline")
+    source = tmp_path / "schema-three-image"
+    moved_docs = {
+        "docker/README.md": "assets/openwam_usage_docs/docker.md",
+        "docker/VALIDATION.md": "assets/openwam_usage_docs/docker-validation.md",
+    }
+    for name in offline.SCHEMA3_CONFIG_FILES.values():
+        target = source / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / moved_docs.get(name, name), target)
+    (source / "docker/README.md").write_text("Frozen schema 3 guide: [validation](VALIDATION.md)\n")
+    monkeypatch.setenv("DOCKER_TEST_SOURCE", str(source))
+    monkeypatch.setenv("DOCKER_TEST_SCHEMA", "3")
+    destination = tmp_path / "schema-three-bundle"
+    result = run_bundle("export", "openwam:old", destination)
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((destination / "manifest.json").read_text())
+    assert manifest["schema"] == 3
+    assert set(manifest["sha256"]) == {"image.tar.gz", *offline.SCHEMA3_CONFIG_FILES}
+    assert (destination / "docker/README.md").read_text() == "Frozen schema 3 guide: [validation](VALIDATION.md)\n"
+    assert not (destination / "assets").exists()
+    result = run_bundle("load", destination)
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("filename", list(load_tool("offline").FILES))

@@ -1,7 +1,7 @@
 # Docker validation scope
 
 Results apply to the named revision/image and environment. Use
-[README.md](README.md) for setup and test commands. No Cosmos or LIBERO assets
+[docker.md](docker.md) for setup and test commands. No Cosmos or LIBERO assets
 were downloaded for the 2026-09-11 checks below.
 
 ## Current checks (2026-09-11)

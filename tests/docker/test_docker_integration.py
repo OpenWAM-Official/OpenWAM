@@ -385,7 +385,7 @@ class DockerIntegrationTests(unittest.TestCase):
         frozen = context / "payload/compose.yaml"
         frozen.write_text(frozen.read_text() + "\n# frozen image configuration\n")
         (context / "Dockerfile").write_text(
-            'FROM scratch\nLABEL io.openwam.bundle.schema="3" '
+            'FROM scratch\nLABEL io.openwam.bundle.schema="4" '
             'org.opencontainers.image.revision="integration-release"\n'
             'COPY payload /opt/openwam\nCMD ["/bin/true"]\n'
         )

@@ -63,7 +63,7 @@ ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="OpenWAM" \
       org.opencontainers.image.source="https://github.com/OpenWAM-Official/OpenWAM" \
       org.opencontainers.image.revision="${VCS_REF}" \
-      io.openwam.bundle.schema="3" \
+      io.openwam.bundle.schema="4" \
       org.opencontainers.image.licenses="Apache-2.0"
 WORKDIR /opt/openwam
 COPY . .

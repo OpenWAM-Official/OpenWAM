@@ -58,10 +58,10 @@ docker-check:
 	OPENWAM_WORKSPACE_DIR=/tmp/openwam-workspace OPENWAM_SOURCE_DIR=/tmp/openwam-workspace/feature $(DOCKER) compose -f compose.yaml -f docker/compose.dev.yaml -f docker/compose.worktree.yaml --profile dev --profile train config --quiet
 	$(DOCKER) run --rm --pull=never --network none $(DOCKER_IMAGE_REF) python -m pip check
 	$(DOCKER) run --rm --pull=never --network none $(DOCKER_IMAGE_REF) serve --help
-	$(DOCKER) run --rm --pull=never --network none --tmpfs /opt/openwam/tests/dataloader/.cache:mode=1777 $(DOCKER_IMAGE_REF) make all CORE_TEST_ARGS='tests docker/tests --ignore=tests/test_tri_system_smoke.py -o cache_dir=/cache/pytest'
+	$(DOCKER) run --rm --pull=never --network none --tmpfs /opt/openwam/tests/dataloader/.cache:mode=1777 $(DOCKER_IMAGE_REF) make all CORE_TEST_ARGS='tests --ignore=tests/test_tri_system_smoke.py -o cache_dir=/cache/pytest'
 
 docker-integration-check:
-	openwam_image=$(DOCKER_IMAGE_REF) && OPENWAM_DOCKER_TEST_IMAGE="$$openwam_image" OPENWAM_DOCKER_COMMAND="$(DOCKER)" $(PYTHON) -m unittest discover -s docker/tests -p test_docker_integration.py -v
+	openwam_image=$(DOCKER_IMAGE_REF) && OPENWAM_DOCKER_TEST_IMAGE="$$openwam_image" OPENWAM_DOCKER_COMMAND="$(DOCKER)" $(PYTHON) -m unittest discover -s tests/docker -p test_docker_integration.py -v
 
 docker-export:
 	$(PYTHON) docker/offline.py --docker "$(DOCKER)" export $(DOCKER_IMAGE_REF) "$(DOCKER_BUNDLE)"

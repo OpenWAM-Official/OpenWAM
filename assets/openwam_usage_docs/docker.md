@@ -196,7 +196,7 @@ may compute normalization statistics; the image's source/config tree is not.
 The project recommends 8 × 80 GB GPUs for full Wan2.2-5B training. In one tested
 RoboTwin configuration, two H100 80 GB GPUs ran out of memory at the first Adam
 update, while four passed. Batch size 1 still needs optimizer-state memory.
-See [validation scope and measured storage](VALIDATION.md).
+See [validation scope and measured storage](docker-validation.md).
 
 For fine-tuning, set `training.finetune_ckpt_path` to a checkpoint directory
 under `/opt/openwam/assets` or `/outputs`. For full recovery, enable
@@ -334,9 +334,10 @@ Before starting, review `docker compose config` and compare the selected image
 with `docker/.env.example`; exported variables override `.env`. Include only
 reviewed overlays in `COMPOSE_FILE` and update their paths when reusing settings.
 Use the importer and instructions delivered with that bundle. Current bundles
-use the checkout's `compose.yaml` + `docker/` layout (schema 3). The exporter and
-importer also support schema 2, retaining its original root-level configuration
-and `docker.md` guide. Schema 1 bundles require their original importer.
+use the checkout's paths, with runtime files in `docker/` and guides in
+`assets/openwam_usage_docs/` (schema 4). The exporter and importer also support
+schemas 2 and 3, preserving their original files and instructions. Schema 1
+bundles require their original importer.
 
 A bare repository reference exports only `:latest`. Digest/image-ID references
 receive a portable `openwam-bundle:sha256-…` tag, recorded in `.env.example`;
@@ -362,7 +363,7 @@ The image disables [NCCL RAS monitoring](https://docs.nvidia.com/deeplearning/nc
 with `NCCL_RAS_ENABLE=0`: H100 testing reproduced a process-exit crash when RAS
 and the image's NSS user/group lookup library were both enabled. Collective
 communication remains enabled. Keep this default when using the supplied image;
-see [the validation record](VALIDATION.md) for the tested configuration.
+see [the validation record](docker-validation.md) for the tested configuration.
 
 On the historical H100 setup, four-GPU NCCL initialization hung until NVLS was
 disabled. If a GPU check reproduces this, test:
@@ -382,7 +383,7 @@ containers and rerun the GPU check. This selects `/usr/local/cuda/compat` for
 both startup and subsequent `exec` processes; it does not replace the kernel
 driver. Default `0` leaves selection to Toolkit. See
 [NVIDIA compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)
-and the version-specific [validation record](VALIDATION.md).
+and the version-specific [validation record](docker-validation.md).
 
 ## Maintaining the image
 
@@ -414,7 +415,7 @@ Offline deployment bundles have no Makefile or build context.
   direct builds need `--build-arg VCS_REF=<commit>` for offline export.
 - CI builds the actual CUDA image and runs pip, Ruff, CPU and Docker integration
   checks on PRs, main/`docker/**` pushes and `v*` tags. GPU/model checks need a
-  GPU host; historical results are summarized in [VALIDATION.md](VALIDATION.md).
+  GPU host; historical results are summarized in [docker-validation.md](docker-validation.md).
 
 After editing dependencies in `pyproject.toml` or `docker/requirements.in`,
 regenerate the lock from the **connected host**, review it, then rebuild:
