@@ -51,6 +51,29 @@ class DockerIntegrationTests(unittest.TestCase):
         self.assertNotIn("NWRAP_ERROR", result.stderr)
         return result.stdout.strip()
 
+    def test_system_package_inventory_matches_image_and_snapshot(self):
+        probe = (
+            "import json, pathlib, subprocess\n"
+            "record = pathlib.Path('/usr/local/share/openwam/system-packages.tsv').read_text()\n"
+            "actual = subprocess.check_output(['dpkg-query', '-W', "
+            "'-f=${Package}\\t${Version}\\t${Architecture}\\n'], text=True)\n"
+            "assert record.splitlines() == sorted(actual.splitlines())\n"
+            "packages = {line.split('\\t')[0] for line in record.splitlines()}\n"
+            "assert {'python3', 'libnss-wrapper', 'ffmpeg', 'cuda-cudart-12-8'} <= packages\n"
+            "sources = pathlib.Path('/etc/apt/sources.list.d')\n"
+            "assert sorted(p.name for p in sources.glob('*.sources')) == ['ubuntu.sources']\n"
+            "assert not list(sources.glob('*.list'))\n"
+            "assert not pathlib.Path('/etc/apt/sources.list').exists()\n"
+            "print(json.dumps(sources.joinpath('ubuntu.sources').read_text()))\n"
+        )
+        sources = json.loads(
+            self.run_command([*DOCKER, "run", "--rm", "--network", "none", IMAGE, "python", "-c", probe])
+        )
+        metadata = json.loads(self.run_command([*DOCKER, "image", "inspect", IMAGE]))[0]
+        snapshot = metadata["Config"]["Labels"]["io.openwam.ubuntu.snapshot"]
+        self.assertRegex(snapshot, r"^\d{8}T\d{6}Z$")
+        self.assertIn(f"URIs: https://snapshot.ubuntu.com/ubuntu/{snapshot}/\n", sources)
+
     def test_make_and_compose_share_dotenv_and_environment_selection(self):
         for name in ("Makefile", "compose.yaml", "docker/docker.mk"):
             (self.directory / name).parent.mkdir(parents=True, exist_ok=True)

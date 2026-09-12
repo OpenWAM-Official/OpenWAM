@@ -1,12 +1,29 @@
 ARG CUDA_IMAGE=nvidia/cuda:12.8.1-devel-ubuntu24.04@sha256:520292dbb4f755fd360766059e62956e9379485d9e073bbd2f6e3c20c270ed66
-FROM ${CUDA_IMAGE} AS dependencies
+FROM ${CUDA_IMAGE} AS system-dependencies
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG UBUNTU_SNAPSHOT=20260910T000000Z
+LABEL io.openwam.ubuntu.snapshot="${UBUNTU_SNAPSHOT}"
+# Resolve every apt dependency from one immutable Ubuntu archive. CUDA stays
+# supplied by the digest-pinned base, with no rolling NVIDIA apt source enabled.
+RUN [[ "${UBUNTU_SNAPSHOT}" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] \
+    && rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources \
+    && printf '%s\n' 'Types: deb' \
+        "URIs: https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}/" \
+        'Suites: noble noble-updates noble-security noble-backports' \
+        'Components: main restricted universe multiverse' \
+        'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+        > /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get update --error-on=any && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-dev build-essential git ninja-build \
-        ca-certificates ffmpeg libgl1 libglib2.0-0 libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+        ca-certificates ffmpeg libgl1 libglib2.0-0 libgomp1 libnss-wrapper \
+    && rm -rf /var/lib/apt/lists/* \
+    && install -d /usr/local/share/openwam \
+    && dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' \
+        | LC_ALL=C sort > /usr/local/share/openwam/system-packages.tsv
+
+FROM system-dependencies AS dependencies
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:/usr/local/cuda/bin:${PATH}" \
     VIRTUAL_ENV=/opt/venv \
@@ -41,8 +58,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         "${indexes[@]}" -r /opt/openwam-requirements.txt
 
 FROM dependencies AS openwam
-RUN apt-get update && apt-get install -y --no-install-recommends libnss-wrapper \
-    && rm -rf /var/lib/apt/lists/*
 COPY docker/runtime_user.py /usr/local/lib/openwam/runtime_user.py
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="OpenWAM" \

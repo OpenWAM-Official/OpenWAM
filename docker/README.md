@@ -399,7 +399,10 @@ Offline deployment bundles have no Makefile or build context.
   servers also need distinct ports/free GPUs. Existing deployments created with
   the former fixed name can retain `COMPOSE_PROJECT_NAME=openwam`.
 - The CUDA base is pinned by digest; `requirements-cu128.txt` locks Python
-  dependencies. `Dockerfile.dockerignore` excludes downloaded weights/data, local environments,
+  dependencies. Ubuntu packages resolve from the fixed `UBUNTU_SNAPSHOT` in
+  `Dockerfile`, using the [Ubuntu snapshot service](https://snapshot.ubuntu.com/).
+  The rolling NVIDIA apt source is disabled; CUDA comes from the pinned base.
+  `Dockerfile.dockerignore` excludes downloaded weights/data, local environments,
   credentials and outputs while preserving source/configs together. Startup
   does not install dependencies.
 - Choose trusted build indexes with `DOCKER_BUILD_ARGS='--build-arg PIP_INDEX_URL=…'`.
@@ -424,6 +427,28 @@ make docker-build docker-check
 Use `make docker-lock DOCKER_LOCK_ARGS=--upgrade` for deliberate upgrades;
 `docker/constraints-cu128.txt` controls core versions. Recreate containers and
 repeat relevant GPU checks. Rebuild before exporting source edits, too.
+
+Update `UBUNTU_SNAPSHOT` deliberately to receive Ubuntu fixes, then rebuild and
+run `make docker-check docker-integration-check` plus relevant GPU checks before
+publishing. To evaluate another snapshot without changing the default, use
+`DOCKER_BUILD_ARGS='--build-arg UBUNTU_SNAPSHOT=YYYYMMDDTHHMMSSZ'` with a real UTC
+timestamp. A missing/unavailable snapshot fails the build; there is no fallback
+to current repositories.
+
+Each image records its snapshot in the `io.openwam.ubuntu.snapshot` label and
+its complete system package inventory (package, version, architecture) at
+`/usr/local/share/openwam/system-packages.tsv`. On a host with the image loaded:
+
+```bash
+docker run --rm --pull=never --network none --entrypoint cat \
+  "$(docker compose config --images serve)" \
+  /usr/local/share/openwam/system-packages.tsv > system-packages.tsv
+```
+
+The inventory is carried inside offline image archives too. These pins stabilize
+dependency selection; they do not promise byte-identical rebuilt image layers.
+Keep the built image or offline bundle for exact redeployment, including beyond
+the snapshot service's retention period.
 
 ### Optional Cosmos image
 
