@@ -247,6 +247,37 @@ def test_corrupt_bundle_never_reaches_docker_load(tmp_path, fake_docker, filenam
     assert '"load"' not in fake_docker.read_text()
 
 
+@pytest.mark.parametrize("filename", load_tool("offline").AUTOMATIC_COMPOSE_FILES)
+@pytest.mark.parametrize("kind", ["file", "broken-symlink"])
+def test_unverified_automatic_compose_files_block_verify_and_load(tmp_path, fake_docker, filename, kind):
+    destination = tmp_path / "bundle"
+    assert run_bundle("export", "openwam:test", destination).returncode == 0
+    extra = destination / filename
+    if kind == "broken-symlink":
+        extra.symlink_to(tmp_path / "missing-config")
+    else:
+        extra.write_text("OPENWAM_IMAGE=openwam:stale\n" if filename == ".env" else "services: {}\n")
+    for command in ("verify", "load"):
+        result = run_bundle(command, destination)
+        assert result.returncode != 0
+        assert "unexpected automatic Compose configuration: " + filename in result.stderr
+        assert "fresh bundle directory" in result.stderr
+    assert '"load"' not in fake_docker.read_text()
+    extra.unlink()
+    assert run_bundle("load", destination).returncode == 0
+
+
+def test_bundle_verification_allows_nonautomatic_host_files(tmp_path, fake_docker):
+    destination = tmp_path / "bundle"
+    assert run_bundle("export", "openwam:test", destination).returncode == 0
+    (destination / "outputs").mkdir()
+    (destination / "outputs/checkpoint.txt").write_text("keep training outputs")
+    (destination / "compose.inference.yaml").write_text("services: {}\n")
+    result = run_bundle("verify", destination)
+    assert result.returncode == 0, result.stderr
+    assert "host environment and later Compose changes are not verified" in result.stdout
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

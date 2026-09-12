@@ -33,6 +33,18 @@ LEGACY_CONFIG_FILES = {
 }
 BUNDLE_CONFIG_FILES = {2: LEGACY_CONFIG_FILES, SCHEMA: CONFIG_FILES}
 FILES = ("image.tar.gz", *CONFIG_FILES)
+# These files are never exported, but Compose can discover them automatically.
+# Host configuration belongs after import, not in an unverified reused bundle.
+AUTOMATIC_COMPOSE_FILES = (
+    ".env",
+    "compose.yml",
+    "docker-compose.yaml",
+    "docker-compose.yml",
+    "compose.override.yaml",
+    "compose.override.yml",
+    "docker-compose.override.yaml",
+    "docker-compose.override.yml",
+)
 
 
 def sha256(path):
@@ -177,6 +189,16 @@ def export_bundle(image, destination, docker=("docker",)):
 
 
 def verify_bundle(directory):
+    unexpected = [
+        name for name in AUTOMATIC_COMPOSE_FILES if (directory / name).exists() or (directory / name).is_symlink()
+    ]
+    if unexpected:
+        raise ValueError(
+            "unexpected automatic Compose configuration: "
+            + ", ".join(unexpected)
+            + ". Use a fresh bundle directory, or move these files outside it before verify/load; "
+            "create and review host configuration only after loading."
+        )
     manifest = json.loads((directory / "manifest.json").read_text())
     if not isinstance(manifest, dict):
         raise ValueError("bundle manifest must be a JSON object")
@@ -225,7 +247,7 @@ def main():
             export_bundle(args.image, args.directory, docker)
         else:
             manifest = verify_bundle(args.directory)
-            print("Bundle checksums verified.", flush=True)
+            print("Bundle checksums verified; host environment and later Compose changes are not verified.", flush=True)
             if args.command == "load":
                 subprocess.run([*docker, "image", "load", "--input", str(args.directory / "image.tar.gz")], check=True)
                 if image_identity(inspect_image(manifest["image"], docker)) != manifest["image_identity"]:

@@ -302,10 +302,12 @@ exported. Transfer any custom overlays separately, review their paths/settings
 for the destination, and include them in its `COMPOSE_FILE`. Keep the bundled
 standard files unchanged so integrity verification continues to work.
 
-Deliver each new bundle to a fresh remote directory too; overlaying an older
-bundle can leave stale Compose files behind. When copying an existing `.env`,
-update `OPENWAM_IMAGE` and any `COMPOSE_FILE` overlay paths to the new bundle's
-template. Relative data/cache/output paths now resolve from the new directory;
+Deliver each new bundle to a fresh remote directory too. `verify` and `load`
+reject an existing `.env`, alternative default Compose filenames and automatic
+`*.override.yaml` / `*.override.yml` files (the `compose` and `docker-compose`
+names). Move these files outside the bundle before importing; nothing is deleted
+or overwritten for you. Create host configuration only after a successful load.
+Relative data/cache/output paths now resolve from the new directory;
 use absolute paths to retain existing storage. To keep managing the same running
 deployment from a new directory, retain its existing `COMPOSE_PROJECT_NAME` as well.
 
@@ -313,8 +315,7 @@ deployment from a new directory, retain its existing `COMPOSE_PROJECT_NAME` as w
 
 ```bash
 cd /path/to/openwam-offline
-python3 docker/offline.py load .
-test -f .env || cp docker/.env.example .env
+python3 docker/offline.py load . && cp docker/.env.example .env
 mkdir -p .cache/docker outputs
 id -u
 id -g
@@ -326,6 +327,12 @@ old `.env`, update `OPENWAM_IMAGE` from `docker/.env.example`. Follow [Serve](#s
 or [Train](#train). Default settings prevent pulls and keep Hugging Face/W&B offline.
 
 `python3 docker/offline.py verify .` checks integrity without loading the image.
+Run it before creating `.env`; to recheck a configured bundle, temporarily move
+`.env` and any automatic overrides outside it first. Verification covers the
+delivered files and image, not your shell environment or subsequent host edits.
+Before starting, review `docker compose config` and compare the selected image
+with `docker/.env.example`; exported variables override `.env`. Include only
+reviewed overlays in `COMPOSE_FILE` and update their paths when reusing settings.
 Use the importer and instructions delivered with that bundle. Current bundles
 use the checkout's `compose.yaml` + `docker/` layout (schema 3). The exporter and
 importer also support schema 2, retaining its original root-level configuration

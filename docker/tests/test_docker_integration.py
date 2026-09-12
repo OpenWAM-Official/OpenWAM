@@ -404,6 +404,42 @@ class DockerIntegrationTests(unittest.TestCase):
                 self.assertEqual(manifest["image"], tag)
                 self.assertIn("OPENWAM_IMAGE=" + tag + "\n", (bundle / "docker/.env.example").read_text())
                 self.run_command([*DOCKER, "image", "rm", tag])
+                for filename, content in (
+                    (".env", "OPENWAM_IMAGE=openwam:stale\n"),
+                    ("compose.override.yaml", "services:\n  serve:\n    image: openwam:stale\n"),
+                ):
+                    extra = bundle / filename
+                    extra.write_text(content)
+                    compose_env = dict(self.env)
+                    compose_env.pop("OPENWAM_IMAGE", None)
+                    selected = subprocess.run(
+                        [*DOCKER, "compose", "config", "--images", "serve"],
+                        cwd=bundle,
+                        env=compose_env,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(selected.returncode, 0, selected.stderr)
+                    self.assertEqual(selected.stdout.strip(), "openwam:stale")
+                    rejected = subprocess.run(
+                        [
+                            sys.executable,
+                            str(bundle / "docker/offline.py"),
+                            "--docker",
+                            shlex.join(DOCKER),
+                            "load",
+                            ".",
+                        ],
+                        cwd=bundle,
+                        env=self.env,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn("unexpected automatic Compose configuration: " + filename, rejected.stderr)
+                    absent = subprocess.run([*DOCKER, "image", "inspect", tag], capture_output=True, env=self.env)
+                    self.assertNotEqual(absent.returncode, 0, "rejected bundle must not load its image")
+                    extra.unlink()
                 self.run_command(
                     [sys.executable, str(bundle / "docker/offline.py"), "--docker", shlex.join(DOCKER), "load", "."],
                     cwd=bundle,
