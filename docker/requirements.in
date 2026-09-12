@@ -1,0 +1,8 @@
+# Additional tools needed by source builds and container validation.
+torchaudio
+pip
+setuptools
+wheel
+packaging
+ninja
+uv==0.11.33

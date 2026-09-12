@@ -1,0 +1,21 @@
+# Source edits are live. Mount outputs explicitly at BOTH paths because the
+# checkout hides the image's /opt/openwam/outputs -> /outputs symlink.
+x-source-volumes: &source-volumes
+  - type: bind
+    source: ${OPENWAM_SOURCE_DIR:-.}
+    target: /opt/openwam
+    bind:
+      create_host_path: false
+  - type: bind
+    source: ${OPENWAM_OUTPUT_DIR:-./outputs}
+    target: /opt/openwam/outputs
+    bind:
+      create_host_path: false
+
+services:
+  serve:
+    volumes: *source-volumes
+  train:
+    volumes: *source-volumes
+  dev:
+    volumes: *source-volumes

@@ -77,7 +77,7 @@ def _resolve_state(args) -> list[float] | None:
 
 def _build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Call the OpenWAM WebSocket policy server.")
-    parser.add_argument("--server", type=str, default="ws://127.0.0.1:8848")
+    parser.add_argument("--server", type=str, default=os.environ.get("OPENWAM_SERVER_URL", "ws://127.0.0.1:8848"))
     parser.add_argument(
         "--head-camera", type=str, default=None, help="Path to head camera JPEG/PNG (required in run mode)."
     )

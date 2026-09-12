@@ -1,0 +1,59 @@
+name: Docker build and tests
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'docker/**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      OPENWAM_IMAGE: openwam:ci-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate configuration
+        run: |
+          docker compose --profile train config --quiet
+          docker compose -f compose.yaml -f docker/compose.host.yaml config --quiet
+          docker compose -f compose.yaml -f docker/compose.dev.yaml --profile dev --profile train config --quiet
+          OPENWAM_WORKSPACE_DIR=/tmp/openwam-workspace OPENWAM_SOURCE_DIR=/tmp/openwam-workspace/feature docker compose -f compose.yaml -f docker/compose.dev.yaml -f docker/compose.worktree.yaml --profile dev --profile train config --quiet
+          bash -n docker/entrypoint.sh docker/pip_install.sh scripts/train.sh
+      # Only on this disposable GitHub-hosted runner. CUDA build + image load
+      # need substantially more disk than a small Python application.
+      - name: Make room for CUDA layers
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache
+          df -h /
+          available_kb=$(df --output=avail / | tail -1)
+          if [ "$available_kb" -lt 60000000 ]; then
+            echo 'CUDA CI needs at least 60 GB free; use a larger runner if this image layout changes.' >&2
+            exit 1
+          fi
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and load the actual CUDA image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: openwam
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.OPENWAM_IMAGE }}
+          build-args: VCS_REF=${{ github.sha }}
+          cache-from: type=gha,scope=openwam-cu128
+          cache-to: type=gha,mode=min,scope=openwam-cu128,ignore-error=true
+      - name: Check dependencies and run container CPU tests
+        run: make docker-check
+      - name: Check Compose isolation, runtime users, indexes, mounts and offline delivery
+        run: make docker-integration-check PYTHON=/usr/bin/python3

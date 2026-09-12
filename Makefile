@@ -14,6 +14,7 @@ help:
 	@echo "make check            - run compile checks and the core test suite"
 	@echo "make all              - lint + core test"
 	@echo "make clean            - remove Python cache files"
+	@$(MAKE) --no-print-directory docker-help
 
 test:
 	$(PYTHON) -m pytest -q -m "not gpu" $(CORE_TEST_ARGS)
@@ -25,14 +26,14 @@ tri-system-smoke:
 	$(PYTHON) -m pytest -q $(TRI_SYSTEM_SMOKE_ARGS)
 
 lint:
-	$(PYTHON) -m ruff check openwam/ scripts/ tests/
+	$(PYTHON) -m ruff check openwam/ scripts/ tests/ docker/
 
 format:
-	$(PYTHON) -m ruff format openwam/ scripts/ tests/
-	$(PYTHON) -m ruff check --fix openwam/ scripts/ tests/
+	$(PYTHON) -m ruff format openwam/ scripts/ tests/ docker/
+	$(PYTHON) -m ruff check --fix openwam/ scripts/ tests/ docker/
 
 compile:
-	$(PYTHON) -m compileall openwam scripts tests
+	$(PYTHON) -m compileall openwam scripts tests docker
 
 check: compile test
 
@@ -41,3 +42,6 @@ all: lint test
 clean:
 	find . -name "__pycache__" -type d -prune -exec rm -rf {} +
 	find . -name "*.pyc" -delete
+
+# Keep the default target and native recipes here; Docker commands live together.
+include docker/docker.mk

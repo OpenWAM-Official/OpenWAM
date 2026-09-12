@@ -1,0 +1,41 @@
+# Add after docker/compose.dev.yaml. Preserve the host paths of the main repository
+# and its linked worktrees so Git's metadata and back-pointers resolve unchanged.
+# Select a workspace containing both; OPENWAM_SOURCE_DIR must be absolute.
+x-worktree: &worktree
+  working_dir: ${OPENWAM_SOURCE_DIR:?Set OPENWAM_SOURCE_DIR to the absolute worktree path}
+  volumes:
+    - type: bind
+      source: ${OPENWAM_WORKSPACE_DIR:?Set OPENWAM_WORKSPACE_DIR to the workspace containing the main repository and worktrees}
+      target: ${OPENWAM_WORKSPACE_DIR}
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${OPENWAM_OUTPUT_DIR:-./outputs}
+      target: ${OPENWAM_SOURCE_DIR}/outputs
+      bind:
+        create_host_path: false
+
+services:
+  serve:
+    <<: *worktree
+  dev:
+    <<: *worktree
+  train:
+    <<: *worktree
+    # Keep the native-path checkout consistent with the /opt/openwam alias.
+    volumes:
+      - type: bind
+        source: ${OPENWAM_WORKSPACE_DIR}
+        target: ${OPENWAM_WORKSPACE_DIR}
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OPENWAM_OUTPUT_DIR:-./outputs}
+        target: ${OPENWAM_SOURCE_DIR}/outputs
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OPENWAM_ASSETS_DIR:-./assets}
+        target: ${OPENWAM_SOURCE_DIR}/assets
+        bind:
+          create_host_path: false

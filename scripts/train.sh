@@ -46,7 +46,7 @@ echo "║  Nodes: ${NNODES}  GPUs/node: ${NPROC_PER_NODE}  Rank: ${NODE_RANK}   
 echo "║  Master: ${MASTER_ADDR}:${MASTER_PORT}                   ║"
 echo "╚══════════════════════════════════════════════════════╝"
 
-torchrun \
+exec torchrun \
     --nnodes "${NNODES}" \
     --nproc_per_node "${NPROC_PER_NODE}" \
     --node_rank "${NODE_RANK}" \
