@@ -17,32 +17,47 @@ def test_lock_sidecar_blocks_another_process_and_remains_persistent(tmp_path):
     ready = tmp_path / "ready"
     acquired = tmp_path / "acquired"
     script = """
+import runpy
 import sys
 from pathlib import Path
-from openwam.dataloader.utils.exclusion_io import locked_exclusion_files
 
-target, ready, acquired = map(Path, sys.argv[1:])
+# Exercise this stdlib-only utility without importing every dataset and torch.
+locked_exclusion_files = runpy.run_path(sys.argv[1])["locked_exclusion_files"]
+target, ready, acquired = map(Path, sys.argv[2:])
 ready.write_text("ready")
 with locked_exclusion_files([target]):
     acquired.write_text("acquired")
 """
 
-    with exclusion_io.locked_exclusion_files([target]):
-        process = subprocess.Popen(
-            [sys.executable, "-c", script, str(target), str(ready), str(acquired)],
-            cwd=Path(__file__).resolve().parents[2],
-        )
-        deadline = time.monotonic() + 5
-        while not ready.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert ready.exists()
-        time.sleep(0.05)
-        assert process.poll() is None
-        assert not acquired.exists()
+    process = None
+    try:
+        with exclusion_io.locked_exclusion_files([target]):
+            process = subprocess.Popen(
+                [sys.executable, "-c", script, exclusion_io.__file__, str(target), str(ready), str(acquired)],
+                cwd=Path(__file__).resolve().parents[2],
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.monotonic() + 30
+            while not ready.exists():
+                if process.poll() is not None:
+                    _, stderr = process.communicate()
+                    pytest.fail(f"Lock contender exited before becoming ready: {stderr}")
+                assert time.monotonic() < deadline, "Lock contender did not become ready within 30 seconds"
+                time.sleep(0.01)
+            time.sleep(0.05)
+            assert process.poll() is None
+            assert not acquired.exists()
 
-    assert process.wait(timeout=5) == 0
-    assert acquired.read_text() == "acquired"
-    assert target.with_name(f".{target.name}.lock").exists()
+        _, stderr = process.communicate(timeout=30)
+        assert process.returncode == 0, stderr
+        assert acquired.read_text() == "acquired"
+        assert target.with_name(f".{target.name}.lock").exists()
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
 
 
 def test_atomic_publish_uses_host_pid_uuid_unique_temp_names(tmp_path, monkeypatch):
