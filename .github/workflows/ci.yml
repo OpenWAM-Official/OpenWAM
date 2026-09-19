@@ -21,7 +21,7 @@ jobs:
         run: pip install ruff
 
       - name: Lint
-        run: ruff check openwam/ scripts/ tests/ docker/
+        run: ruff check openwam/ benchmarks/ scripts/ tests/ docker/
 
   tests:
     runs-on: ubuntu-latest
@@ -38,8 +38,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.7.1 torchvision==0.22.1
-          python -m pip install -e .
-          python -m pip install pytest
+          python -m pip install -e ".[dev]"
 
       - name: Run standard checks
         run: make check

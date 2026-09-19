@@ -70,7 +70,7 @@ COPY . .
 # Editable installation deliberately preserves configs/ and scripts/ beside the package.
 RUN python -m pip install --no-deps --no-build-isolation -e . \
     && python -m pip check \
-    && install -d -m 1777 /cache /outputs \
+    && install -d -m 1777 /cache /outputs /opt/openwam/.labtasker \
     && ln -s /outputs /opt/openwam/outputs \
     && chmod +x docker/entrypoint.sh
 # NCCL RAS and the NSS preload reproduced a shutdown SIGSEGV on H100.

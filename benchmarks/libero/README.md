@@ -1,5 +1,10 @@
 # LIBERO Evaluation
 
+For more efficient parallel evaluation with finer-grained control, use the
+[Labtasker-based evaluation](LABTASKER.md).
+
+**If you prefer the traditional launchers, follow the instructions below.**
+
 Two processes: the **OpenWAM policy server** (this repo's env, holds the model) and the **LIBERO client** (its own env). They talk over WebSocket ([wire protocol](../README.md)), so the two environments never interfere. For the LIBERO-plus perturbation suite see [`benchmarks/libero-plus/`](../libero-plus/README.md).
 
 Commands below assume conda at `/path/to/miniconda3` and the LIBERO checkout at `/path/to/LIBERO` — substitute your actual paths.

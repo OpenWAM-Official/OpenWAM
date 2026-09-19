@@ -1,0 +1,2 @@
+labtasker==2.6.0
+PyYAML>=6.0

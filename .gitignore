@@ -216,3 +216,6 @@ assets/*
 # Versioned RoboDojo score verification (see issue #23).
 !assets/robodojo_verification/
 !assets/robodojo_verification/**
+
+# Local Labtasker state and attempt journals
+.labtasker/

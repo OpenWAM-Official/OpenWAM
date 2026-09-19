@@ -41,42 +41,56 @@ The wire contract (message types) lives in ``benchmarks/utils/transport.py``
 (client mirror; the server-side source of truth is ``openwam/deploy/server.py``).
 """
 
-from benchmarks.utils.action_conversion import (
-    base_pose_planar5,
-    base_velocity_body,
-    base_velocity_cmd,
-    binarize_robocasa_action12,
-    ebench_obs_to_raw23,
-    ebench_quat_wxyz_to_rot6d,
-    ebench_render_state_base,
-    ebench_wrap_angle_rad,
-    eef10_to_robocasa12d,
-    eef10_to_vlabench_ee,
-    eef20d_to_ee16d,
-    eef20d_to_robocasa12d,
-    libero_gripper_qpos_to_cmd,
-    libero_obs_to_eef10,
-    libero_open_scale_to_gripper_cmd,
-    quat_xyzw_to_axis_angle,
-    quat_xyzw_to_rot6d,
-    raw23_to_ebench_action,
-    robocasa_state_to_eef10,
-    robocasa_state_to_eef20d,
-    robotwin_endpose_to_eef20d,
-    rot6d_to_axis_angle,
-    rot6d_to_euler_xyz,
-    rot6d_to_quat_xyzw,
-    vlabench_obs_to_eef10,
-)
-from benchmarks.utils.client import (
-    ServerError,
-    build_payload,
-    encode_numpy_b64,
-    encode_path_b64,
-    resize_for_lshape_slot,
-    server_error_from_body,
-)
-from benchmarks.utils.transport import WSPolicyClient
+from importlib import import_module
+
+_EXPORT_MODULES = {
+    "base_pose_planar5": "benchmarks.utils.action_conversion",
+    "base_velocity_body": "benchmarks.utils.action_conversion",
+    "base_velocity_cmd": "benchmarks.utils.action_conversion",
+    "binarize_robocasa_action12": "benchmarks.utils.action_conversion",
+    "ebench_obs_to_raw23": "benchmarks.utils.action_conversion",
+    "ebench_quat_wxyz_to_rot6d": "benchmarks.utils.action_conversion",
+    "ebench_render_state_base": "benchmarks.utils.action_conversion",
+    "ebench_wrap_angle_rad": "benchmarks.utils.action_conversion",
+    "eef10_to_robocasa12d": "benchmarks.utils.action_conversion",
+    "eef10_to_vlabench_ee": "benchmarks.utils.action_conversion",
+    "eef20d_to_ee16d": "benchmarks.utils.action_conversion",
+    "eef20d_to_robocasa12d": "benchmarks.utils.action_conversion",
+    "libero_gripper_qpos_to_cmd": "benchmarks.utils.action_conversion",
+    "libero_obs_to_eef10": "benchmarks.utils.action_conversion",
+    "libero_open_scale_to_gripper_cmd": "benchmarks.utils.action_conversion",
+    "quat_xyzw_to_axis_angle": "benchmarks.utils.action_conversion",
+    "quat_xyzw_to_rot6d": "benchmarks.utils.action_conversion",
+    "raw23_to_ebench_action": "benchmarks.utils.action_conversion",
+    "robocasa_state_to_eef10": "benchmarks.utils.action_conversion",
+    "robocasa_state_to_eef20d": "benchmarks.utils.action_conversion",
+    "robotwin_endpose_to_eef20d": "benchmarks.utils.action_conversion",
+    "rot6d_to_axis_angle": "benchmarks.utils.action_conversion",
+    "rot6d_to_euler_xyz": "benchmarks.utils.action_conversion",
+    "rot6d_to_quat_xyzw": "benchmarks.utils.action_conversion",
+    "vlabench_obs_to_eef10": "benchmarks.utils.action_conversion",
+    "ServerError": "benchmarks.utils.client",
+    "build_payload": "benchmarks.utils.client",
+    "encode_numpy_b64": "benchmarks.utils.client",
+    "encode_path_b64": "benchmarks.utils.client",
+    "resize_for_lshape_slot": "benchmarks.utils.client",
+    "server_error_from_body": "benchmarks.utils.client",
+    "WSPolicyClient": "benchmarks.utils.transport",
+}
+
+
+def __getattr__(name):
+    module = _EXPORT_MODULES.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_EXPORT_MODULES))
+
 
 __all__ = [
     "ServerError",

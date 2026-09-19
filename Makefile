@@ -26,14 +26,14 @@ tri-system-smoke:
 	$(PYTHON) -m pytest -q $(TRI_SYSTEM_SMOKE_ARGS)
 
 lint:
-	$(PYTHON) -m ruff check openwam/ scripts/ tests/ docker/
+	$(PYTHON) -m ruff check openwam/ benchmarks/ scripts/ tests/ docker/
 
 format:
-	$(PYTHON) -m ruff format openwam/ scripts/ tests/ docker/
-	$(PYTHON) -m ruff check --fix openwam/ scripts/ tests/ docker/
+	$(PYTHON) -m ruff format openwam/ benchmarks/ scripts/ tests/ docker/
+	$(PYTHON) -m ruff check --fix openwam/ benchmarks/ scripts/ tests/ docker/
 
 compile:
-	$(PYTHON) -m compileall openwam scripts tests docker
+	$(PYTHON) -m compileall openwam benchmarks scripts tests docker
 
 check: compile test
 

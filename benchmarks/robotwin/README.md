@@ -1,5 +1,10 @@
 # RoboTwin 2.0 Evaluation
 
+For more efficient parallel evaluation with finer-grained control, use the
+[Labtasker-based evaluation](LABTASKER.md).
+
+**If you prefer the traditional launchers, follow the instructions below.**
+
 Two processes: the **OpenWAM policy server** (this repo's env, holds the model) and the **RoboTwin client** (its own env). They talk over WebSocket ([wire protocol](../README.md)), so the two environments never interfere.
 
 Commands below assume conda at `/path/to/miniconda3` and the RoboTwin checkout at `/path/to/RoboTwin` — substitute your actual paths.

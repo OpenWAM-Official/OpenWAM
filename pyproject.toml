@@ -49,6 +49,7 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = [
+    "labtasker==2.6.0",
     "pytest>=8,<10",
     "ruff>=0.4,<1",
     "pre-commit>=3.5,<5",

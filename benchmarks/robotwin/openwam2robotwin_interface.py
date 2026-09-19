@@ -43,6 +43,7 @@ if _PROJECT_ROOT not in _sys.path:
 import json  # noqa: E402
 import os  # noqa: E402
 import time  # noqa: E402
+from contextlib import nullcontext  # noqa: E402
 from typing import Dict, Optional  # noqa: E402
 
 import cv2 as cv  # noqa: E402
@@ -94,6 +95,18 @@ _MISSING_TASK_NAME_WARNED: bool = False
 # episode. Track the ``(task_name, override)`` pairs we have already announced
 # and stay silent for the rest of the process.
 _LOGGED_OVERRIDES: set = set()
+_BENCHMARK_RNG_DOMAIN = None
+
+
+def set_benchmark_rng_domain(domain) -> None:
+    """Install the per-episode benchmark RNG cursor used around env calls.
+
+    Policy inference remains outside this domain.  The adapter is process-local
+    and the domain implementation serializes global state swaps.
+    """
+
+    global _BENCHMARK_RNG_DOMAIN
+    _BENCHMARK_RNG_DOMAIN = domain
 
 
 def _parse_bool(value, default: bool = False) -> bool:
@@ -445,4 +458,6 @@ def eval(TASK_ENV, model: ModelClient, observation: dict) -> None:
     if model._action_type == "ee" and len(action) == 20:
         action = action_conversion.eef20d_to_ee16d(action)
 
-    TASK_ENV.take_action(action, action_type=model._action_type)
+    context = nullcontext() if _BENCHMARK_RNG_DOMAIN is None else _BENCHMARK_RNG_DOMAIN.activate()
+    with context:
+        TASK_ENV.take_action(action, action_type=model._action_type)

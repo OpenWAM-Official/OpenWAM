@@ -1,0 +1,3 @@
+# Install in SERVER_PYTHON; the isolated LIBERO environment is unchanged.
+labtasker==2.6.0
+PyYAML>=6.0

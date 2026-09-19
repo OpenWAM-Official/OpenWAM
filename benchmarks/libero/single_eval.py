@@ -7,7 +7,6 @@ It imports the canonical native-action policy adapter in this directory.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -21,6 +20,10 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from openwam2libero_interface import OpenWAMLiberoPolicy  # noqa: E402
+
+from benchmarks.utils.eval_manifest import load_manifest, select_entries  # noqa: E402
+from benchmarks.utils.rng_domain import GlobalRngDomain, decode_numpy_state  # noqa: E402
+from benchmarks.utils.task_progress import write_progress  # noqa: E402
 
 
 def _repo_root() -> Path:
@@ -144,8 +147,41 @@ def run_eval(cfg: dict) -> int:
     fail_on_incomplete = _require_bool(cfg.get("fail_on_incomplete", False), "fail_on_incomplete")
 
     init_states = task_suite.get_task_init_states(task_id)
+    manifest = None
+    manifest_entries = None
+    manifest_path = cfg.get("manifest_file")
+    if manifest_path:
+        from eval_manifest import BENCHMARK, file_sha256, task_assets
+
+        expected_manifest_hash = str(cfg.get("manifest_hash", ""))
+        if not expected_manifest_hash:
+            raise ValueError("manifest-backed LIBERO evaluation requires manifest_hash")
+        manifest = load_manifest(
+            Path(manifest_path),
+            expected_manifest_hash=expected_manifest_hash,
+        )
+        total_trials = cfg.get("total_trials")
+        if (
+            isinstance(total_trials, bool)
+            or not isinstance(total_trials, int)
+            or total_trials <= 0
+            or len(manifest["entries"]) < total_trials
+            or manifest.get("benchmark") != BENCHMARK
+            or manifest.get("suite") != suite_name
+            or manifest.get("task_id") != task_id
+            or manifest.get("seed") != seed
+        ):
+            raise ValueError("LIBERO manifest does not cover the requested task evaluation")
+        init_path, bddl_path = task_assets(task)
+        expected_assets = {
+            "init_state_asset": {"name": task.init_states_file, "sha256": file_sha256(init_path)},
+            "bddl_asset": {"name": task.bddl_file, "sha256": file_sha256(bddl_path)},
+        }
+        if any(manifest.get(key) != value for key, value in expected_assets.items()):
+            raise ValueError("LIBERO manifest references different benchmark assets")
+        manifest_entries = select_entries(manifest, trial_start, trial_stop - trial_start)
     env = _make_env_with_randomization_retries(task, cfg)
-    if not reseed_each_trial:
+    if manifest is None and not reseed_each_trial:
         env.seed(seed)
     policy = OpenWAMLiberoPolicy(
         host=cfg.get("host", "127.0.0.1"),
@@ -167,21 +203,51 @@ def run_eval(cfg: dict) -> int:
 
     successes = 0
     trial_results = []
+    progress_file = Path(cfg["progress_file"]) if cfg.get("progress_file") else None
     try:
-        for trial in range(trial_start, trial_stop):
-            if reseed_each_trial:
+        for offset, trial in enumerate(range(trial_start, trial_stop)):
+            entry = None if manifest_entries is None else manifest_entries[offset]
+            domain = (
+                None
+                if entry is None
+                else GlobalRngDomain.from_numpy_state(decode_numpy_state(entry["pre_reset_numpy_state"]))
+            )
+            if entry is not None and (
+                entry.get("trial") != trial or entry.get("init_state_index") != trial % len(init_states)
+            ):
+                raise ValueError(f"LIBERO manifest entry does not describe trial {trial}")
+            if manifest is None and reseed_each_trial:
                 env.seed(seed + trial)
             result = {"trial": trial, "success": False, "policy_steps": 0}
+            if entry is not None:
+                result["init_state_index"] = entry["init_state_index"]
             try:
-                obs = env.reset()
+                if domain is None:
+                    obs = env.reset()
+                else:
+                    with domain.activate():
+                        obs = env.reset()
                 if len(init_states) > 0:
-                    obs = env.set_init_state(init_states[trial % len(init_states)])
+                    if domain is None:
+                        obs = env.set_init_state(init_states[trial % len(init_states)])
+                    else:
+                        with domain.activate():
+                            obs = env.set_init_state(init_states[trial % len(init_states)])
                 for _ in range(settle_steps):
-                    obs, _, _, _ = env.step(settle_action)
+                    if domain is None:
+                        obs, _, _, _ = env.step(settle_action)
+                    else:
+                        with domain.activate():
+                            obs, _, _, _ = env.step(settle_action)
                 policy.reset()
                 done = False
                 for step in range(max_steps):
-                    obs, reward, done, _ = env.step(policy.act(obs, task.language))
+                    action = policy.act(obs, task.language)
+                    if domain is None:
+                        obs, reward, done, _ = env.step(action)
+                    else:
+                        with domain.activate():
+                            obs, reward, done, _ = env.step(action)
                     result["policy_steps"] = step + 1
                     result["last_reward"] = float(reward)
                     if done:
@@ -190,10 +256,20 @@ def run_eval(cfg: dict) -> int:
                         break
             finally:
                 trial_results.append(result)
-            print(
-                f"[RESULT] trial={trial} success={result['success']} steps={result['policy_steps']}",
-                flush=True,
-            )
+            details = f"trial={trial} success={result['success']} steps={result['policy_steps']}"
+            if entry is not None:
+                details += f" init_state={result['init_state_index']} manifest={manifest['manifest_hash']}"
+            print(f"[RESULT] {details}", flush=True)
+            if progress_file is not None:
+                write_progress(
+                    progress_file,
+                    {
+                        "completed": offset + 1,
+                        "total": trial_stop - trial_start,
+                        "trial": trial,
+                        "successes": successes,
+                    },
+                )
     finally:
         env.close()
         policy.close()
@@ -205,7 +281,7 @@ def run_eval(cfg: dict) -> int:
     if result_dir:
         output = Path(result_dir).expanduser().resolve()
         output.mkdir(parents=True, exist_ok=True)
-        result = {
+        result: dict[str, object] = {
             "action_mode": "eef",
             "suite": suite_name,
             "task_id": task_id,
@@ -220,6 +296,12 @@ def run_eval(cfg: dict) -> int:
             "seed": seed,
             "trials": trial_results,
         }
+        if manifest is not None:
+            result.update(
+                manifest_hash=manifest["manifest_hash"],
+                total_trials=total_trials,
+                num_trials=count,
+            )
         path = output / "results.json"
         path.write_text(json.dumps(result, indent=2), encoding="utf-8")
         print(f"[libero] results={path}")
@@ -237,13 +319,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trial-start", type=int)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--result-dir", type=Path)
+    parser.add_argument("--manifest-file", type=Path)
+    parser.add_argument("--manifest-hash")
+    parser.add_argument("--total-trials", type=int)
+    parser.add_argument("--progress-file", type=Path)
     args = parser.parse_args(argv)
     cfg = _load_config(args.config)
-    cfg["policy_config_sha256"] = hashlib.sha256(args.config.read_bytes()).hexdigest()
-    for key in ("host", "port", "suite", "task_id", "num_trials", "trial_start", "seed", "result_dir"):
+    for key in (
+        "host",
+        "port",
+        "suite",
+        "task_id",
+        "num_trials",
+        "trial_start",
+        "seed",
+        "result_dir",
+        "manifest_file",
+        "manifest_hash",
+        "total_trials",
+        "progress_file",
+    ):
         value = getattr(args, key)
         if value is not None:
-            cfg[key] = str(value) if key == "result_dir" else value
+            cfg[key] = str(value) if key in ("result_dir", "manifest_file", "progress_file") else value
     return run_eval(cfg)
 
 

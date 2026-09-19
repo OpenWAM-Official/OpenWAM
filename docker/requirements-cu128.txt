@@ -4,8 +4,12 @@ accelerate==1.14.0
     # via
     #   -c docker/constraints-cu128.txt
     #   openwam (pyproject.toml)
+alembic==1.20.0
+    # via labtasker-server
 annotated-doc==0.0.5
-    # via typer
+    # via
+    #   fastapi
+    #   typer
 annotated-types==0.8.0
     # via pydantic
 antlr4-python3-runtime==4.9.3
@@ -13,7 +17,9 @@ antlr4-python3-runtime==4.9.3
     #   hydra-core
     #   omegaconf
 anyio==4.15.1
-    # via httpx
+    # via
+    #   httpx
+    #   starlette
 av==17.1.0
     # via openwam (pyproject.toml)
 certifi==2026.7.22
@@ -30,6 +36,7 @@ charset-normalizer==3.5.1
 click==8.5.0
     # via
     #   huggingface-hub
+    #   uvicorn
     #   wandb
 cryptography==50.0.1
     # via modelscope-hub
@@ -47,6 +54,8 @@ einops==0.8.2
     # via
     #   openwam (pyproject.toml)
     #   deepspeed
+fastapi==0.141.1
+    # via labtasker-server
 filelock==3.32.6
     # via
     #   diffusers
@@ -64,8 +73,12 @@ ftfy==6.3.1
     # via openwam (pyproject.toml)
 googleapis-common-protos==1.75.3
     # via opentelemetry-exporter-otlp-proto-http
+greenlet==3.5.6
+    # via sqlalchemy
 h11==0.16.0
-    # via httpcore
+    # via
+    #   httpcore
+    #   uvicorn
 h5py==3.16.0
     # via openwam (pyproject.toml)
 hf-xet==1.6.0
@@ -78,6 +91,7 @@ httpx==0.28.1
     # via
     #   diffusers
     #   huggingface-hub
+    #   labtasker-client
 huggingface-hub==1.30.0
     # via
     #   accelerate
@@ -104,10 +118,20 @@ iniconfig==2.3.0
     # via pytest
 jinja2==3.1.6
     # via torch
+labtasker==2.6.0
+    # via openwam (pyproject.toml)
+labtasker-client==2.6.0
+    # via labtasker
+labtasker-server==2.6.0
+    # via labtasker
+mako==1.4.1
+    # via alembic
 markdown-it-py==4.2.0
     # via rich
 markupsafe==3.0.3
-    # via jinja2
+    # via
+    #   jinja2
+    #   mako
 mdurl==0.1.2
     # via markdown-it-py
 modelscope==1.40.0
@@ -212,6 +236,7 @@ packaging==26.3
     #   deepspeed
     #   huggingface-hub
     #   hydra-core
+    #   labtasker-client
     #   modelscope
     #   pytest
     #   transformers
@@ -255,6 +280,9 @@ pycparser==3.0
 pydantic==2.13.5
     # via
     #   deepspeed
+    #   fastapi
+    #   labtasker-client
+    #   labtasker-server
     #   wandb
 pydantic-core==2.46.5
     # via pydantic
@@ -314,6 +342,12 @@ shellingham==1.5.4
     # via typer
 six==1.17.0
     # via python-dateutil
+sqlalchemy==2.0.54
+    # via
+    #   alembic
+    #   labtasker-server
+starlette==1.6.0
+    # via fastapi
 sympy==1.14.0
     # via torch
 timm==1.0.29
@@ -355,10 +389,15 @@ triton==3.3.1
     #   -c docker/constraints-cu128.txt
     #   torch
 typer==0.27.2
-    # via transformers
+    # via
+    #   labtasker-client
+    #   labtasker-server
+    #   transformers
 typing-extensions==4.16.0
     # via
+    #   alembic
     #   anyio
+    #   fastapi
     #   huggingface-hub
     #   opentelemetry-api
     #   opentelemetry-exporter-otlp-proto-http
@@ -366,11 +405,15 @@ typing-extensions==4.16.0
     #   opentelemetry-semantic-conventions
     #   pydantic
     #   pydantic-core
+    #   sqlalchemy
+    #   starlette
     #   torch
     #   typing-inspection
     #   wandb
 typing-inspection==0.4.4
-    # via pydantic
+    # via
+    #   fastapi
+    #   pydantic
 urllib3==2.7.0
     # via
     #   modelscope
@@ -378,6 +421,8 @@ urllib3==2.7.0
     #   requests
 uv==0.11.33
     # via -r docker/requirements.in
+uvicorn==0.53.0
+    # via labtasker-server
 virtualenv==21.7.9
     # via pre-commit
 wandb==0.30.0

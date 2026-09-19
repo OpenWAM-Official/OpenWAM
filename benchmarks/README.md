@@ -18,6 +18,11 @@ Bundled clients:
 - [VLABench](vlabench/README.md)
 - [EBench](ebench/README.md)
 
+Native Labtasker evaluation workflows:
+
+- [RoboTwin](robotwin/LABTASKER.md)
+- [LIBERO](libero/LABTASKER.md)
+
 RoboDojo trains through OpenWAM but evaluates through the external
 [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) repository — see
 [robodojo/README.md](robodojo/README.md).
