@@ -320,17 +320,18 @@ def find_latest_accel_state(run_dir: str) -> str | None:
 def compute_resume_position(global_step: int, batches_per_epoch: int, grad_accum: int) -> tuple[int, int, int]:
     """Map a resumed ``global_step`` to ``(start_epoch, skip_first_batches, aligned_global_step)``.
 
-    ``skip`` is floored to a grad_accum boundary so the first optimizer step after
-    resume sees a full accumulation cycle; ``aligned_global_step`` pulls ``global_step``
-    back to that same boundary so the floored-off batches are not re-trained and the
-    per-step seed (keyed on global_step) stays matched. No-op at grad_accum=1.
+    Resume continues from the exact checkpoint position: ``skip`` is the number of
+    batches already consumed in the epoch and ``aligned_global_step`` equals
+    ``global_step``. Accelerate's ``load_state`` restores the gradient-accumulation
+    counter, so a mid-accumulation resume keeps accumulating from where it left off;
+    flooring ``skip`` to a grad_accum boundary would re-feed already-consumed batches
+    and shift ``aligned_global_step`` (and the per-step seed keyed on it). ``grad_accum``
+    is accepted for signature stability and is a no-op.
     """
     batches_per_epoch = max(batches_per_epoch, 1)
     start_epoch = global_step // batches_per_epoch
     skip = global_step % batches_per_epoch
-    if grad_accum > 1 and skip % grad_accum != 0:
-        skip = (skip // grad_accum) * grad_accum
-    aligned_global_step = start_epoch * batches_per_epoch + skip
+    aligned_global_step = global_step
     return start_epoch, skip, aligned_global_step
 
 

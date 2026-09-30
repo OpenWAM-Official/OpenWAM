@@ -68,7 +68,7 @@ def test_find_latest_accel_state_none_when_empty(tmp_path):
     assert find_latest_accel_state(str(tmp_path)) is None
 
 
-# --- compute_resume_position (grad_accum alignment / off-by fix) ---
+# --- compute_resume_position (exact resume position / grad_accum is a no-op) ---
 
 
 def test_resume_position_grad_accum_1_is_identity():
@@ -76,14 +76,19 @@ def test_resume_position_grad_accum_1_is_identity():
     assert compute_resume_position(25, 10, 1) == (2, 5, 25)
 
 
-def test_resume_position_floors_skip_and_pulls_back_global_step():
-    # gs=10, bpe=100, grad_accum=4: skip 10 -> 8, aligned 10 -> 8 (no re-train, step matched).
-    assert compute_resume_position(10, 100, 4) == (0, 8, 8)
+def test_resume_position_keeps_exact_step_mid_accumulation():
+    # gs=10, bpe=100, grad_accum=4: skip is the exact consumed count, aligned == gs.
+    assert compute_resume_position(10, 100, 4) == (0, 10, 10)
 
 
-def test_resume_position_alignment_across_epoch():
-    # gs=16, bpe=10, grad_accum=4: start=1, skip 6 -> 4, aligned = 1*10 + 4 = 14.
-    assert compute_resume_position(16, 10, 4) == (1, 4, 14)
+def test_resume_position_exact_across_epoch():
+    # gs=16, bpe=10, grad_accum=4: start=1, skip 6 (batches 10-15 consumed), aligned = 16.
+    assert compute_resume_position(16, 10, 4) == (1, 6, 16)
+
+
+def test_resume_position_mid_accumulation_precise():
+    # gs=12, bpe=10, grad_accum=4: epoch-1 batches 0-1 consumed, resume at 12 (not floored to 10).
+    assert compute_resume_position(12, 10, 4) == (1, 2, 12)
 
 
 def test_resume_position_already_aligned_unchanged():

@@ -536,9 +536,8 @@ class OpenWAMTrainer:
             logger.info("[resume] loading Accelerate state from %s", resume_state_dir)
         meta = load_full_state(self.accelerator, resume_state_dir)
         global_step = int(meta.get("global_step", 0))
-        # Align global_step to the grad_accum boundary skip was floored to, then derive
-        # opt_step from it — otherwise floored-off batches re-train and per-step seeds
-        # (keyed on global_step) drift. No-op at grad_accum=1.
+        # compute_resume_position keeps global_step exact (mid-accumulation included);
+        # derive opt_step from it so the LR schedule resumes where it actually was.
         start_epoch, skip, global_step = compute_resume_position(global_step, len(dataloader), grad_accum)
         opt_step = global_step // grad_accum
         if is_main:
