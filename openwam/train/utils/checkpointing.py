@@ -320,18 +320,44 @@ def find_latest_accel_state(run_dir: str) -> str | None:
 def compute_resume_position(global_step: int, batches_per_epoch: int, grad_accum: int) -> tuple[int, int, int]:
     """Map a resumed ``global_step`` to ``(start_epoch, skip_first_batches, aligned_global_step)``.
 
-    Resume continues from the exact checkpoint position: ``skip`` is the number of
-    batches already consumed in the epoch and ``aligned_global_step`` equals
-    ``global_step``. Accelerate's ``load_state`` restores the gradient-accumulation
-    counter, so a mid-accumulation resume keeps accumulating from where it left off;
-    flooring ``skip`` to a grad_accum boundary would re-feed already-consumed batches
-    and shift ``aligned_global_step`` (and the per-step seed keyed on it). ``grad_accum``
-    is accepted for signature stability and is a no-op.
+    Resumable checkpoints are only exact at real optimizer/sync boundaries. The
+    full-state snapshot persists the model, optimizer, and the Accelerate
+    step/accumulation counter, but *not* the pending micro-batch gradients of an
+    in-flight accumulation cycle: the training loop saves after every backward
+    whenever ``global_step % save_steps == 0``, without requiring
+    ``accelerator.sync_gradients``. Resuming a mid-cycle checkpoint exactly would
+    skip the micro-batches whose gradients were already accumulated but never
+    applied, so the next optimizer step would see only the tail micro-batch (the
+    first parameter drifts in the opposite direction on a deterministic model).
+    Mid-cycle resumes are therefore degraded to the last global sync boundary:
+    ``aligned_global_step`` floors to the preceding ``grad_accum`` boundary and
+    ``(start_epoch, skip)`` are re-derived from it, and a warning is logged.
+    Boundary-aligned checkpoints (``global_step % grad_accum == 0``) resume exactly.
+
+    This assumes the loop syncs on ``global_step % grad_accum == 0`` with no
+    epoch-end flush — true for ``OpenWAMTrainer``, where epochs roll over without
+    forcing an optimizer step, so ``global_step`` alone determines the sync
+    phase. If an epoch-end flush is ever added, this check must account for it.
+    ``grad_accum=1`` is unchanged (every step is a boundary).
     """
     batches_per_epoch = max(batches_per_epoch, 1)
-    start_epoch = global_step // batches_per_epoch
-    skip = global_step % batches_per_epoch
     aligned_global_step = global_step
+    if grad_accum > 1 and aligned_global_step % grad_accum != 0:
+        aligned_global_step = (global_step // grad_accum) * grad_accum
+        start_epoch = aligned_global_step // batches_per_epoch
+        skip = aligned_global_step % batches_per_epoch
+        logger.warning(
+            "Checkpoint at global_step=%d is mid-accumulation; the full state does not "
+            "persist pending micro-batch gradients, so resuming exactly would corrupt "
+            "the next optimizer step. Degraded to the last sync boundary at "
+            "global_step=%d (skipping %d batches in the epoch).",
+            global_step,
+            aligned_global_step,
+            skip,
+        )
+        return start_epoch, skip, aligned_global_step
+    start_epoch = aligned_global_step // batches_per_epoch
+    skip = aligned_global_step % batches_per_epoch
     return start_epoch, skip, aligned_global_step
 
 

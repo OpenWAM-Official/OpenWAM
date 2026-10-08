@@ -68,32 +68,52 @@ def test_find_latest_accel_state_none_when_empty(tmp_path):
     assert find_latest_accel_state(str(tmp_path)) is None
 
 
-# --- compute_resume_position (exact resume position / grad_accum is a no-op) ---
+# --- compute_resume_position (boundary-aligned resume; mid-cycle degrades) ---
 
 
 def test_resume_position_grad_accum_1_is_identity():
-    # grad_accum=1: aligned == global_step always (zero regression vs. pre-fix behaviour).
+    # grad_accum=1: every step is a sync boundary, aligned == global_step always.
     assert compute_resume_position(25, 10, 1) == (2, 5, 25)
 
 
-def test_resume_position_keeps_exact_step_mid_accumulation():
-    # gs=10, bpe=100, grad_accum=4: skip is the exact consumed count, aligned == gs.
-    assert compute_resume_position(10, 100, 4) == (0, 10, 10)
+def test_resume_position_mid_cycle_degrades_to_last_sync_boundary():
+    # gs=10, bpe=100, grad_accum=4: 10 % 4 == 2 (mid-cycle). The full state does not
+    # persist pending micro-batch gradients, so resume degrades to the last global
+    # sync boundary (gs=8) instead of resuming exactly.
+    assert compute_resume_position(10, 100, 4) == (0, 8, 8)
 
 
-def test_resume_position_exact_across_epoch():
-    # gs=16, bpe=10, grad_accum=4: start=1, skip 6 (batches 10-15 consumed), aligned = 16.
+def test_resume_position_boundary_across_epoch_is_exact():
+    # gs=16, bpe=10, grad_accum=4: 16 % 4 == 0 (real sync boundary), start=1,
+    # skip 6 (batches 10-15 consumed), resumes exactly at 16.
     assert compute_resume_position(16, 10, 4) == (1, 6, 16)
 
 
-def test_resume_position_mid_accumulation_precise():
-    # gs=12, bpe=10, grad_accum=4: epoch-1 batches 0-1 consumed, resume at 12 (not floored to 10).
+def test_resume_position_global_boundary_inside_epoch_is_not_floored_by_skip():
+    # gs=12, bpe=10, grad_accum=4: 12 % 4 == 0 — a global sync boundary even though
+    # the in-epoch skip (2) is not a multiple of grad_accum. The check must use the
+    # global step, so this resumes exactly at 12.
     assert compute_resume_position(12, 10, 4) == (1, 2, 12)
+
+
+def test_resume_position_mid_cycle_across_epoch_degrades_globally():
+    # gs=13, bpe=10, grad_accum=4: 13 % 4 == 1 (mid-cycle) -> degrade to the last
+    # global boundary 12, re-deriving epoch/skip from it (not flooring in-epoch
+    # skip 3 -> 0, which would lose the boundary at 12).
+    assert compute_resume_position(13, 10, 4) == (1, 2, 12)
 
 
 def test_resume_position_already_aligned_unchanged():
     # gs=12, bpe=100, grad_accum=4: skip 12 already a multiple of 4 -> unchanged.
     assert compute_resume_position(12, 100, 4) == (0, 12, 12)
+
+
+def test_resume_position_mid_cycle_logs_degrade_warning(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="openwam.train.utils.checkpointing"):
+        compute_resume_position(10, 100, 4)
+    assert any("mid-accumulation" in r.message and "Degraded" in r.message for r in caplog.records)
 
 
 # --- finalize_keep_weights_only ---
