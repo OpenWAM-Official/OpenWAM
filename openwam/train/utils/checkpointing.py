@@ -320,45 +320,49 @@ def find_latest_accel_state(run_dir: str) -> str | None:
 def compute_resume_position(global_step: int, batches_per_epoch: int, grad_accum: int) -> tuple[int, int, int]:
     """Map a resumed ``global_step`` to ``(start_epoch, skip_first_batches, aligned_global_step)``.
 
-    Resumable checkpoints are only exact at real optimizer/sync boundaries. The
+    Only checkpoints taken at a real optimizer/sync boundary are resumable. The
     full-state snapshot persists the model, optimizer, and the Accelerate
     step/accumulation counter, but *not* the pending micro-batch gradients of an
     in-flight accumulation cycle: the training loop saves after every backward
     whenever ``global_step % save_steps == 0``, without requiring
     ``accelerator.sync_gradients``. Resuming a mid-cycle checkpoint exactly would
     skip the micro-batches whose gradients were already accumulated but never
-    applied, so the next optimizer step would see only the tail micro-batch (the
-    first parameter drifts in the opposite direction on a deterministic model).
-    Mid-cycle resumes are therefore degraded to the last global sync boundary:
-    ``aligned_global_step`` floors to the preceding ``grad_accum`` boundary and
-    ``(start_epoch, skip)`` are re-derived from it, and a warning is logged.
-    Boundary-aligned checkpoints (``global_step % grad_accum == 0``) resume exactly.
+    applied, so the next optimizer step would see only the tail micro-batch.
 
-    This assumes the loop syncs on ``global_step % grad_accum == 0`` with no
-    epoch-end flush — true for ``OpenWAMTrainer``, where epochs roll over without
-    forcing an optimizer step, so ``global_step`` alone determines the sync
-    phase. If an epoch-end flush is ever added, this check must account for it.
-    ``grad_accum=1`` is unchanged (every step is a boundary).
+    A checkpoint at ``global_step`` is a sync boundary iff the 1-indexed position
+    within its epoch hits the accumulation quota or the epoch end — the prepared
+    dataloader runs with Accelerate's default ``sync_with_dataloader=True``, so
+    the epoch end flushes and resets the accumulation counter even when
+    ``batches_per_epoch % grad_accum != 0``::
+
+        local = ((global_step - 1) % batches_per_epoch) + 1
+        is_sync_boundary = local % grad_accum == 0 or local == batches_per_epoch
+
+    With ``batches_per_epoch=10, grad_accum=4`` the sync boundaries are exactly
+    {4, 8, 10, 14, 18, 20, ...} (measured on real ZeRO-1/ZeRO-2 runs).
+
+    Mid-cycle checkpoints raise ``ValueError``: degrading them to an earlier
+    boundary cannot restore a consistent accumulation phase (the loaded
+    ``Accelerator.step`` still counts the consumed micro-batches), so the only
+    safe resume is from the nearest boundary checkpoint (checkpoint retention
+    keeps several). ``grad_accum=1`` makes every step a boundary.
+
+    Raises:
+        ValueError: If the checkpoint was saved mid-accumulation-cycle.
     """
     batches_per_epoch = max(batches_per_epoch, 1)
-    aligned_global_step = global_step
-    if grad_accum > 1 and aligned_global_step % grad_accum != 0:
-        aligned_global_step = (global_step // grad_accum) * grad_accum
-        start_epoch = aligned_global_step // batches_per_epoch
-        skip = aligned_global_step % batches_per_epoch
-        logger.warning(
-            "Checkpoint at global_step=%d is mid-accumulation; the full state does not "
-            "persist pending micro-batch gradients, so resuming exactly would corrupt "
-            "the next optimizer step. Degraded to the last sync boundary at "
-            "global_step=%d (skipping %d batches in the epoch).",
-            global_step,
-            aligned_global_step,
-            skip,
+    local_step = ((global_step - 1) % batches_per_epoch) + 1
+    if grad_accum > 1 and local_step % grad_accum != 0 and local_step != batches_per_epoch:
+        raise ValueError(
+            f"Checkpoint at global_step={global_step} was saved mid-accumulation-cycle "
+            f"(position {local_step}/{batches_per_epoch} in the epoch, sync boundaries are "
+            f"every {grad_accum} batches or at the epoch end). Pending micro-batch gradients "
+            f"are not persisted in the full state, so this checkpoint cannot be resumed "
+            f"exactly. Use the nearest checkpoint at a sync boundary instead."
         )
-        return start_epoch, skip, aligned_global_step
-    start_epoch = aligned_global_step // batches_per_epoch
-    skip = aligned_global_step % batches_per_epoch
-    return start_epoch, skip, aligned_global_step
+    start_epoch = global_step // batches_per_epoch
+    skip = global_step % batches_per_epoch
+    return start_epoch, skip, global_step
 
 
 # --- Retention / finalize (prune) ---

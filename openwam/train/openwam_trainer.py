@@ -536,10 +536,10 @@ class OpenWAMTrainer:
             logger.info("[resume] loading Accelerate state from %s", resume_state_dir)
         meta = load_full_state(self.accelerator, resume_state_dir)
         global_step = int(meta.get("global_step", 0))
-        # compute_resume_position floors mid-accumulation checkpoints back to the last
-        # sync boundary (the full state does not persist pending micro-batch gradients,
-        # so an exact mid-cycle resume would corrupt the next optimizer step); aligned
-        # boundary checkpoints resume exact. opt_step derives from the aligned step.
+        # compute_resume_position rejects mid-accumulation checkpoints (the full state
+        # does not persist pending micro-batch gradients, and no rewind can restore a
+        # consistent accumulation phase once load_state has set the Accelerator step);
+        # sync-boundary checkpoints resume exactly. opt_step derives from that step.
         start_epoch, skip, global_step = compute_resume_position(global_step, len(dataloader), grad_accum)
         opt_step = global_step // grad_accum
         if is_main:
