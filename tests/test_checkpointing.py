@@ -11,8 +11,10 @@ import pytest
 from openwam.train.utils.checkpointing import (
     compute_resume_position,
     finalize_keep_weights_only,
+    find_accel_state_candidates,
     find_latest_accel_state,
     find_latest_weights,
+    is_sync_boundary,
     load_full_state,
     manage_checkpoints,
     save_full_state,
@@ -350,3 +352,69 @@ def test_setup_output_dir_verifies_stats_before_reusing_resume_run(tmp_path, mon
     assert output_path == str(run_dir)
     assert resume_state_dir == str(state_dir)
     assert calls == [(str(run_dir), trainer.dataset)]
+
+
+# --- save -> prune -> discovery -> resume cross-link (bpe=10, ga=4) ---
+
+
+def _make_resume_state(root: Path, step: int, global_step: int) -> Path:
+    d = root / f"accel_state_step_{step}"
+    d.mkdir(exist_ok=True)
+    (d / "trainer_state.json").write_text(f'{{"global_step": {global_step}}}')
+    return d
+
+
+def test_sync_boundary_set_matches_measured_runs():
+    # bpe=10, ga=4: measured sync boundaries on real ZeRO-1/ZeRO-2 runs.
+    boundaries = {4, 8, 10, 14, 18, 20}
+    for gs in range(1, 21):
+        assert is_sync_boundary(gs, 10, 4) == (gs in boundaries), gs
+
+
+def test_save_prune_resume_chain_keeps_last_k_one_recovers_boundary_state(tmp_path):
+    # Save side defers the resumable full state past mid-cycle steps, so with
+    # keep_last_k=1 the weights line at the mid-cycle step (12) prunes the older
+    # weights (8) while the boundary state (8) is the only state left and survives.
+    _make_resume_state(tmp_path, 8, global_step=8)
+    (tmp_path / "checkpoint_step_8.safetensors").write_text("x")
+    (tmp_path / "checkpoint_step_12.safetensors").write_text("x")
+    manage_checkpoints(str(tmp_path), keep_last_k=1)
+
+    assert (tmp_path / "checkpoint_step_12.safetensors").exists()
+    assert (tmp_path / "accel_state_step_8").is_dir()
+
+    candidates = find_accel_state_candidates(str(tmp_path))
+    chosen = next(
+        (state for step, state in candidates if _resume_allowed(step, 10, 4)),
+        None,
+    )
+    assert chosen is not None and chosen.endswith("accel_state_step_8")
+    start_epoch, skip, aligned = compute_resume_position(8, 10, 4)
+    assert (start_epoch, skip, aligned) == (0, 8, 8)
+
+
+def test_legacy_mid_cycle_state_falls_back_to_boundary_state(tmp_path):
+    # States written by older versions mid-accumulation-cycle sit in the run dir
+    # next to older boundary states: discovery returns both (newest first), the
+    # mid-cycle one is rejected by compute_resume_position, and the boundary
+    # state is resumed instead.
+    _make_resume_state(tmp_path, 8, global_step=8)
+    _make_resume_state(tmp_path, 12, global_step=12)
+    candidates = find_accel_state_candidates(str(tmp_path))
+    assert [step for step, _ in candidates] == [12, 8]
+
+    chosen = None
+    for step, state in candidates:
+        try:
+            compute_resume_position(step, 10, 4)
+        except ValueError:
+            continue
+        chosen = (step, state)
+        break
+    assert chosen is not None and chosen[0] == 8
+
+
+def _resume_allowed(step: int, bpe: int, ga: int) -> bool:
+    from openwam.train.utils.checkpointing import is_sync_boundary
+
+    return is_sync_boundary(step, bpe, ga)
