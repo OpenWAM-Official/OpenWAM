@@ -147,13 +147,19 @@ def judge_frames(rollout_dir: Path, env: SharpaWebXREnv, k: int = 24, max_steps:
     _, qpos = load_qpos(rollout_dir, max_steps)
     out = rollout_dir / "judge_frames"
     out.mkdir(exist_ok=True)
+    # COMPLETE is written last: a render killed mid-write (e.g. a watcher restart) is redone on the next call
+    # instead of being judged on the frames it got to. Verdicts on the old frames are dropped with them.
+    (out / "COMPLETE").unlink(missing_ok=True)
     for old in out.glob("*.jpg"):
         old.unlink()
+    for verdict in rollout_dir.glob("judge_*_r2.json"):
+        verdict.unlink()
     for t in sorted(set(np.linspace(0, len(qpos) - 1, k).round().astype(int).tolist())):
         env.sim.data.qpos[:] = qpos[t]
         mujoco.mj_forward(env.sim.model, env.sim.data)
         for v in VIEWS:
             imageio.imwrite(out / f"t{t * DT:07.2f}_{v}.jpg", env.render(v, IMAGE_HW), quality=90)
+    (out / "COMPLETE").touch()
     return len(qpos) - 1
 
 
@@ -248,7 +254,7 @@ def main():
         a.judge_frames = 24
     env_cache = {}
     for d in a.dirs:
-        need_frames = a.judge_frames and (a.force or not any((d / "judge_frames").glob("*.jpg")))
+        need_frames = a.judge_frames and (a.force or not (d / "judge_frames" / "COMPLETE").exists())
         need_signals = not a.frames_only and (a.force or not (d / "signals.json").exists())
         if not (need_frames or need_signals):
             continue

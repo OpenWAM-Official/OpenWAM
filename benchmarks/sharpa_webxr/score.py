@@ -77,6 +77,8 @@ def client() -> openai.OpenAI:
 def frames_r2(d: Path) -> list[tuple[float, str, str]]:
     """(t, head_b64, chest_b64) from judge_frames/t<sec>_<view>.jpg."""
     fd = d / "judge_frames"
+    if not (fd / "COMPLETE").exists():  # written last by postprocess.judge_frames; partial frames would hide the end
+        raise FileNotFoundError(f"{fd}: incomplete judge frames; run postprocess.py --frames-only {d}")
     ts = sorted({f.name.split("_")[0] for f in fd.glob("t*_ego_view.jpg")})
     if not ts:
         raise FileNotFoundError(f"{fd}: no judge frames; run postprocess.py --frames-only {d}")

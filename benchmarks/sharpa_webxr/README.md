@@ -18,6 +18,8 @@ sees the same initial states. Each rollout gets automatic stage signals, 16 keyf
 - **`policies/<model>_server.py` (one per model, in the training `.venv` on a GPU)** follows the
   `policies/common.py` contract. The server owns everything model-specific: image layout, state encoding,
   normalization, sampler and action decode. It returns absolute wrist poses plus hand joints in the ego-camera frame.
+  The full request/response spec is in [API.md](API.md). `policies/hold_server.py` is a no-model reference server
+  and template, and `check_server.py --port N` checks any server against the contract.
   Its `meta` endpoint publishes how the model is deployed upstream:
   - `execute_steps`: actions to run before replanning;
   - `obs_offsets`: past rows the model needs, e.g. LDA-1B's t−5;
@@ -131,6 +133,10 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python benchmarks/sharpa_webxr/check_policy_par
 .venv_webxr/bin/python benchmarks/sharpa_webxr/postprocess.py --frames-only .sharpa_sim_eval/<run>/<tag>/*/seed_*
 .venv_webxr/bin/python benchmarks/sharpa_webxr/score.py .sharpa_sim_eval/<run>/<tag> --model gpt-6-luna   # OPENAI_API_KEY or ~/.config/openai/key
 .venv_webxr/bin/python benchmarks/sharpa_webxr/judge.py .sharpa_sim_eval/<run>/<tag>/*/seed_*   # Claude judge, ANTHROPIC_API_KEY
+# check a policy server against the API before evaluating it (reference: policies/hold_server.py)
+.venv_webxr/bin/python benchmarks/sharpa_webxr/check_server.py --port 11600
+# per-category / per-task success (k/n) across checkpoints or models
+.venv_webxr/bin/python benchmarks/sharpa_webxr/task_breakdown.py xwam=<tag>/scores_gpt-6-luna_r2.json motus=... --tasks
 ```
 
 ## Results
