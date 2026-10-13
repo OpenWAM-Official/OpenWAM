@@ -107,3 +107,50 @@ full qpos trajectory. Judge frames, signals and videos are rendered offline from
 4. Check it: `.venv_webxr/bin/python benchmarks/sharpa_webxr/check_server.py --port 11600`.
 5. Evaluate: `RUN=<name> benchmarks/sharpa_webxr/run_suite.sh <tag> 11600 0 4 <workers>`, then judge with
    `postprocess.py --frames-only` + `score.py`. `watch_run.sh` automates this per checkpoint.
+
+## Eval watcher (`watch_ckpts.sh`)
+
+`watch_ckpts.sh` evaluates every checkpoint of a run as it lands. It needs only two model-side inputs: the server
+script and a command that lists checkpoints.
+
+```
+benchmarks/sharpa_webxr/watch_ckpts.sh --run <results name> \
+    --server <path/to/model_server.py> \
+    --list-ckpts "<command>" \
+    --done-file <run_dir>/TRAINING_DONE      # or --once to evaluate what exists and stop
+    [--seeds 0-4] [--final-seeds 5-9] [--stride 10000] [--only-steps 50000,100000] [--port 11600]
+```
+
+The list command prints one line per **complete** checkpoint, in any order. Repeated steps keep their first
+line:
+
+```
+<global_step> <ckpt_path> [extra server args...]
+```
+
+Deciding "complete" is the model side's job, because only the training code knows its save order. Use a file the
+trainer writes last, or, failing that, an mtime settle. Examples from the Sharpa b64 runs (these live with each
+model's training code, not here):
+
+```
+# trainer writes meta.json last in each step dir
+for d in $OUT/checkpoints/step_*; do [ -f $d/meta.json ] && echo "${d##*step_} $d --stats $OUT/norm_stats.json"; done
+
+# single-file EMA checkpoints saved with .tmp + os.replace (atomic): existence is enough
+for f in $OUT/ema_iter*.pt; do n=$(basename $f .pt); echo "$((10#${n#ema_iter})) $f --weights ema"; done
+
+# multi-phase run: global step = phase offset + phase step
+for d in $OUT/p2/run/step_*; do echo "$((12000 + 10#${d##*step_})) $d/model.safetensors --config $OUT/p2.yaml"; done
+```
+
+Pass the run's own stats/config through the extra args, so the server never falls back to a default.
+
+Behaviour:
+- **Order.** Oldest step first, one server at a time. Each checkpoint gets `--seeds`; the last one also gets
+  `--final-seeds` after `--done-file` appears.
+- **Retries.** A failed suite is retried up to `MAX_ATTEMPTS` (default 2), then marked `FAILED_<seeds>`.
+- **Background work.** A renderer writes videos for finished rollouts (`VIDEO=1`), and a judge rates each finished
+  tag (`JUDGE=1`).
+- **Restarts.** Everything is resumable from on-disk markers. For a capped container (e.g. Modal's 24 h), give
+  `--stop-file`: the watcher exits 3 between evaluations once the file exists, and the supervisor starts it again
+  with the same command. `--sync-cmd` runs before each scan (e.g. to reload a network volume).

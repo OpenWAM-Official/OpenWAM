@@ -37,4 +37,8 @@ class HoldPolicy(BasePolicy):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=11600)
-    serve(HoldPolicy(), p.parse_args().port)
+    p.add_argument("--ckpt", default="none", help="ignored (no weights); accepted so watchers can start it like any server")
+    a = p.parse_args()
+    pol = HoldPolicy()
+    pol.ckpt = a.ckpt
+    serve(pol, a.port)

@@ -20,6 +20,9 @@ sees the same initial states. Each rollout gets automatic stage signals, 16 keyf
   normalization, sampler and action decode. It returns absolute wrist poses plus hand joints in the ego-camera frame.
   The full request/response spec is in [API.md](API.md). `policies/hold_server.py` is a no-model reference server
   and template, and `check_server.py --port N` checks any server against the contract.
+- **`watch_ckpts.sh` (generic eval watcher):** evaluates every checkpoint of any model's run as it lands, given the
+  model's server script and a checkpoint-listing command (API.md, "Eval watcher"). `watch_run.sh` is the original
+  GWP-specific watcher (EMA + raw pairs, best_val).
   Its `meta` endpoint publishes how the model is deployed upstream:
   - `execute_steps`: actions to run before replanning;
   - `obs_offsets`: past rows the model needs, e.g. LDA-1B's t−5;
