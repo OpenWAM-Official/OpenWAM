@@ -1,0 +1,1873 @@
+{
+ "00001_GigaHands_p032-sandwich_028_seg000": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "Add the sandwich to the pan on the stove",
+  "task_object": "world_butter",
+  "target": "world_pan_01",
+  "no_fall": [
+   "world_butter",
+   "world_pan_01"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_butter"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_butter"
+   },
+   {
+    "name": "place",
+    "check": "place_in",
+    "obj": "world_butter",
+    "target": "world_pan_01",
+    "target_box": [
+     [
+      -0.09,
+      -0.109,
+      -0.016
+     ],
+     [
+      0.09,
+      0.07,
+      0.022
+     ]
+    ],
+    "contact": "world_pan_01"
+   }
+  ],
+  "needs_judge": false
+ },
+ "00019_OakInk-v2_scene_01__O001_seq__7415df221fded77cf598__2023-04-": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "stack the bread on the stand to another bread",
+  "task_object": "world_bread_02",
+  "target": "world_bread_03",
+  "no_fall": [
+   "world_bread_02",
+   "world_bread_03"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_bread_02"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_bread_02"
+   },
+   {
+    "name": "place",
+    "check": "place_in",
+    "obj": "world_bread_02",
+    "target": "world_bread_03",
+    "contact": "world_bread_03",
+    "xy_margin_m": -0.01
+   }
+  ],
+  "needs_judge": false
+ },
+ "00286_OakInk-v2_scene_01__A003_seq__263ad4d9bbcceec34ac5__2023-04-": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "Place the bread inside the plate.",
+  "task_object": "world_bread_03",
+  "target": "world_plate",
+  "no_fall": [
+   "world_bread_03",
+   "world_plate"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_bread_03"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_bread_03"
+   },
+   {
+    "name": "place",
+    "check": "place_in",
+    "obj": "world_bread_03",
+    "target": "world_plate",
+    "contact": "world_plate"
+   }
+  ],
+  "needs_judge": false
+ },
+ "00381_OakInk-v2_scene_02__A001_seq__a3323f998334c09c8f2f__2023-04-": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "Take the flower outside the box.",
+  "task_object": "world_flower_01",
+  "target": null,
+  "no_fall": [
+   "world_flower_01"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_flower_01"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_flower_01"
+   },
+   {
+    "name": "out_of_box",
+    "check": "move_out",
+    "obj": "world_flower_01",
+    "min_disp_m": 0.12,
+    "release": false,
+    "rest": false,
+    "final": true
+   }
+  ],
+  "needs_judge": false
+ },
+ "00391_OakInk-v2_scene_01__A001_seq__ac79435402cf22f24550__2023-04-": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "Take the plate outside the microwave oven.",
+  "task_object": "world_plate_04",
+  "target": null,
+  "no_fall": [
+   "world_plate_04"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_plate_04"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_plate_04"
+   },
+   {
+    "name": "out_of_oven",
+    "check": "move_out",
+    "obj": "world_plate_04",
+    "min_disp_m": 0.15,
+    "release": false,
+    "rest": false,
+    "final": true
+   }
+  ],
+  "needs_judge": false
+ },
+ "00457_OakInk-v2_scene_03__A001_seq__1be0ede087e0ca11e442__2023-04-": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "Place the test tube on the rack.",
+  "task_object": "world_test_tube_01",
+  "target": "world_rack",
+  "no_fall": [
+   "world_test_tube_01",
+   "world_rack"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_test_tube_01"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_test_tube_01"
+   },
+   {
+    "name": "place",
+    "check": "place_in",
+    "obj": "world_test_tube_01",
+    "target": "world_rack",
+    "z_above_m": 0.12,
+    "contact": "world_rack"
+   }
+  ],
+  "needs_judge": false
+ },
+ "00636_GigaHands_p041-tea_001_seg001": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "Take the lid off the teapot and put it on the board.",
+  "task_object": "world_teapot_lid",
+  "target": null,
+  "no_fall": [
+   "world_teapot_lid"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_teapot_lid"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_teapot_lid"
+   },
+   {
+    "name": "lid_off_and_down",
+    "check": "move_out",
+    "obj": "world_teapot_lid",
+    "min_disp_m": 0.1
+   }
+  ],
+  "needs_judge": false
+ },
+ "00646_GigaHands_p005-knitting-tablet_113_seg000": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "Take out the phone from the case",
+  "task_object": "world_phone_01",
+  "target": "world_phone_case",
+  "no_fall": [
+   "world_phone_01",
+   "world_phone_case"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_phone_01"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_phone_01"
+   },
+   {
+    "name": "out_of_case",
+    "check": "move_out",
+    "obj": "world_phone_01",
+    "target": "world_phone_case",
+    "min_disp_m": 0.08,
+    "release": false,
+    "rest": false,
+    "final": true
+   }
+  ],
+  "needs_judge": false
+ },
+ "00807_GigaHands_p034-sandwich_050_seg000": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "put cooked egg in the pan",
+  "task_object": "world_egg",
+  "target": "world_pan_01",
+  "no_fall": [
+   "world_egg",
+   "world_pan_01"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_egg"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_egg"
+   },
+   {
+    "name": "place",
+    "check": "place_in",
+    "obj": "world_egg",
+    "target": "world_pan_01",
+    "target_box": [
+     [
+      -0.09,
+      -0.109,
+      -0.016
+     ],
+     [
+      0.09,
+      0.07,
+      0.022
+     ]
+    ],
+    "contact": "world_pan_01"
+   }
+  ],
+  "needs_judge": false
+ },
+ "00921_GigaHands_p017-sandwich_025_seg000": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "Add the sliced butter to the pan",
+  "task_object": "world_butter",
+  "target": "world_pan",
+  "no_fall": [
+   "world_butter",
+   "world_pan"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_butter"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_butter"
+   },
+   {
+    "name": "place",
+    "check": "place_in",
+    "obj": "world_butter",
+    "target": "world_pan",
+    "xy_margin_m": 0.03,
+    "contact": "world_pan"
+   }
+  ],
+  "needs_judge": false
+ },
+ "01012_GigaHands_p027-makeup_024_seg002": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "Put the brush into the box",
+  "task_object": "world_eyeshadow_brush",
+  "target": "world_eyeshadow_box",
+  "no_fall": [
+   "world_eyeshadow_brush",
+   "world_eyeshadow_box"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_eyeshadow_brush"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_eyeshadow_brush"
+   },
+   {
+    "name": "place",
+    "check": "place_in",
+    "obj": "world_eyeshadow_brush",
+    "target": "world_eyeshadow_box",
+    "z_above_m": 0.04,
+    "contact": "world_eyeshadow_box"
+   }
+  ],
+  "needs_judge": false
+ },
+ "01083_GigaHands_p011-monopoly_057_seg000": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "Grip a fake coin and put into of the game box",
+  "task_object": "world_coin",
+  "target": "world_game_box",
+  "no_fall": [
+   "world_coin",
+   "world_game_box"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_coin"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_coin"
+   },
+   {
+    "name": "place",
+    "check": "place_in",
+    "obj": "world_coin",
+    "target": "world_game_box",
+    "z_above_m": 0.03,
+    "contact": "world_game_box"
+   }
+  ],
+  "needs_judge": false
+ },
+ "01085_GigaHands_p034-monopoly_059_seg000": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "Put coin into the game box",
+  "task_object": "world_coin",
+  "target": "world_game_box",
+  "no_fall": [
+   "world_coin",
+   "world_game_box"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_coin"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_coin"
+   },
+   {
+    "name": "place",
+    "check": "place_in",
+    "obj": "world_coin",
+    "target": "world_game_box",
+    "z_above_m": 0.03,
+    "contact": "world_game_box"
+   }
+  ],
+  "needs_judge": false
+ },
+ "01089_GigaHands_p005-sandwich-salad-baking-monoply-boxing_182_seg0": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "Grab the dice and put it on the game board",
+  "task_object": "world_dice",
+  "target": "world_game_board",
+  "no_fall": [
+   "world_dice",
+   "world_game_board"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_dice"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_dice"
+   },
+   {
+    "name": "place",
+    "check": "place_in",
+    "obj": "world_dice",
+    "target": "world_game_board",
+    "contact": "world_game_board"
+   }
+  ],
+  "needs_judge": false
+ },
+ "01242_GigaHands_p005-sandwich-salad-baking-monoply-boxing_077_seg0": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "Transfer the banana pieces into the salad bowl",
+  "task_object": "world_bowl",
+  "target": null,
+  "no_fall": [
+   "world_bowl"
+  ],
+  "stages": [
+   {
+    "name": "complete",
+    "check": "judge",
+    "question": "banana pieces transferred into the salad bowl (no banana bodies in the sim)"
+   }
+  ],
+  "needs_judge": true
+ },
+ "01440_GigaHands_p022-plant-noodle_007_seg000": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "Put the shovel into the pot",
+  "task_object": "world_shovel",
+  "target": "world_pot",
+  "no_fall": [
+   "world_shovel",
+   "world_pot"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_shovel"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_shovel"
+   },
+   {
+    "name": "place",
+    "check": "place_in",
+    "obj": "world_shovel",
+    "target": "world_pot",
+    "z_above_m": 0.12,
+    "contact": "world_pot"
+   }
+  ],
+  "needs_judge": false
+ },
+ "self-gen-scene-20260924-191346-jiangwei": {
+  "version": 1,
+  "category": "pick and place",
+  "task": "put the cup on the cup rack",
+  "task_object": "synthesis_cup_cup_005_5e43862263a34727",
+  "target": null,
+  "no_fall": [
+   "synthesis_cup_cup_005_5e43862263a34727"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "synthesis_cup_cup_005_5e43862263a34727"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "synthesis_cup_cup_005_5e43862263a34727"
+   },
+   {
+    "name": "complete",
+    "check": "judge",
+    "question": "cup placed on the cup rack (rack not simulated)"
+   }
+  ],
+  "needs_judge": true
+ },
+ "00005_GigaHands_p005-laptop_007_seg000": {
+  "version": 1,
+  "category": "articulated open/close",
+  "task": "Adjust the angle of the laptop screen for better viewing",
+  "task_object": "world_laptop_03",
+  "target": null,
+  "no_fall": [
+   "world_laptop_03"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_laptop_03"
+   },
+   {
+    "name": "adjusted",
+    "check": "joint_goal",
+    "obj": "world_laptop_03",
+    "delta": -0.15,
+    "min": -0.6,
+    "max": 0.12,
+    "release": true,
+    "hold_s": 1.0,
+    "final": true
+   }
+  ],
+  "needs_judge": false
+ },
+ "00079_OakInk-v2_scene_01__A001_seq__ac79435402cf22f24550__2023-04-": {
+  "version": 1,
+  "category": "articulated open/close",
+  "task": "Close the gate of the microwave oven.",
+  "task_object": "world_gate_01",
+  "target": null,
+  "no_fall": [
+   "world_gate_01"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_gate_01"
+   },
+   {
+    "name": "closed",
+    "check": "joint_goal",
+    "obj": "world_gate_01",
+    "joint": "articraft_rec_microwave_oven_0002_joints_root_to_door",
+    "max": 0.06,
+    "hold_s": 0.5,
+    "final": true
+   }
+  ],
+  "needs_judge": false
+ },
+ "00082_GigaHands_p007-laptop_043_seg000": {
+  "version": 1,
+  "category": "articulated open/close",
+  "task": "Close the laptop lid gently",
+  "task_object": "world_laptop_03",
+  "target": null,
+  "no_fall": [
+   "world_laptop_03"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_laptop_03"
+   },
+   {
+    "name": "closed",
+    "check": "joint_goal",
+    "obj": "world_laptop_03",
+    "min": 1.85,
+    "hold_s": 0.5,
+    "max_speed": 4.6,
+    "final": true
+   }
+  ],
+  "needs_judge": false
+ },
+ "00337_GigaHands_p007-laptop_005_seg000": {
+  "version": 1,
+  "category": "articulated open/close",
+  "task": "Flip open the laptop screen",
+  "task_object": "world_laptop_03",
+  "target": null,
+  "no_fall": [
+   "world_laptop_03"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_laptop_03"
+   },
+   {
+    "name": "opened",
+    "check": "joint_goal",
+    "obj": "world_laptop_03",
+    "max": 1.25,
+    "hold_s": 1.0,
+    "final": true
+   }
+  ],
+  "needs_judge": false
+ },
+ "00626_OakInk-v2_scene_02__A001_seq__a2b162144bebd1c592b2__2023-04-": {
+  "version": 1,
+  "category": "articulated open/close",
+  "task": "Pull out the drawer.",
+  "task_object": "world_rec_desk_with_drawer_0005",
+  "target": null,
+  "no_fall": [
+   "world_rec_desk_with_drawer_0005"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_rec_desk_with_drawer_0005"
+   },
+   {
+    "name": "pulled_out",
+    "check": "joint_goal",
+    "obj": "world_rec_desk_with_drawer_0005",
+    "min": 0.08,
+    "hold_s": 0.5,
+    "final": true
+   }
+  ],
+  "needs_judge": false
+ },
+ "01000_GigaHands_p051-fastfood_053_seg000": {
+  "version": 1,
+  "category": "articulated open/close",
+  "task": "Open the box",
+  "task_object": "world_burger_box",
+  "target": null,
+  "no_fall": [
+   "world_burger_box"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_burger_box"
+   },
+   {
+    "name": "opened",
+    "check": "joint_goal",
+    "obj": "world_burger_box",
+    "delta": -0.9,
+    "hold_s": 0.5,
+    "final": true
+   }
+  ],
+  "needs_judge": false
+ },
+ "01018_GigaHands_p005-present_010_seg000": {
+  "version": 1,
+  "category": "articulated open/close",
+  "task": "Close the empty box, and rotate the box to face towards you",
+  "task_object": "world_box",
+  "target": null,
+  "no_fall": [
+   "world_box"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_box"
+   },
+   {
+    "name": "closed",
+    "check": "joint_goal",
+    "obj": "world_box",
+    "max": 0.15,
+    "hold_s": 0.3
+   },
+   {
+    "name": "faces_robot",
+    "check": "orientation",
+    "obj": "world_box",
+    "mode": "face",
+    "axis": [
+     1,
+     0,
+     0
+    ],
+    "toward": [
+     -0.035,
+     0.999
+    ],
+    "tol_deg": 15,
+    "keep_upright_deg": 30,
+    "hold_s": 0.5,
+    "final": true
+   }
+  ],
+  "needs_judge": false
+ },
+ "01747_GigaHands_p034-mindmap-boxing_064_seg000": {
+  "version": 1,
+  "category": "articulated open/close",
+  "task": "Open the pencil case",
+  "task_object": "world_pencil_case",
+  "target": null,
+  "no_fall": [
+   "world_pencil_case"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_pencil_case"
+   },
+   {
+    "name": "opened",
+    "check": "joint_goal",
+    "obj": "world_pencil_case",
+    "max": -1.0,
+    "hold_s": 0.5,
+    "final": true
+   }
+  ],
+  "needs_judge": false
+ },
+ "00023_OakInk-v2_scene_02__A001_seq__4330d8d30c1293560d96__2023-04-": {
+  "version": 1,
+  "category": "cap / lid",
+  "task": "Put on the box lid.",
+  "task_object": "world_lid_09",
+  "target": "world_box",
+  "no_fall": [
+   "world_lid_09",
+   "world_box"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_lid_09"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_lid_09"
+   },
+   {
+    "name": "lid_on",
+    "check": "relative_pose",
+    "obj": "world_lid_09",
+    "ref": "world_box",
+    "point": [
+     0,
+     0,
+     0.004
+    ],
+    "xy_tol_m": 0.03,
+    "z_tol_m": 0.02,
+    "z_above_m": 0.03,
+    "tilt_deg": 12,
+    "contact": "world_box"
+   }
+  ],
+  "needs_judge": false
+ },
+ "00075_OakInk-v2_scene_02__A001_seq__e6d2be38fe14846654b2__2023-04-": {
+  "version": 1,
+  "category": "cap / lid",
+  "task": "Cap the pen.",
+  "task_object": "world_pen_cap",
+  "target": "world_pen",
+  "no_fall": [
+   "world_pen_cap",
+   "world_pen"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_pen_cap"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_pen_cap"
+   },
+   {
+    "name": "capped",
+    "check": "relative_pose",
+    "obj": "world_pen_cap",
+    "ref": "world_pen",
+    "point": [
+     0.038,
+     0,
+     0.016
+    ],
+    "offset": [
+     0.041,
+     0.002,
+     0.012
+    ],
+    "pos_tol_m": 0.012,
+    "tilt_deg": 90,
+    "contact": "world_pen",
+    "release": false,
+    "rest": false
+   }
+  ],
+  "needs_judge": false
+ },
+ "00077_OakInk-v2_scene_01__A007_seq__183cec0dfbabf5b6eeb7__2023-04-": {
+  "version": 1,
+  "category": "cap / lid",
+  "task": "Cap the porcelain teapot.",
+  "task_object": "world_teapot_lid",
+  "target": "world_teapot",
+  "no_fall": [
+   "world_teapot_lid",
+   "world_teapot"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_teapot_lid"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_teapot_lid"
+   },
+   {
+    "name": "lid_on",
+    "check": "relative_pose",
+    "obj": "world_teapot_lid",
+    "ref": "world_teapot",
+    "xy_tol_m": 0.035,
+    "z_tol_m": 0.04,
+    "z_above_m": 0.05,
+    "tilt_deg": 15,
+    "contact": "world_teapot"
+   }
+  ],
+  "needs_judge": false
+ },
+ "00894_OakInk-v2_scene_01__A003_seq__24cffaeaadf8a022f376__2023-04-": {
+  "version": 1,
+  "category": "cap / lid",
+  "task": "Cap the large white bottle.",
+  "task_object": "world_cap_07",
+  "target": "world_body_03",
+  "no_fall": [
+   "world_cap_07",
+   "world_body_03"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_cap_07"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_cap_07"
+   },
+   {
+    "name": "capped",
+    "check": "relative_pose",
+    "obj": "world_cap_07",
+    "ref": "world_body_03",
+    "point": [
+     0,
+     0,
+     0.083
+    ],
+    "xy_tol_m": 0.03,
+    "z_tol_m": 0.03,
+    "z_above_m": 0.04,
+    "tilt_deg": 15,
+    "contact": "world_body_03"
+   }
+  ],
+  "needs_judge": false
+ },
+ "00177_GigaHands_p054-instrument-folder_028_seg000": {
+  "version": 1,
+  "category": "pick / grasp only",
+  "task": "Grasp the body of the ukulele firmly to hold it securely",
+  "task_object": "world_ukelele_01",
+  "target": null,
+  "no_fall": [
+   "world_ukelele_01"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_ukelele_01"
+   },
+   {
+    "name": "lift_hold",
+    "check": "hold_lifted",
+    "obj": "world_ukelele_01",
+    "lift_m": 0.05,
+    "hold_s": 1.0,
+    "end_rule": "not_dropped"
+   }
+  ],
+  "needs_judge": false
+ },
+ "00178_ARCTIC_s01_ketchup_grab_01": {
+  "version": 1,
+  "category": "pick / grasp only",
+  "task": "grab the ketchup bottle",
+  "task_object": "world_sauce_01",
+  "target": null,
+  "no_fall": [
+   "world_sauce_01"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_sauce_01"
+   },
+   {
+    "name": "lift_hold",
+    "check": "hold_lifted",
+    "obj": "world_sauce_01",
+    "lift_m": 0.05,
+    "hold_s": 1.0,
+    "end_rule": "not_dropped"
+   }
+  ],
+  "needs_judge": false
+ },
+ "00375_GigaHands_p011-noodle_002_seg000": {
+  "version": 1,
+  "category": "pick / grasp only",
+  "task": "Pick up the veggie bag from the table",
+  "task_object": "world_bag_02",
+  "target": null,
+  "no_fall": [
+   "world_bag_02"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_bag_02"
+   },
+   {
+    "name": "lift_hold",
+    "check": "hold_lifted",
+    "obj": "world_bag_02",
+    "lift_m": 0.05,
+    "hold_s": 1.0
+   }
+  ],
+  "needs_judge": false
+ },
+ "01116_GigaHands_p005-instrument-makeup-dog-packing-massage-firstai": {
+  "version": 1,
+  "category": "pick / grasp only",
+  "task": "Grip the drill handle firmly in preparation for use",
+  "task_object": "world_drill",
+  "target": null,
+  "no_fall": [
+   "world_drill"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_drill"
+   },
+   {
+    "name": "lift_hold",
+    "check": "hold_lifted",
+    "obj": "world_drill",
+    "lift_m": 0.05,
+    "hold_s": 1.0,
+    "end_rule": "not_dropped"
+   }
+  ],
+  "needs_judge": false
+ },
+ "01174_GigaHands_p005-folder_032_seg000": {
+  "version": 1,
+  "category": "pick / grasp only",
+  "task": "Grab the stamp from the table",
+  "task_object": "world_stamp",
+  "target": null,
+  "no_fall": [
+   "world_stamp"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_stamp"
+   },
+   {
+    "name": "lift_hold",
+    "check": "hold_lifted",
+    "obj": "world_stamp",
+    "lift_m": 0.05,
+    "hold_s": 1.0
+   }
+  ],
+  "needs_judge": false
+ },
+ "01304_GigaHands_p010-tea_002_seg000": {
+  "version": 1,
+  "category": "pick / grasp only",
+  "task": "Pick up the kettle from the table",
+  "task_object": "world_kettle",
+  "target": null,
+  "no_fall": [
+   "world_kettle"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_kettle"
+   },
+   {
+    "name": "lift_hold",
+    "check": "hold_lifted",
+    "obj": "world_kettle",
+    "lift_m": 0.05,
+    "hold_s": 1.0
+   }
+  ],
+  "needs_judge": false
+ },
+ "01337_GigaHands_p026-present_031_seg000": {
+  "version": 1,
+  "category": "pick / grasp only",
+  "task": "Pick up the scissors from the table with two fingers in both holes",
+  "task_object": "world_scissors",
+  "target": null,
+  "no_fall": [
+   "world_scissors"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_scissors"
+   },
+   {
+    "name": "lift_hold",
+    "check": "hold_lifted",
+    "obj": "world_scissors",
+    "lift_m": 0.05,
+    "hold_s": 1.0
+   }
+  ],
+  "needs_judge": false
+ },
+ "01032_GigaHands_p047-gopro-present_069_seg000": {
+  "version": 1,
+  "category": "reorient / flip / rotate",
+  "task": "Upturn the box on the work surface",
+  "task_object": "world_box",
+  "target": null,
+  "no_fall": [
+   "world_box"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_box"
+   },
+   {
+    "name": "upturned",
+    "check": "orientation",
+    "obj": "world_box",
+    "mode": "flip",
+    "tol_deg": 35,
+    "final": true,
+    "release": false,
+    "rest": false
+   }
+  ],
+  "needs_judge": false
+ },
+ "01041_GigaHands_p005-sandwich-salad-baking-monoply-boxing_196_seg0": {
+  "version": 1,
+  "category": "reorient / flip / rotate",
+  "task": "Flip the game board over to access the other side for additional game components",
+  "task_object": "world_game_board",
+  "target": null,
+  "no_fall": [
+   "world_game_board"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_game_board"
+   },
+   {
+    "name": "flipped",
+    "check": "orientation",
+    "obj": "world_game_board",
+    "mode": "flip",
+    "tol_deg": 35,
+    "final": true,
+    "release": false,
+    "rest": false
+   }
+  ],
+  "needs_judge": false
+ },
+ "01246_GigaHands_p013-fastfood-sandwich_097_seg000": {
+  "version": 1,
+  "category": "reorient / flip / rotate",
+  "task": "upturn the empty bowl",
+  "task_object": "world_bowl",
+  "target": null,
+  "no_fall": [
+   "world_bowl"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_bowl"
+   },
+   {
+    "name": "upturned",
+    "check": "orientation",
+    "obj": "world_bowl",
+    "mode": "flip",
+    "tol_deg": 45,
+    "final": true,
+    "release": false,
+    "rest": false
+   }
+  ],
+  "needs_judge": false
+ },
+ "01541_GigaHands_p018-present_033_seg000": {
+  "version": 1,
+  "category": "reorient / flip / rotate",
+  "task": "Rotate the wrapped box to a different side",
+  "task_object": "world_box",
+  "target": null,
+  "no_fall": [
+   "world_box"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_box"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_box",
+    "lift_m": 0.02,
+    "carry_m": 0.03
+   },
+   {
+    "name": "rotated_side",
+    "check": "orientation",
+    "obj": "world_box",
+    "mode": "rotate",
+    "min_deg": 60
+   }
+  ],
+  "needs_judge": false
+ },
+ "01542_GigaHands_p034-tea_025_seg000": {
+  "version": 1,
+  "category": "reorient / flip / rotate",
+  "task": "Rotate the handle of the teacup until it faces towards you",
+  "task_object": "world_teacup",
+  "target": null,
+  "no_fall": [
+   "world_teacup"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_teacup"
+   },
+   {
+    "name": "handle_faces_robot",
+    "check": "orientation",
+    "obj": "world_teacup",
+    "mode": "face",
+    "axis": [
+     1,
+     0,
+     0
+    ],
+    "toward": [
+     1,
+     0
+    ],
+    "tol_deg": 25,
+    "keep_upright_deg": 30,
+    "final": true
+   }
+  ],
+  "needs_judge": false
+ },
+ "01564_GigaHands_p054-tablet_031_seg000": {
+  "version": 1,
+  "category": "reorient / flip / rotate",
+  "task": "Rotate the tablet from landscape to portrait mode, keeping it steady",
+  "task_object": "world_tablet",
+  "target": null,
+  "no_fall": [
+   "world_tablet"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_tablet"
+   },
+   {
+    "name": "portrait",
+    "check": "orientation",
+    "obj": "world_tablet",
+    "mode": "rotate",
+    "min_deg": 55,
+    "final": true,
+    "release": false,
+    "rest": false
+   }
+  ],
+  "needs_judge": false
+ },
+ "00779_OakInk-v2_scene_03__A004_seq__751fb66f8f9b436a99b4__2023-04-": {
+  "version": 1,
+  "category": "shake / toss",
+  "task": "Shake the bottle firmly.",
+  "task_object": "world_flask_02",
+  "target": null,
+  "no_fall": [
+   "world_flask_02"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_flask_02"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_flask_02"
+   },
+   {
+    "name": "shaken",
+    "check": "oscillation",
+    "obj": "world_flask_02",
+    "min_reversals": 4,
+    "min_amp_m": 0.03
+   }
+  ],
+  "needs_judge": false
+ },
+ "01592_GigaHands_p015-monopoly_010_seg000": {
+  "version": 1,
+  "category": "shake / toss",
+  "task": "Shake the dice in your hand briskly",
+  "task_object": "world_dice",
+  "target": null,
+  "no_fall": [
+   "world_dice"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_dice"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_dice",
+    "lift_m": 0.02
+   },
+   {
+    "name": "shaken",
+    "check": "oscillation",
+    "obj": "world_dice",
+    "min_reversals": 4,
+    "min_amp_m": 0.02
+   }
+  ],
+  "needs_judge": false
+ },
+ "01605_GigaHands_p042-makeup_040_seg000": {
+  "version": 1,
+  "category": "shake / toss",
+  "task": "Shake the bottle to mix the contents thoroughly",
+  "task_object": "world_nail_polish_bottle",
+  "target": null,
+  "no_fall": [
+   "world_nail_polish_bottle"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_nail_polish_bottle"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_nail_polish_bottle"
+   },
+   {
+    "name": "shaken",
+    "check": "oscillation",
+    "obj": "world_nail_polish_bottle",
+    "min_reversals": 4,
+    "min_amp_m": 0.03
+   }
+  ],
+  "needs_judge": false
+ },
+ "01652_GigaHands_p034-monopoly_061_seg000": {
+  "version": 1,
+  "category": "shake / toss",
+  "task": "Toss the coin into the air and let it fall into the hand",
+  "task_object": "world_coin",
+  "target": null,
+  "no_fall": [
+   "world_coin"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_coin"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_coin",
+    "lift_m": 0.02
+   },
+   {
+    "name": "tossed_caught",
+    "check": "free_flight",
+    "obj": "world_coin",
+    "min_rise_m": 0.04,
+    "min_rel_rise_m": 0.02,
+    "catch_dist_m": 0.22
+   }
+  ],
+  "needs_judge": false
+ },
+ "00175_HOI4D_ZY20210800001_H1_C2_N25_S213_s02_T4": {
+  "version": 1,
+  "category": "pour",
+  "task": "Fill with water by a kettle (mug)",
+  "task_object": "world_kettle",
+  "target": "world_mug_025",
+  "no_fall": [
+   "world_kettle",
+   "world_mug_025"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_kettle"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_kettle"
+   },
+   {
+    "name": "tilt_over_target",
+    "check": "tilt_over",
+    "obj": "world_kettle",
+    "target": "world_mug_025",
+    "min_tilt_deg": 30,
+    "xy_slack_m": 0.12
+   },
+   {
+    "name": "complete",
+    "check": "judge",
+    "question": "water poured from the kettle into the mug"
+   }
+  ],
+  "needs_judge": true
+ },
+ "00475_OakInk-v2_scene_03__A007_seq__1c03f4a45689cf1478c5__2023-04-": {
+  "version": 1,
+  "category": "pour",
+  "task": "Pour the experiment substance B from the beaker to the conical flask.",
+  "task_object": "world_beaker_01",
+  "target": "world_flask_02",
+  "no_fall": [
+   "world_beaker_01",
+   "world_flask_02"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_beaker_01"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_beaker_01"
+   },
+   {
+    "name": "tilt_over_target",
+    "check": "tilt_over",
+    "obj": "world_beaker_01",
+    "target": "world_flask_02",
+    "min_tilt_deg": 50,
+    "xy_slack_m": 0.08
+   },
+   {
+    "name": "complete",
+    "check": "judge",
+    "question": "substance poured from the beaker into the conical flask"
+   }
+  ],
+  "needs_judge": true
+ },
+ "00487_OakInk-v2_scene_01__A003_seq__e76b290b0440c2db3e27__2023-04-": {
+  "version": 1,
+  "category": "pour",
+  "task": "Pour the tea from the blue striped bottle to the bowl.",
+  "task_object": "world_body_04",
+  "target": "world_bowl",
+  "no_fall": [
+   "world_body_04",
+   "world_bowl"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_body_04"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_body_04"
+   },
+   {
+    "name": "tilt_over_target",
+    "check": "tilt_over",
+    "obj": "world_body_04",
+    "target": "world_bowl",
+    "min_tilt_deg": 50,
+    "xy_slack_m": 0.08
+   },
+   {
+    "name": "complete",
+    "check": "judge",
+    "question": "tea poured from the bottle into the bowl"
+   }
+  ],
+  "needs_judge": true
+ },
+ "01480_GigaHands_p013-fastfood-sandwich_104_seg000": {
+  "version": 1,
+  "category": "pour",
+  "task": "Pour from the bowl into the heated pan",
+  "task_object": "world_bowl",
+  "target": "world_pan",
+  "no_fall": [
+   "world_bowl",
+   "world_pan"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_bowl"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_bowl"
+   },
+   {
+    "name": "tilt_over_target",
+    "check": "tilt_over",
+    "obj": "world_bowl",
+    "target": "world_pan",
+    "min_tilt_deg": 50,
+    "xy_slack_m": 0.05
+   },
+   {
+    "name": "complete",
+    "check": "judge",
+    "question": "bowl contents poured into the pan"
+   }
+  ],
+  "needs_judge": true
+ },
+ "01498_GigaHands_p050-tea_001_seg003": {
+  "version": 1,
+  "category": "pour",
+  "task": "Pour hot water from the kettle into the teapot",
+  "task_object": "world_kettle",
+  "target": "world_teapot",
+  "no_fall": [
+   "world_kettle",
+   "world_teapot"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_kettle"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_kettle"
+   },
+   {
+    "name": "tilt_over_target",
+    "check": "tilt_over",
+    "obj": "world_kettle",
+    "target": "world_teapot",
+    "min_tilt_deg": 30,
+    "xy_slack_m": 0.12
+   },
+   {
+    "name": "complete",
+    "check": "judge",
+    "question": "hot water poured from the kettle into the teapot"
+   }
+  ],
+  "needs_judge": true
+ },
+ "00051_TACO_brush__eraser__plate__20231027_045": {
+  "version": 1,
+  "category": "tool use",
+  "task": "use eraser to brush plate",
+  "task_object": "world_eraser_07",
+  "target": "world_plate_05",
+  "no_fall": [
+   "world_eraser_07",
+   "world_plate_05"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_eraser_07"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_eraser_07",
+    "lift_m": 0.01,
+    "carry_m": 0.03
+   },
+   {
+    "name": "brushed",
+    "check": "sweep",
+    "obj": "world_eraser_07",
+    "target": "world_plate_05",
+    "contact": true,
+    "min_path_m": 0.15
+   },
+   {
+    "name": "complete",
+    "check": "judge",
+    "question": "plate brushed with the eraser"
+   }
+  ],
+  "needs_judge": true
+ },
+ "00749_TACO_scrape_off__spoon__pan__20230926_026": {
+  "version": 1,
+  "category": "tool use",
+  "task": "use spoon to stir the pot.",
+  "task_object": "world_spoon_08",
+  "target": "world_pan_06",
+  "no_fall": [
+   "world_spoon_08",
+   "world_pan_06"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_spoon_08"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_spoon_08"
+   },
+   {
+    "name": "stirred",
+    "check": "sweep",
+    "obj": "world_spoon_08",
+    "target": "world_pan_06",
+    "xy_slack_m": 0.03,
+    "z_above_m": 0.12,
+    "min_path_m": 0.3
+   },
+   {
+    "name": "complete",
+    "check": "judge",
+    "question": "pot stirred with the spoon"
+   }
+  ],
+  "needs_judge": true
+ },
+ "00787_GigaHands_p048-sandwich_047_seg000": {
+  "version": 1,
+  "category": "tool use",
+  "task": "Scramble the egg in the pan by moving the spatula around",
+  "task_object": "world_spatula",
+  "target": "world_pan_01",
+  "no_fall": [
+   "world_spatula",
+   "world_pan_01"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_spatula"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_spatula"
+   },
+   {
+    "name": "scrambled",
+    "check": "sweep",
+    "obj": "world_spatula",
+    "target": "world_pan_01",
+    "target_box": [
+     [
+      -0.076,
+      -0.097,
+      -0.019
+     ],
+     [
+      0.072,
+      0.09,
+      0.042
+     ]
+    ],
+    "xy_slack_m": 0.03,
+    "z_above_m": 0.1,
+    "min_path_m": 0.3
+   },
+   {
+    "name": "complete",
+    "check": "judge",
+    "question": "egg scrambled by moving the spatula around the pan"
+   }
+  ],
+  "needs_judge": true
+ },
+ "00863_TACO_hit__hammer__box__20231002_057": {
+  "version": 1,
+  "category": "tool use",
+  "task": "use hammer to hit box",
+  "task_object": "world_hammer_03",
+  "target": "world_box_13",
+  "no_fall": [
+   "world_hammer_03",
+   "world_box_13"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_hammer_03"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_hammer_03"
+   },
+   {
+    "name": "hit",
+    "check": "contact_events",
+    "obj": "world_hammer_03",
+    "target": "world_box_13",
+    "min_events": 1,
+    "min_speed_m_s": 0.15
+   },
+   {
+    "name": "complete",
+    "check": "judge",
+    "question": "box hit with the hammer head"
+   }
+  ],
+  "needs_judge": true
+ },
+ "01477_GigaHands_p006-gopro_045_seg000": {
+  "version": 1,
+  "category": "tool use",
+  "task": "pick up the camera and click the botton",
+  "task_object": "world_camera",
+  "target": null,
+  "no_fall": [
+   "world_camera"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_camera"
+   },
+   {
+    "name": "lift_hold",
+    "check": "hold_lifted",
+    "obj": "world_camera",
+    "lift_m": 0.03,
+    "hold_s": 0.5
+   },
+   {
+    "name": "complete",
+    "check": "judge",
+    "question": "camera button clicked (no button in the sim)"
+   }
+  ],
+  "needs_judge": true
+ },
+ "01587_GigaHands_p051-fastfood_041_seg000": {
+  "version": 1,
+  "category": "tool use",
+  "task": "Scoop a piece of pudding from the plate with the pudding spoon",
+  "task_object": "world_spoon",
+  "target": "world_plate",
+  "no_fall": [
+   "world_spoon",
+   "world_plate"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_spoon"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_spoon"
+   },
+   {
+    "name": "scooped",
+    "check": "sweep",
+    "obj": "world_spoon",
+    "target": "world_plate",
+    "xy_slack_m": 0.05,
+    "z_above_m": 0.08,
+    "min_path_m": 0.05
+   },
+   {
+    "name": "complete",
+    "check": "judge",
+    "question": "a piece of pudding scooped from the plate with the spoon"
+   }
+  ],
+  "needs_judge": true
+ },
+ "01640_GigaHands_p029-instrument_019_seg000": {
+  "version": 1,
+  "category": "tool use",
+  "task": "Hit the drumhead with a drum stick",
+  "task_object": "world_drumstick",
+  "target": "world_drum",
+  "no_fall": [
+   "world_drumstick",
+   "world_drum"
+  ],
+  "stages": [
+   {
+    "name": "reach",
+    "check": "reach",
+    "obj": "world_drumstick"
+   },
+   {
+    "name": "grasp",
+    "check": "grasp",
+    "obj": "world_drumstick"
+   },
+   {
+    "name": "hit",
+    "check": "contact_events",
+    "obj": "world_drumstick",
+    "target": "world_drum",
+    "min_events": 1,
+    "min_speed_m_s": 0.15
+   },
+   {
+    "name": "complete",
+    "check": "judge",
+    "question": "drumhead hit with the drum stick"
+   }
+  ],
+  "needs_judge": true
+ }
+}
