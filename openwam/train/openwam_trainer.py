@@ -22,6 +22,7 @@ Usage:
 """
 
 import itertools
+import json
 import logging
 import math
 import os
@@ -32,7 +33,8 @@ from omegaconf import DictConfig
 from openwam.train.utils.checkpointing import (
     compute_resume_position,
     finalize_keep_weights_only,
-    find_latest_accel_state,
+    find_accel_state_candidates,
+    is_sync_boundary,
     load_full_state,
     manage_checkpoints,
     save_config,
@@ -358,11 +360,22 @@ class OpenWAMTrainer:
                 )
 
                 # save_steps: write the weights line (+ the resumable full state when
-                # save_full_states_for_resume=true), then prune in lockstep.
+                # save_full_states_for_resume=true), then prune in lockstep. The full
+                # state is only written at a real sync boundary: a mid-cycle snapshot
+                # would persist no pending micro-batch gradients, and resuming it is
+                # rejected by compute_resume_position — so deferring here keeps every
+                # retained accel_state usable.
                 if save_steps and global_step > 0 and global_step % save_steps == 0:
                     save_weights(self.accelerator, self.architecture, output_path, global_step, final=False)
                     if save_full_states_for_resume:
-                        save_full_state(self.accelerator, output_path, global_step, opt_step, epoch)
+                        if is_sync_boundary(global_step, len(dataloader), grad_accum):
+                            save_full_state(self.accelerator, output_path, global_step, opt_step, epoch)
+                        else:
+                            logger.info(
+                                "[save] step %d is mid-accumulation; deferring the resumable "
+                                "full state to the next sync boundary",
+                                global_step,
+                            )
                     if is_main:
                         manage_checkpoints(output_path, keep_last_k)
 
@@ -448,7 +461,11 @@ class OpenWAMTrainer:
         base_output_path = getattr(self.cfg.training, "output_path", "./models")
         is_main = self.accelerator.is_main_process
 
-        resume_state_dir = find_latest_accel_state(resume_path) if resume_path else None
+        resume_state_candidates = find_accel_state_candidates(resume_path) if resume_path else []
+        # Newest first; resume_if_configured walks this list past mid-cycle
+        # snapshots (written by older versions) to the nearest usable boundary.
+        self._resume_state_candidates = resume_state_candidates
+        resume_state_dir = resume_state_candidates[0][1] if resume_state_candidates else None
         if resume_path and resume_state_dir is None:
             raise FileNotFoundError(
                 f"resume_ckpt_path={resume_path} has no usable accel_state_step_*; full states "
@@ -534,11 +551,48 @@ class OpenWAMTrainer:
         is_main = self.accelerator.is_main_process
         if is_main:
             logger.info("[resume] loading Accelerate state from %s", resume_state_dir)
-        meta = load_full_state(self.accelerator, resume_state_dir)
+        # Walk the candidate states newest-first and take the newest one that sits
+        # on a real sync boundary: compute_resume_position rejects mid-cycle
+        # snapshots (they persist no pending micro-batch gradients), which covers
+        # states written by older versions mid-accumulation-cycle. Only the chosen
+        # state is loaded, so a rejected candidate costs a metadata read, nothing more.
+        candidates = getattr(self, "_resume_state_candidates", None) or (
+            [(None, resume_state_dir)] if resume_state_dir else []
+        )
+        chosen_dir: str | None = None
+        rejected: list[str] = []
+        for _, state_dir in candidates:
+            meta_path = os.path.join(state_dir, "trainer_state.json")
+            try:
+                with open(meta_path) as f:
+                    cand_step = int(json.load(f).get("global_step", 0))
+            except (OSError, ValueError):
+                rejected.append(f"{os.path.basename(state_dir)} (unreadable trainer_state.json)")
+                continue
+            try:
+                compute_resume_position(cand_step, len(dataloader), grad_accum)
+            except ValueError as exc:
+                rejected.append(f"{os.path.basename(state_dir)} ({exc})")
+                continue
+            chosen_dir = state_dir
+            break
+        if chosen_dir is None:
+            raise ValueError(
+                f"No resumable sync-boundary state in {resume_state_dir}: "
+                + ("; ".join(rejected) if rejected else "no candidates")
+            )
+        if is_main and chosen_dir != resume_state_dir:
+            logger.warning(
+                "[resume] newest state %s is mid-accumulation; falling back to %s",
+                os.path.basename(resume_state_dir),
+                os.path.basename(chosen_dir),
+            )
+        meta = load_full_state(self.accelerator, chosen_dir)
         global_step = int(meta.get("global_step", 0))
-        # Align global_step to the grad_accum boundary skip was floored to, then derive
-        # opt_step from it — otherwise floored-off batches re-train and per-step seeds
-        # (keyed on global_step) drift. No-op at grad_accum=1.
+        # compute_resume_position rejects mid-accumulation checkpoints (the full state
+        # does not persist pending micro-batch gradients, and no rewind can restore a
+        # consistent accumulation phase once load_state has set the Accelerator step);
+        # sync-boundary checkpoints resume exactly. opt_step derives from that step.
         start_epoch, skip, global_step = compute_resume_position(global_step, len(dataloader), grad_accum)
         opt_step = global_step // grad_accum
         if is_main:

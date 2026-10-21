@@ -314,24 +314,93 @@ def find_latest_accel_state(run_dir: str) -> str | None:
     return best[1] if best else None
 
 
+def find_accel_state_candidates(run_dir: str) -> list[tuple[int, str]]:
+    """Return all *finished* ``accel_state_step_N/`` dirs in *run_dir*, newest first.
+
+    Same completion rule as ``find_latest_accel_state`` (``trainer_state.json``
+    marker), but returns every finished candidate so the resume path can fall
+    back past mid-cycle snapshots that ``compute_resume_position`` rejects
+    (states written by older versions mid-accumulation-cycle).
+    """
+    if not run_dir or not os.path.isdir(run_dir):
+        return []
+    candidates: list[tuple[int, str]] = []
+    for name in os.listdir(run_dir):
+        if not name.startswith("accel_state_step_"):
+            continue
+        state_dir = os.path.join(run_dir, name)
+        if not os.path.isfile(os.path.join(state_dir, "trainer_state.json")):
+            continue
+        candidates.append((step_num(name, "accel_state_step_"), state_dir))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates
+
+
 # --- Resume position (pure math) ---
+
+
+def is_sync_boundary(global_step: int, batches_per_epoch: int, grad_accum: int) -> bool:
+    """Whether ``global_step`` sits on a real optimizer/sync boundary.
+
+    A step is a boundary iff the 1-indexed position within its epoch hits the
+    accumulation quota or the epoch end — the prepared dataloader runs with
+    Accelerate's default ``sync_with_dataloader=True``, so the epoch end flushes
+    and resets the accumulation counter even when
+    ``batches_per_epoch % grad_accum != 0``. With ``batches_per_epoch=10,
+    grad_accum=4`` the boundaries are exactly {4, 8, 10, 14, 18, 20, ...}
+    (measured on real ZeRO-1/ZeRO-2 runs).
+    """
+    batches_per_epoch = max(batches_per_epoch, 1)
+    local_step = ((global_step - 1) % batches_per_epoch) + 1
+    return local_step % grad_accum == 0 or local_step == batches_per_epoch
 
 
 def compute_resume_position(global_step: int, batches_per_epoch: int, grad_accum: int) -> tuple[int, int, int]:
     """Map a resumed ``global_step`` to ``(start_epoch, skip_first_batches, aligned_global_step)``.
 
-    ``skip`` is floored to a grad_accum boundary so the first optimizer step after
-    resume sees a full accumulation cycle; ``aligned_global_step`` pulls ``global_step``
-    back to that same boundary so the floored-off batches are not re-trained and the
-    per-step seed (keyed on global_step) stays matched. No-op at grad_accum=1.
+    Only checkpoints taken at a real optimizer/sync boundary are resumable. The
+    full-state snapshot persists the model, optimizer, and the Accelerate
+    step/accumulation counter, but *not* the pending micro-batch gradients of an
+    in-flight accumulation cycle: the training loop saves after every backward
+    whenever ``global_step % save_steps == 0``, without requiring
+    ``accelerator.sync_gradients``. Resuming a mid-cycle checkpoint exactly would
+    skip the micro-batches whose gradients were already accumulated but never
+    applied, so the next optimizer step would see only the tail micro-batch.
+
+    A checkpoint at ``global_step`` is a sync boundary iff the 1-indexed position
+    within its epoch hits the accumulation quota or the epoch end — the prepared
+    dataloader runs with Accelerate's default ``sync_with_dataloader=True``, so
+    the epoch end flushes and resets the accumulation counter even when
+    ``batches_per_epoch % grad_accum != 0``::
+
+        local = ((global_step - 1) % batches_per_epoch) + 1
+        is_sync_boundary = local % grad_accum == 0 or local == batches_per_epoch
+
+    With ``batches_per_epoch=10, grad_accum=4`` the sync boundaries are exactly
+    {4, 8, 10, 14, 18, 20, ...} (measured on real ZeRO-1/ZeRO-2 runs).
+
+    Mid-cycle checkpoints raise ``ValueError``: degrading them to an earlier
+    boundary cannot restore a consistent accumulation phase (the loaded
+    ``Accelerator.step`` still counts the consumed micro-batches), so the only
+    safe resume is from the nearest boundary checkpoint (checkpoint retention
+    keeps several). ``grad_accum=1`` makes every step a boundary.
+
+    Raises:
+        ValueError: If the checkpoint was saved mid-accumulation-cycle.
     """
-    batches_per_epoch = max(batches_per_epoch, 1)
+    if not is_sync_boundary(global_step, batches_per_epoch, grad_accum):
+        batches_per_epoch = max(batches_per_epoch, 1)
+        local_step = ((global_step - 1) % batches_per_epoch) + 1
+        raise ValueError(
+            f"Checkpoint at global_step={global_step} was saved mid-accumulation-cycle "
+            f"(position {local_step}/{batches_per_epoch} in the epoch, sync boundaries are "
+            f"every {grad_accum} batches or at the epoch end). Pending micro-batch gradients "
+            f"are not persisted in the full state, so this checkpoint cannot be resumed "
+            f"exactly. Use the nearest checkpoint at a sync boundary instead."
+        )
     start_epoch = global_step // batches_per_epoch
     skip = global_step % batches_per_epoch
-    if grad_accum > 1 and skip % grad_accum != 0:
-        skip = (skip // grad_accum) * grad_accum
-    aligned_global_step = start_epoch * batches_per_epoch + skip
-    return start_epoch, skip, aligned_global_step
+    return start_epoch, skip, global_step
 
 
 # --- Retention / finalize (prune) ---
