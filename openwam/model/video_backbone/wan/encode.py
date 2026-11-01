@@ -80,6 +80,74 @@ class TrainTextEmbedCache:
             self.rows.popitem(last=False)
 
 
+class TextEncoderOffload:
+    """Frozen umT5 weights in pinned host memory between text-cache misses (``OPENWAM_TEXT_ENCODER_OFFLOAD=1``,
+    with ``OPENWAM_TEXT_CACHE=1``).
+
+    With the text cache, umT5 only runs on cache misses (LIBERO: about 40 prompts, so only in the first iterations of
+    a run), but its 10.6 GiB of bf16 weights would stay on every GPU for the whole run. Here the first miss runs with
+    the weights where they are (on the GPU); afterwards every parameter and buffer is copied once into one flat
+    pinned host buffer per dtype and the module's tensors point at views of it. A later miss copies the flat buffer
+    to the GPU in one asynchronous host-to-device copy, points the tensors at views of the GPU copy, runs the encoder
+    and points them back at the host views (the caching allocator reuses the GPU copy in stream order). The encoder
+    computes with the same weights and the same kernels on the GPU: bitwise the same rows. Costs one host-to-device
+    copy of the weights per iteration with a miss.
+    """
+
+    def __init__(self, module):
+        self.module = module
+        self.host = None  # {dtype: flat pinned tensor}
+        self.slots = []  # (tensor, dtype, offset, numel, shape)
+        self.on_gpu = True  # the first miss runs with the weights where they were loaded
+        self.loads = 0
+
+    def _tensors(self):
+        seen = set()
+        for t in list(self.module.parameters()) + list(self.module.buffers()):
+            if id(t) not in seen:
+                seen.add(id(t))
+                yield t
+
+    def acquire(self, device):
+        if self.on_gpu:
+            return
+        dev = {dt: flat.to(device=device, non_blocking=True) for dt, flat in self.host.items()}
+        for t, dt, off, n, shape in self.slots:
+            t.data = dev[dt][off : off + n].view(shape)
+        self.on_gpu = True
+        self.loads += 1
+
+    def release(self):
+        if self.host is None:  # first release: build the pinned host copy (once per process)
+            sizes = {}
+            for t in self._tensors():
+                sizes[t.dtype] = sizes.get(t.dtype, 0) + t.numel()
+            self.host = {dt: torch.empty(n, dtype=dt, pin_memory=True) for dt, n in sizes.items()}
+            offs = dict.fromkeys(sizes, 0)
+            for t in self._tensors():
+                off, n = offs[t.dtype], t.numel()
+                self.host[t.dtype][off : off + n].copy_(t.data.reshape(-1))
+                self.slots.append((t, t.dtype, off, n, tuple(t.shape)))
+                offs[t.dtype] = off + n
+            logger.info(
+                "umT5 offload: %.2f GiB of weights moved to pinned host memory",
+                sum(f.numel() * f.element_size() for f in self.host.values()) / 2**30,
+            )
+        for t, dt, off, n, shape in self.slots:
+            t.data = self.host[dt][off : off + n].view(shape)
+        self.on_gpu = False
+
+
+def _run_encoder(text_encoder, ids, mask, *, device, cache):
+    offload = getattr(cache, "offload", None)
+    if offload is None:
+        return text_encoder(ids, mask)
+    offload.acquire(device)
+    out = text_encoder(ids, mask)
+    offload.release()
+    return out
+
+
 def _to_device(t: Tensor, device) -> Tensor:
     """Host-to-device copy without a host sync (through pinned memory) where CUDA is available."""
     if torch.device(device).type == "cuda":
@@ -131,7 +199,7 @@ def encode_text_cached(prompts: list, *, tokenizer, text_encoder, device, cache)
         return _encode_misses(
             ids, mask, keys, rows, seq_lens_cpu, seq_lens, text_encoder=text_encoder, device=device, cache=cache
         )
-    context = text_encoder(_to_device(ids, device), _to_device(mask, device))
+    context = _run_encoder(text_encoder, _to_device(ids, device), _to_device(mask, device), device=device, cache=cache)
     pad = torch.arange(context.shape[1], device=context.device).unsqueeze(0) >= seq_lens.unsqueeze(1)
     context.masked_fill_(pad.unsqueeze(-1), 0)
     for i, k in enumerate(keys):
@@ -162,7 +230,7 @@ def _encode_misses(ids, mask, keys, rows, seq_lens_cpu, seq_lens, *, text_encode
     L = min(full_len, max(64, ((int(sl.max()) + 63) // 64) * 64))
     sub_ids = _to_device(ids[miss, :L].contiguous(), device)
     sub_mask = _to_device(mask[miss, :L].contiguous(), device)
-    out = text_encoder(sub_ids, sub_mask)
+    out = _run_encoder(text_encoder, sub_ids, sub_mask, device=device, cache=cache)
     sl_d = _to_device(sl, device)
     pad = torch.arange(L, device=out.device).unsqueeze(0) >= sl_d.unsqueeze(1)
     out.masked_fill_(pad.unsqueeze(-1), 0)

@@ -13,6 +13,7 @@ The driver owns no parameters — a plain Python class, absent from ``state_dict
 from __future__ import annotations
 
 import copy
+import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
@@ -90,6 +91,11 @@ class DualSystemMoTDriver:
         self.num_heads = vb.num_heads
         self.head_dim = vb.head_dim
         self.mot_checkpoint_mixed_attn = bool(mot_checkpoint_mixed_attn)
+        # OPENWAM_MIXED_ATTN_CKPT=0/1 overrides mot_checkpoint_mixed_attn (the inner checkpoint of the joint attention
+        # in layers that are not checkpointed as a whole; see OPENWAM_CKPT_LAYERS). Unset: the config value.
+        mixed_attn_ckpt = os.environ.get("OPENWAM_MIXED_ATTN_CKPT", "").strip()
+        if mixed_attn_ckpt in ("0", "1"):
+            self.mot_checkpoint_mixed_attn = mixed_attn_ckpt == "1"
         self.attention_mask_mode = attention_mask_mode
 
         # Allow the architecture / config to override the video v↔v sub-mode.
@@ -349,16 +355,28 @@ class DualSystemMoTDriver:
         # handles the resulting rectangular mask.
         attn_mask = widen_mask_for_prefix_kv(attn_mask, vstate)
 
+        n_ckpt = _num_checkpointed_layers(self.num_layers)
         for layer_id in range(self.num_layers):
             vstate, astate = self.step(
                 layer_id,
                 vstate,
                 astate,
                 attn_mask=attn_mask,
-                use_gradient_checkpointing=use_gradient_checkpointing,
+                use_gradient_checkpointing=use_gradient_checkpointing and layer_id < n_ckpt,
                 use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
             )
         return vstate, astate
+
+
+def _num_checkpointed_layers(num_layers: int) -> int:
+    """How many MoT layers (the first ones) run under activation checkpointing when
+    ``use_gradient_checkpointing`` is on: ``OPENWAM_CKPT_LAYERS`` (unset: all of them).
+    Fewer checkpointed layers trade memory for the backward recompute; the computed
+    values are the same either way."""
+    v = os.environ.get("OPENWAM_CKPT_LAYERS", "").strip()
+    if not v:
+        return num_layers
+    return max(0, min(num_layers, int(v)))
 
 
 __all__ = ["DualSystemMoTDriver"]

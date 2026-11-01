@@ -855,6 +855,18 @@ class WanBase(VideoBackbone):
                 max_entries=int(os.environ.get("OPENWAM_TEXT_CACHE_MAX_ENTRIES", "256"))
             )
             self.__dict__["_train_text_cache"] = text_cache
+            if os.environ.get("OPENWAM_TEXT_ENCODER_OFFLOAD", "0") == "1":
+                # umT5 weights in pinned host memory between cache misses (see wan_encode.TextEncoderOffload)
+                text_cache.offload = wan_encode.TextEncoderOffload(self.text_encoder)
+        elif (
+            text_cache is None
+            and os.environ.get("OPENWAM_TEXT_ENCODER_OFFLOAD", "0") == "1"
+            and not self.__dict__.get("_offload_warned")
+        ):
+            self.__dict__["_offload_warned"] = True
+            logger.warning(
+                "OPENWAM_TEXT_ENCODER_OFFLOAD=1 needs OPENWAM_TEXT_CACHE=1 (umT5 runs every iteration without it); ignored"
+            )
 
         def _encode_text():
             if text_cache is None:  # OPENWAM_TEXT_CACHE off: the default encode (no truncation possible)
