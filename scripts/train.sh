@@ -16,6 +16,9 @@
 # ── Multi-node (env vars set by cloud scheduler) ──
 #   NNODES=2 NODE_RANK=0 MASTER_ADDR=192.0.2.1 bash scripts/train.sh
 #   NNODES=2 NODE_RANK=1 MASTER_ADDR=192.0.2.1 bash scripts/train.sh
+#
+# ── Optional speed preset (presets/README.md) ──
+#   OPENWAM_PRESET=presets/fast_80gb.env bash scripts/train.sh training.batch_size=32 ...
 # ───────────────────────���──────────────────────────────────────
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -39,6 +42,15 @@ NNODES="${NNODES:-${HOST_NUM:-${WORLD_SIZE:-1}}}"
 NODE_RANK="${NODE_RANK:-${RANK:-0}}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-29500}"
+
+# ── Optional speed preset: KEY=VALUE switch lines (presets/*.env); unset = default behaviour ──
+if [[ -n "${OPENWAM_PRESET:-}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${OPENWAM_PRESET}"
+    set +a
+    echo "Speed preset: ${OPENWAM_PRESET}"
+fi
 
 echo "╔══════════════════════════════════════════════════════╗"
 echo "║  OpenWAM Training                                   ║"
