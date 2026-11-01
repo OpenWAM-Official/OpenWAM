@@ -16,7 +16,6 @@ import copy
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
@@ -28,6 +27,8 @@ from openwam.model.architectures.utils.mask_modes import (
     validate_attention_mask_mode,
     widen_mask_for_prefix_kv,
 )
+from openwam.model.kernels import joint_cat
+from openwam.model.kernels.attention import sdpa
 
 if TYPE_CHECKING:
     from openwam.model.action_backbone.base import ActionDiTBackbone
@@ -139,7 +140,7 @@ class DualSystemMoTDriver:
         q = rearrange(q_cat, "b s (n d) -> b n s d", n=n)
         k = rearrange(k_cat, "b s (n d) -> b n s d", n=n)
         v = rearrange(v_cat, "b s (n d) -> b n s d", n=n)
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        out = sdpa(q, k, v, attn_mask=attn_mask)
         return rearrange(out, "b n s d -> b s (n d)", n=n)
 
     # ------------------------------------------------------------------
@@ -229,10 +230,10 @@ class DualSystemMoTDriver:
             )
 
         s_video = q_v.shape[1]
-        s_action = q_a.shape[1]
-        q_cat = torch.cat([q_v, q_a], dim=1)
-        k_cat = torch.cat([k_v, k_a], dim=1)
-        v_cat = torch.cat([v_v, v_a], dim=1)
+        # torch.cat([x_v, x_a], dim=1); one Triton copy pass with OPENWAM_FAST_CAT=1
+        q_cat = joint_cat.cat_seq(q_v, q_a)
+        k_cat = joint_cat.cat_seq(k_v, k_a)
+        v_cat = joint_cat.cat_seq(v_v, v_a)
         # Contract: `run_joint_loop` pre-builds ``attn_mask`` once per forward and
         # passes it in for every layer. _step_impl does NOT rebuild the mask
         # itself; any direct caller must pass the same pre-built mask.
@@ -244,9 +245,9 @@ class DualSystemMoTDriver:
         else:
             mixed = self._mixed_attention(q_cat, k_cat, v_cat, attn_mask)
 
-        attn_v, attn_a = mixed.split([s_video, s_action], dim=1)
-        vstate = vb.post_attn_at_layer(layer_id, vstate, attn_v.contiguous(), vpost)
-        astate = ab.post_attn_at_layer(layer_id, astate, attn_a.contiguous(), apost)
+        attn_v, attn_a = joint_cat.split_seq(mixed, s_video)  # split along dim 1, both parts contiguous
+        vstate = vb.post_attn_at_layer(layer_id, vstate, attn_v, vpost)
+        astate = ab.post_attn_at_layer(layer_id, astate, attn_a, apost)
         return vstate, astate
 
     def _step_checkpointed(

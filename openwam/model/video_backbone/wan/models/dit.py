@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+from openwam.model.kernels.attention import sdpa
 from openwam.model.video_backbone.wan.camera_controller import SimpleAdapter
 from openwam.model.video_backbone.wan.shared.core.gradient import gradient_checkpoint_forward
 
@@ -56,7 +57,10 @@ def flash_attention(
         q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
         k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
         v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
-        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        if attn_mask is not None:
+            x = sdpa(q, k, v, attn_mask=attn_mask)
+        else:
+            x = F.scaled_dot_product_attention(q, k, v)
         x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
     elif FLASH_ATTN_3_AVAILABLE:
         q = rearrange(q, "b s (n d) -> b s n d", n=num_heads)

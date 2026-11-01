@@ -30,6 +30,8 @@ from openwam.model.compile_options import (
     torch_compile_kwargs,
     wan_blocks_compile_cfg,
 )
+from openwam.model.kernels import fused_blocks
+from openwam.model.kernels.rope_triton import rope_apply_auto
 from openwam.model.video_backbone.base import BlockLoopState, VideoBackbone
 from openwam.model.video_backbone.wan import action_tokens as wan_action_tokens
 from openwam.model.video_backbone.wan import conditioning as wan_conditioning
@@ -572,6 +574,13 @@ class WanBase(VideoBackbone):
         block = state.extras["dit"].blocks[layer_id]
 
         time_modulation = state.time_mod
+        if fused_blocks.wan_block_supported(block, time_modulation):
+            q, k, v, gate_msa, shift_mlp, scale_mlp, gate_mlp = fused_blocks.wan_pre(
+                block, state.hidden_states, time_modulation
+            )
+            q = rope_apply_auto(q, state.rope_freqs, block.self_attn.num_heads, rope_apply)
+            k = rope_apply_auto(k, state.rope_freqs, block.self_attn.num_heads, rope_apply)
+            return q, k, v, (state.hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp)
         has_seq = time_modulation.dim() == 4
         chunk_dim = 2 if has_seq else 1
         chunks = (
@@ -588,8 +597,8 @@ class WanBase(VideoBackbone):
         q = self_attn.norm_q(self_attn.q(attn_input))
         k = self_attn.norm_k(self_attn.k(attn_input))
         v = self_attn.v(attn_input)
-        q = rope_apply(q, state.rope_freqs, self_attn.num_heads)
-        k = rope_apply(k, state.rope_freqs, self_attn.num_heads)
+        q = rope_apply_auto(q, state.rope_freqs, self_attn.num_heads, rope_apply)
+        k = rope_apply_auto(k, state.rope_freqs, self_attn.num_heads, rope_apply)
 
         post_state = (residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp)
         return q, k, v, post_state
@@ -618,6 +627,25 @@ class WanBase(VideoBackbone):
         block = state.extras["dit"].blocks[layer_id]
         self_attn = block.self_attn
         residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp = post_state
+
+        if fused_blocks.wan_block_supported(block, state.time_mod):
+            cmask = None
+            if state.context_mask is not None:
+                cmask = state.context_mask.unsqueeze(1).expand(-1, residual_x.shape[1], -1).unsqueeze(1)
+            state.hidden_states = fused_blocks.wan_post(
+                block,
+                residual_x,
+                gate_msa,
+                shift_mlp,
+                scale_mlp,
+                gate_mlp,
+                attn_out,
+                state.context,
+                cmask,
+                fused_blocks.masked_mha,
+            )
+            wan_dit_forward.apply_post_block_residuals(layer_id, state)
+            return state
 
         hidden_states = block.gate(residual_x, gate_msa, self_attn.o(attn_out))
         context_mask = None
