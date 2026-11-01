@@ -44,6 +44,7 @@ from openwam.train.utils.checkpointing import (
 )
 from openwam.train.utils.grad_accumulation import scale_loss_for_backward
 from openwam.train.utils.optimizer_groups import build_trainable_parameters
+from openwam.train.utils.runtime_tuning import maybe_freeze_gc
 from openwam.train.utils.seeding import per_step_seed, seed_process, wire_sampler_seed
 from openwam.train.utils.training_utils import (
     build_cosine_scheduler,
@@ -359,6 +360,7 @@ class OpenWAMTrainer:
                     debug=debug,
                     output_path=output_path,
                 )
+                maybe_freeze_gc(global_step)  # OPENWAM_GC_FREEZE
 
                 # save_steps: write the weights line (+ the resumable full state when
                 # save_full_states_for_resume=true), then prune in lockstep.

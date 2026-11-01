@@ -67,6 +67,8 @@ def _build_accelerator(cfg: DictConfig):
     """
     import accelerate
 
+    from openwam.train.utils.runtime_tuning import apply_deepspeed_runtime_settings
+
     t = cfg.training
     grad_accum = int(t.gradient_accumulation_steps)
     max_grad_norm = getattr(t, "max_grad_norm", None)
@@ -82,6 +84,8 @@ def _build_accelerator(cfg: DictConfig):
         gradient_clipping=float(max_grad_norm) if max_grad_norm else 0.0,
         offload_optimizer_device=str(t.offload_optimizer_device),
     )
+    # Opt-in scheduling-only settings (OPENWAM_DS_TIMER_NOSYNC, OPENWAM_DS_OVERLAP_COMM).
+    apply_deepspeed_runtime_settings(plugin.deepspeed_config)
 
     return accelerate.Accelerator(
         gradient_accumulation_steps=grad_accum,
@@ -117,7 +121,11 @@ def _train_openwam(cfg: DictConfig) -> None:
     """Original OpenWAM training path."""
     from openwam.dataloader.registry import build_dataset
     from openwam.train.openwam_trainer import OpenWAMTrainer
+    from openwam.train.utils.runtime_tuning import bind_to_gpu_numa_node
     from openwam.train.utils.seeding import seed_everything
+
+    # OPENWAM_NUMA_BIND=1: before the process group, the dataset and the DataLoader workers exist.
+    bind_to_gpu_numa_node()
 
     # Seed Python random / numpy / torch BEFORE dataset construction so that
     # any reader-time randomness (e.g. MixtureDataset index_map shuffle when
