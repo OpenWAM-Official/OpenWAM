@@ -86,6 +86,31 @@ def _wrap_forward_in_no_grad(module: nn.Module) -> None:
 
 logger = logging.getLogger(__name__)
 
+
+def _fast_input() -> bool:
+    return os.environ.get("OPENWAM_FAST_INPUT", "0") == "1"
+
+
+def _h2d(t, device, dtype=None):
+    """``t.to(dtype=dtype, device=device)`` without a host sync (``OPENWAM_FAST_INPUT=1``; off: exactly that call).
+
+    The dtype conversion is done first on the tensor's own device (for a CPU
+    tensor this is exactly where the blocking ``.to(dtype, device)`` converts),
+    then a CPU tensor goes through pinned memory with a non-blocking copy, so the
+    host does not wait for the GPU queue to drain. Same values, same dtype.
+    """
+    if not _fast_input():
+        return t.to(dtype=dtype, device=device) if dtype is not None else t.to(device=device)
+    if dtype is not None and t.dtype != dtype:
+        t = t.to(dtype=dtype)
+    device = torch.device(device)
+    if t.device.type == "cpu" and device.type == "cuda":
+        if not t.is_pinned():
+            t = t.pin_memory()
+        return t.to(device=device, non_blocking=True)
+    return t.to(device=device)
+
+
 # Prefix for VLM backbone parameters in the architecture state_dict.
 # VLM weights are saved as a separate checkpoint directory (not in safetensors)
 # to avoid tied-weight deduplication complexity.
@@ -912,7 +937,12 @@ class BaseWAMArchitecture(ABC, nn.Module):
             if action is not None:
                 if isinstance(action, np.ndarray):
                     action = torch.from_numpy(action)
-                action = action.to(dtype=_dtype, device=_device).unsqueeze(0)
+                if _fast_input():
+                    # dtype converted where the blocking ``.to(dtype, device)`` converts
+                    # (on the sample's device); moved to the GPU batched, below.
+                    action = action.to(dtype=_dtype).unsqueeze(0)
+                else:
+                    action = action.to(dtype=_dtype, device=_device).unsqueeze(0)
             all_actions.append(action)
 
             # Carry proprio whenever the sample provides it — the main-stream
@@ -922,7 +952,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             if proprio is not None:
                 if isinstance(proprio, np.ndarray):
                     proprio = torch.from_numpy(proprio)
-                proprio = proprio.to(dtype=_dtype, device=_device)
+                proprio = proprio.to(dtype=_dtype) if _fast_input() else proprio.to(dtype=_dtype, device=_device)
                 if proprio.ndim == 1:
                     pass
                 elif proprio.ndim == 2 and proprio.shape[0] == 1:
@@ -970,7 +1000,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             ref_images=all_ref_images if ref_flags[0] else None,
         )
 
-        action_data = torch.cat(all_actions, dim=0) if all_actions[0] is not None else None
+        action_data = _h2d(torch.cat(all_actions, dim=0), _device) if all_actions[0] is not None else None
 
         inputs = {
             **preprocessed,
@@ -989,7 +1019,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # uses_proprioception): the main-stream proprio-context path reads
         # inputs["proprio"]. Consumers that don't need it simply ignore it.
         if all_proprios[0] is not None:
-            inputs["proprio"] = torch.stack(all_proprios, dim=0).contiguous()
+            inputs["proprio"] = _h2d(torch.stack(all_proprios, dim=0).contiguous(), _device)
             # Reconcile mixed 1-D (1,) / 2-D (1, D) proprio_masks before stacking:
             # promote any 1-D enable-flag to (1, D) (broadcasts the sample-level
             # flag across all dims) so a batch mixing a 2-D reader mask with a
@@ -1000,10 +1030,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 all_proprio_masks = [
                     m if m.ndim == 2 else m.reshape(m.shape[0], 1).expand(m.shape[0], pdim) for m in all_proprio_masks
                 ]
-            inputs["proprio_mask"] = torch.stack(all_proprio_masks, dim=0).contiguous()
+            inputs["proprio_mask"] = _h2d(torch.stack(all_proprio_masks, dim=0).contiguous(), _device)
 
         if all_action_masks[0] is not None:
-            inputs["action_is_pad"] = torch.stack([~m for m in all_action_masks], dim=0).to(device=_device)
+            inputs["action_is_pad"] = _h2d(torch.stack([~m for m in all_action_masks], dim=0), _device)
         if all_video_masks[0] is not None:
             # ``latent[0]`` is a clean conditioning frame (and must be excluded
             # from the loss mask) when either:
@@ -1035,7 +1065,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 downsample_video_mask_to_latent(~m, temporal_factor=temporal_factor, skip_first=skip_first)
                 for m in all_video_masks
             ]
-            inputs["video_is_pad"] = torch.stack(latent_masks, dim=0).to(device=_device)
+            inputs["video_is_pad"] = _h2d(torch.stack(latent_masks, dim=0), _device)
 
         return inputs
 
@@ -1088,8 +1118,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # --- Sample video timesteps ---
         video_timestep_ids = torch.randint(min_tb, max_tb, (B,))
 
-        video_timesteps = vb.scheduler.timesteps[video_timestep_ids].to(dtype=_dtype, device=_device)
-        video_sigmas = vb.scheduler.sigmas[video_timestep_ids].to(dtype=_dtype, device=_device)
+        video_timesteps = _h2d(vb.scheduler.timesteps[video_timestep_ids], _device, _dtype)
+        video_sigmas = _h2d(vb.scheduler.sigmas[video_timestep_ids], _device, _dtype)
 
         # --- Add video noise (flow-matching: linear interp + velocity target) ---
         video_noise = torch.randn_like(inputs["input_latents"])
@@ -1112,8 +1142,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
         if lambda_action > 0 and actions is not None:
             action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
 
-            action_timesteps = action_scheduler.timesteps[action_timestep_ids].to(dtype=_dtype, device=_device)
-            action_sigmas = action_scheduler.sigmas[action_timestep_ids].to(dtype=_dtype, device=_device)
+            action_timesteps = _h2d(action_scheduler.timesteps[action_timestep_ids], _device, _dtype)
+            action_sigmas = _h2d(action_scheduler.sigmas[action_timestep_ids], _device, _dtype)
 
             actions = actions.to(dtype=_dtype, device=_device)
             if actions.dim() == 2:
@@ -1229,7 +1259,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             target = target[:, :, n_skip:]
 
         vb = self.video_backbone
-        tw = vb.scheduler.linear_timesteps_weights[timestep_ids].to(dtype=torch.float32, device=device)
+        tw = _h2d(vb.scheduler.linear_timesteps_weights[timestep_ids], device, torch.float32)
 
         per_element = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
         per_frame = per_element.mean(dim=(1, 3, 4))
@@ -1274,7 +1304,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         """
         import torch.nn.functional as F
 
-        tw = scheduler.training_weight(timestep_ids).to(dtype=torch.float32, device=device)
+        tw = _h2d(scheduler.training_weight(timestep_ids), device, torch.float32)
         if tw.ndim != 1:
             raise ValueError(f"action loss weights must be per-sample [B], got shape {tuple(tw.shape)}")
         per_element = F.mse_loss(noise_pred.float(), target.float(), reduction="none")

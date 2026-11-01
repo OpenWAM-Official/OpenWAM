@@ -7,6 +7,8 @@ selects the external-encoder path; otherwise the native Wan VAE is used.
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Tuple
 
 import torch
@@ -15,8 +17,17 @@ from torch import Tensor
 from openwam.model.video_backbone.wan.preprocess import preprocess_video as _preprocess_video_native
 from openwam.model.video_backbone.wan.preprocess import vae_output_to_video
 
+logger = logging.getLogger(__name__)
 
-def encode_text(prompts: list, *, tokenizer, text_encoder, device) -> Tuple[Tensor, Tensor]:
+
+def encode_text(prompts: list, *, tokenizer, text_encoder, device, cache=None) -> Tuple[Tensor, Tensor]:
+    """umT5 ``(context, seq_lens)``; with a :class:`TrainTextEmbedCache`, see ``encode_text_cached``."""
+    if cache is not None:
+        return encode_text_cached(prompts, tokenizer=tokenizer, text_encoder=text_encoder, device=device, cache=cache)
+    return _encode_text_uncached(prompts, tokenizer=tokenizer, text_encoder=text_encoder, device=device)
+
+
+def _encode_text_uncached(prompts: list, *, tokenizer, text_encoder, device) -> Tuple[Tensor, Tensor]:
     ids, mask = tokenizer(
         prompts,
         return_mask=True,
@@ -31,6 +42,138 @@ def encode_text(prompts: list, *, tokenizer, text_encoder, device) -> Tuple[Tens
     context = text_encoder(ids, mask)
     for i, v in enumerate(seq_lens):
         context[i, v:] = 0
+    return context, seq_lens
+
+
+class TrainTextEmbedCache:
+    """Bounded, per-process cache of the frozen umT5 encoder's outputs for training
+    (``OPENWAM_TEXT_CACHE=1``).
+
+    Keyed by the exact encoder input of one sample (its token ids and attention
+    mask, as bytes). Filled only from the batch being encoded inside a training
+    iteration (never at start-up, never persisted). On a miss the encoder runs on
+    the full batch, exactly as without the cache (unless ``OPENWAM_TEXT_MISS_FAST``),
+    so a cached row is the row the encoder produced for that input at this batch
+    shape; per-sample rows of the encoder do not depend on the other samples
+    (per-row GEMMs, per-sample masked attention, per-token norms). ``max_entries``
+    caps the memory (one row is 512 x 4096 bf16 = 4 MiB); beyond it the oldest
+    entries are evicted.
+    """
+
+    def __init__(self, max_entries: int = 256):
+        import collections
+
+        self.max_entries = int(max_entries)
+        self.rows = collections.OrderedDict()
+        self.hits = 0
+        self.misses = 0
+        self.last_max_len = None  # longest prompt (tokens) of the last encoded batch, host-side
+
+    def get(self, key):
+        return self.rows.get(key)
+
+    def put(self, key, row: Tensor) -> None:
+        if key in self.rows or self.max_entries <= 0:
+            return
+        self.rows[key] = row
+        while len(self.rows) > self.max_entries:
+            self.rows.popitem(last=False)
+
+
+def _to_device(t: Tensor, device) -> Tensor:
+    """Host-to-device copy without a host sync (through pinned memory) where CUDA is available."""
+    if torch.device(device).type == "cuda":
+        return t.pin_memory().to(device, non_blocking=True)
+    return t.to(device)
+
+
+def _encoder_is_frozen_eval(text_encoder) -> bool:
+    if not isinstance(text_encoder, torch.nn.Module):
+        return False
+    if any(m.training for m in text_encoder.modules()):
+        return False
+    return not any(p.requires_grad for p in text_encoder.parameters())
+
+
+def encode_text_cached(prompts: list, *, tokenizer, text_encoder, device, cache) -> Tuple[Tensor, Tensor]:
+    """``encode_text`` with a :class:`TrainTextEmbedCache` (same outputs, bit for bit).
+
+    When every sample of the batch is cached, the rows are stacked; otherwise the
+    encoder runs on the whole batch as in ``encode_text`` and its rows are cached.
+    The padding rows are zeroed with ``masked_fill_`` (the same +0.0 as the
+    per-sample slice assignment of ``encode_text``, without its per-sample host syncs).
+    """
+    if cache is None or not _encoder_is_frozen_eval(text_encoder):
+        return _encode_text_uncached(prompts, tokenizer=tokenizer, text_encoder=text_encoder, device=device)
+    ids, mask = tokenizer(
+        prompts,
+        return_mask=True,
+        add_special_tokens=True,
+        max_length=512,
+        padding="max_length",
+        truncation=True,
+    )
+    keys = [(ids[i].numpy().tobytes(), mask[i].numpy().tobytes()) for i in range(ids.shape[0])]
+    seq_lens_cpu = mask.gt(0).sum(dim=1).long()
+    cache.last_max_len = int(seq_lens_cpu.max().item()) if seq_lens_cpu.numel() else 0
+    seq_lens = _to_device(seq_lens_cpu, device)
+    rows = [cache.get(k) for k in keys]
+    n = cache.hits + cache.misses + 1
+    if n & (n - 1) == 0 and os.environ.get("RANK", "0") == "0":
+        logger.info(
+            "text-embed cache: call %d, hits %d, misses %d, entries %d", n, cache.hits, cache.misses, len(cache.rows)
+        )
+    if all(r is not None for r in rows):
+        cache.hits += 1
+        return torch.stack(rows, dim=0), seq_lens
+    cache.misses += 1
+    if os.environ.get("OPENWAM_TEXT_MISS_FAST", "0") == "1":
+        return _encode_misses(
+            ids, mask, keys, rows, seq_lens_cpu, seq_lens, text_encoder=text_encoder, device=device, cache=cache
+        )
+    context = text_encoder(_to_device(ids, device), _to_device(mask, device))
+    pad = torch.arange(context.shape[1], device=context.device).unsqueeze(0) >= seq_lens.unsqueeze(1)
+    context.masked_fill_(pad.unsqueeze(-1), 0)
+    for i, k in enumerate(keys):
+        if cache.get(k) is None:
+            cache.put(k, context[i].clone())
+    return context, seq_lens
+
+
+def _encode_misses(ids, mask, keys, rows, seq_lens_cpu, seq_lens, *, text_encoder, device, cache):
+    """Cache-miss path with ``OPENWAM_TEXT_MISS_FAST=1``: run the frozen umT5 only on the distinct
+    prompts of the batch that are not cached yet, on their token prefix padded to a multiple of 64
+    instead of 512.
+
+    The same function per row: the encoder's rows are independent (per-row GEMMs, per-row attention),
+    padded keys get ``finfo.min`` before the fp32 softmax (weight exactly 0) and the relative position
+    bias depends only on i - j, so the outputs at the valid positions do not depend on how much padding
+    follows; positions >= seq_len are zeroed and the row is zero-padded back to 512. The GEMMs run with
+    other shapes, so rounding can differ from a full-batch 512-token encode. Rows are cached as on the
+    full-batch path.
+    """
+    miss, seen = [], set()
+    for i, k in enumerate(keys):
+        if rows[i] is None and k not in seen:
+            seen.add(k)
+            miss.append(i)
+    full_len = ids.shape[1]
+    sl = seq_lens_cpu[miss]
+    L = min(full_len, max(64, ((int(sl.max()) + 63) // 64) * 64))
+    sub_ids = _to_device(ids[miss, :L].contiguous(), device)
+    sub_mask = _to_device(mask[miss, :L].contiguous(), device)
+    out = text_encoder(sub_ids, sub_mask)
+    sl_d = _to_device(sl, device)
+    pad = torch.arange(L, device=out.device).unsqueeze(0) >= sl_d.unsqueeze(1)
+    out.masked_fill_(pad.unsqueeze(-1), 0)
+    if L < full_len:
+        out = torch.nn.functional.pad(out, (0, 0, 0, full_len - L))
+    new_rows = {}
+    for j, i in enumerate(miss):
+        row = out[j].clone()
+        new_rows[keys[i]] = row
+        cache.put(keys[i], row)
+    context = torch.stack([r if r is not None else new_rows[k] for r, k in zip(rows, keys)], dim=0)
     return context, seq_lens
 
 
@@ -49,9 +192,30 @@ def encode_text_for_inference(
 
 
 def preprocess_video(frames, *, encoder=None, dtype, device) -> Tensor:
+    """One clip (list of PIL frames) -> ``(1, C, T, H, W)``; or, for a batch of uint8
+    ``(T, H, W, 3)`` clip tensors (``openwam.dataloader.collate``), the stacked
+    ``(B, C, T, H, W)`` batch (see ``preprocess_video_uint8_batch``)."""
+    if encoder is None and isinstance(frames, (list, tuple)) and frames and isinstance(frames[0], Tensor):
+        return preprocess_video_uint8_batch(frames, dtype=dtype, device=device)
     if encoder is not None:
         return encoder.preprocess_video(frames)
     return _preprocess_video_native(frames, dtype=dtype, device=device)
+
+
+def preprocess_video_uint8_batch(clips, *, dtype, device, min_value=-1, max_value=1) -> Tensor:
+    """Batched GPU form of ``torch.cat([preprocess_video(clip) for clip in clips])``.
+
+    ``preprocess_video`` per frame: float32 pixel array -> ``dtype`` (exact for 0..255) on the
+    device, ``* ((max - min) / 255)``, ``+ min`` (each op rounding to ``dtype``),
+    laid out ``(1, C, T, H, W)``; clips concatenated on dim 0. Here the uint8
+    pixels go to the device (asynchronously when pinned), are converted to
+    ``dtype`` there (exact) and go through the same two ops in the same order, then
+    are laid out ``(B, C, T, H, W)`` contiguously: bitwise the same tensor.
+    """
+    on_dev = [c.to(device=device, non_blocking=True) for c in clips]
+    x = torch.stack(on_dev, dim=0).to(dtype=dtype)
+    x = x * ((max_value - min_value) / 255) + min_value
+    return x.permute(0, 4, 1, 2, 3).contiguous()
 
 
 def encode_video(video_tensor: Tensor, *, vae, encoder=None) -> Tensor:

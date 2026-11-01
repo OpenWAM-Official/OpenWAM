@@ -45,6 +45,25 @@ from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint i
 logger = logging.getLogger(__name__)
 
 
+def _truncate_padded_context(context: Tensor, max_len: Optional[int]) -> Tensor:
+    """Drop trailing all-padding text positions (``OPENWAM_CONTEXT_TRUNC=1``).
+
+    Positions ``>= seq_len`` of every sample are zero rows that every consumer masks
+    out (``context_mask = positions < seq_lens``; the cross-attentions carry no
+    positional encoding on keys), so keeping the first ``L`` positions with
+    ``L >= max(seq_lens)`` leaves the function unchanged while the per-token text
+    embedding, K/V projections and norms stop running on hundreds of padding rows.
+    ``L`` is rounded so that ``L + 1`` (with the appended proprio token) is a
+    multiple of 64: one static shape for short prompts.
+    """
+    if max_len is None or os.environ.get("OPENWAM_CONTEXT_TRUNC", "0") != "1":
+        return context
+    keep = ((int(max_len) + 1 + 63) // 64) * 64 - 1
+    if keep >= context.shape[1]:
+        return context
+    return context[:, :keep].contiguous()
+
+
 class WanBase(VideoBackbone):
     """Exposes the Wan modules through the VideoBackbone interface.
 
@@ -147,6 +166,13 @@ class WanBase(VideoBackbone):
         produces garbage there at inference (the cell-4 mock-loss divergence).
         """
         return self._variant.needs_first_frame_skip
+
+    @property
+    def accepts_uint8_clips(self) -> bool:
+        """Whether :meth:`preprocess_input_for_train` takes the uint8 ``(T, H, W, 3)``
+        clip tensors of ``openwam.dataloader.collate`` (``OPENWAM_FAST_INPUT=1``):
+        native Wan VAE and a variant that does not read the frames' pixels."""
+        return self.video_encoder is None and not self._variant.reads_frame_pixels
 
     # ================================================================
     # ABC: Properties (6) — device/dtype inherited from VideoBackbone
@@ -345,6 +371,42 @@ class WanBase(VideoBackbone):
     # ABC: Three-step execution (3)
     # ================================================================
 
+    def _rope_freqs_on_device(self, dit, grid_frames: int, grid_height: int, grid_width: int, device) -> Tensor:
+        """The DiT's 3-D RoPE table for a (f, h, w) grid on ``device``.
+
+        ``dit.freqs`` are CPU complex128 constants; by default the table is rebuilt
+        on the CPU and copied with a blocking (stream-synchronizing) host-to-device
+        copy on every forward. The table depends only on the grid and the frozen
+        constants, so with ``OPENWAM_FAST_INPUT=1`` it is built the same way once
+        per grid and device and reused (same values, no per-iteration host sync).
+        """
+        use_cache = os.environ.get("OPENWAM_FAST_INPUT", "0") == "1"
+        cache = self.__dict__.setdefault("_rope_freqs_cache", {})
+        key = (int(grid_frames), int(grid_height), int(grid_width), str(device), id(dit.freqs[0]))
+        freqs = cache.get(key) if use_cache else None
+        if freqs is None:
+            freqs = (
+                torch.cat(
+                    [
+                        dit.freqs[0][:grid_frames]
+                        .view(grid_frames, 1, 1, -1)
+                        .expand(grid_frames, grid_height, grid_width, -1),
+                        dit.freqs[1][:grid_height]
+                        .view(1, grid_height, 1, -1)
+                        .expand(grid_frames, grid_height, grid_width, -1),
+                        dit.freqs[2][:grid_width]
+                        .view(1, 1, grid_width, -1)
+                        .expand(grid_frames, grid_height, grid_width, -1),
+                    ],
+                    dim=-1,
+                )
+                .reshape(grid_frames * grid_height * grid_width, 1, -1)
+                .to(device)
+            )
+            if use_cache:
+                cache[key] = freqs
+        return freqs
+
     def prepare(self, **kw) -> BlockLoopState:
         dit = self.dit
         motion_controller = self.motion_controller
@@ -422,24 +484,7 @@ class WanBase(VideoBackbone):
 
         grid_frames, grid_height, grid_width = hidden_states.shape[2:]
         hidden_states = rearrange(hidden_states, "b c f h w -> b (f h w) c").contiguous()
-        freqs = (
-            torch.cat(
-                [
-                    dit.freqs[0][:grid_frames]
-                    .view(grid_frames, 1, 1, -1)
-                    .expand(grid_frames, grid_height, grid_width, -1),
-                    dit.freqs[1][:grid_height]
-                    .view(1, grid_height, 1, -1)
-                    .expand(grid_frames, grid_height, grid_width, -1),
-                    dit.freqs[2][:grid_width]
-                    .view(1, 1, grid_width, -1)
-                    .expand(grid_frames, grid_height, grid_width, -1),
-                ],
-                dim=-1,
-            )
-            .reshape(grid_frames * grid_height * grid_width, 1, -1)
-            .to(hidden_states.device)
-        )
+        freqs = self._rope_freqs_on_device(dit, grid_frames, grid_height, grid_width, hidden_states.device)
 
         extras = {
             "dit": dit,
@@ -759,10 +804,16 @@ class WanBase(VideoBackbone):
         device = self.device
         dtype = self.dtype
 
+        uint8_clips = isinstance(frames[0], Tensor)
+        if uint8_clips:
+            # (T, H, W, 3) uint8 clips from openwam.dataloader.collate.openwam_collate
+            clip_t, clip_h, clip_w = int(frames[0].shape[0]), int(frames[0].shape[1]), int(frames[0].shape[2])
+        else:
+            clip_t, clip_h, clip_w = len(frames[0]), frames[0][0].size[1], frames[0][0].size[0]
         height, width, num_frames = check_resize_height_width(
-            frames[0][0].size[1],
-            frames[0][0].size[0],
-            len(frames[0]),
+            clip_h,
+            clip_w,
+            clip_t,
             height_division_factor=self._height_division_factor,
             width_division_factor=self._width_division_factor,
             time_division_factor=self._time_division_factor,
@@ -770,20 +821,48 @@ class WanBase(VideoBackbone):
         )
 
         batch_size = len(frames)
-        context, seq_lens = wan_encode.encode_text(
-            text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
-        )
-
-        all_input_videos = []
-        for clip_frames in frames:
-            all_input_videos.append(
-                wan_encode.preprocess_video(
-                    clip_frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device
-                )
+        text_cache = self.__dict__.get("_train_text_cache")
+        if text_cache is None and os.environ.get("OPENWAM_TEXT_CACHE", "0") == "1":
+            text_cache = wan_encode.TrainTextEmbedCache(
+                max_entries=int(os.environ.get("OPENWAM_TEXT_CACHE_MAX_ENTRIES", "256"))
             )
-        stacked_inputs = torch.cat(all_input_videos, dim=0)
+            self.__dict__["_train_text_cache"] = text_cache
+
+        def _encode_text():
+            if text_cache is None:  # OPENWAM_TEXT_CACHE off: the default encode (no truncation possible)
+                return wan_encode.encode_text(
+                    text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
+                )
+            text_cache.last_max_len = None  # set by the cached encode path only; None = keep the padded context
+            ctx, sl = wan_encode.encode_text(
+                text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device, cache=text_cache
+            )
+            return _truncate_padded_context(ctx, text_cache.last_max_len), sl
+
+        # OPENWAM_VAE_FIRST=1: queue the VAE encode before the text encode. The two are independent (no random
+        # draws, no shared state), so only the launch order changes: the host-side tokenization / cache lookup then
+        # runs while the GPU encodes the clips instead of in front of them.
+        vae_first = os.environ.get("OPENWAM_VAE_FIRST", "0") == "1"
+        if not vae_first:
+            context, seq_lens = _encode_text()
+
+        if uint8_clips and self.video_encoder is None:
+            stacked_inputs = wan_encode.preprocess_video(
+                list(frames), encoder=None, dtype=self.dtype, device=self.device
+            )
+        else:
+            all_input_videos = []
+            for clip_frames in frames:
+                all_input_videos.append(
+                    wan_encode.preprocess_video(
+                        clip_frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device
+                    )
+                )
+            stacked_inputs = torch.cat(all_input_videos, dim=0)
         input_latents = wan_encode.encode_video(stacked_inputs, vae=self.vae, encoder=self.video_encoder)
         input_latents = input_latents.to(dtype=dtype, device=device)
+        if vae_first:
+            context, seq_lens = _encode_text()
 
         # Variant-specific first-frame / control conditioning lives in
         # ``self._variant``, so this method carries no per-variant ``if``.

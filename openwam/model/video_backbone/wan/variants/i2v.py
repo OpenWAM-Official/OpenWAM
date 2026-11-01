@@ -15,6 +15,8 @@ class I2VVariant(WanVariant):
     channel-axis concatenated in ``prepare``). Both are gated on what the DiT
     declares it requires (``require_clip_embedding`` / ``require_vae_embedding``)."""
 
+    reads_frame_pixels = True
+
     def build_train_conditioning(
         self, bb, *, frames, ref_images, B, num_frames, height, width, device, dtype, **kw
     ) -> dict:

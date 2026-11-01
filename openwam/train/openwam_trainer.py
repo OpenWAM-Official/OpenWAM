@@ -29,6 +29,7 @@ import os
 import torch
 from omegaconf import DictConfig
 
+from openwam.dataloader.collate import openwam_collate
 from openwam.train.utils.checkpointing import (
     compute_resume_position,
     finalize_keep_weights_only,
@@ -410,7 +411,7 @@ class OpenWAMTrainer:
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=int(t.dataset_num_workers),
-            collate_fn=list,
+            collate_fn=self._collate_fn(),
             pin_memory=True,
         )
         if not shuffle:
@@ -424,6 +425,16 @@ class OpenWAMTrainer:
             kwargs["generator"] = make_dataloader_generator(self._run_seed, rank=self._rank)
             kwargs["worker_init_fn"] = dataloader_worker_init_fn
         return torch.utils.data.DataLoader(self.dataset, **kwargs)
+
+    def _collate_fn(self):
+        """``list``; with ``OPENWAM_FAST_INPUT=1`` and a video backbone that takes uint8
+        clip tensors, ``openwam_collate`` (frames converted in the DataLoader workers)."""
+        if os.environ.get("OPENWAM_FAST_INPUT", "0") != "1":
+            return list
+        if getattr(getattr(self.architecture, "video_backbone", None), "accepts_uint8_clips", False):
+            return openwam_collate
+        logger.warning("OPENWAM_FAST_INPUT=1: the video backbone takes PIL frames; frames are collated as a list")
+        return list
 
     # (5) Called by train() — linear-warmup + cosine schedule, or None (constant LR / debug).
     def build_lr_scheduler(self, optimizer, total_opt_steps: int, debug: bool = False):

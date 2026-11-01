@@ -13,6 +13,8 @@ class VACEVariant(WanVariant):
     supervised; no ``first_frame_latents`` is emitted (that key is TI2V's
     clean-replacement contract)."""
 
+    reads_frame_pixels = True
+
     def build_train_conditioning(
         self, bb, *, ref_images, vace_videos, stacked_inputs, B, num_frames, height, width, **kw
     ) -> dict:
