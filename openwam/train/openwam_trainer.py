@@ -41,6 +41,7 @@ from openwam.train.utils.checkpointing import (
     save_weights,
     verify_resume_normalization_stats,
 )
+from openwam.train.utils.grad_accumulation import scale_loss_for_backward
 from openwam.train.utils.optimizer_groups import build_trainable_parameters
 from openwam.train.utils.seeding import per_step_seed, seed_process, wire_sampler_seed
 from openwam.train.utils.training_utils import (
@@ -321,7 +322,8 @@ class OpenWAMTrainer:
                 with self.accelerator.accumulate(self.architecture):
                     losses = self.compute_loss(batch)
                     loss = losses["total"]
-                    self.accelerator.backward(loss)
+                    # Mean (not sum) over gradient-accumulation micro-batches on every DeepSpeed version.
+                    self.accelerator.backward(scale_loss_for_backward(self.accelerator, loss))
 
                     grad_norm = torch.tensor(0.0, device=loss.device)
                     if self.accelerator.sync_gradients:
