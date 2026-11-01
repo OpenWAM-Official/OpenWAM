@@ -1168,6 +1168,10 @@ class WanVideoVAE(nn.Module):
         """
         videos = videos.to(device)
         with torch.no_grad():
+            from openwam.model.kernels import vae_fast
+
+            if vae_fast.supported(self.model, videos):
+                return vae_fast.encode(self.model, videos, self.scale)
             return self.model.encode(videos, self.scale)
 
     def single_encode(self, video, device):
