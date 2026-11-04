@@ -88,7 +88,8 @@ All architectures are selected via `configs/model/<framework>.yaml` with `archit
 -->
 
 ## News
-- **[2026/11/02]** 😎 Training infrastructure optimization made by [ResearchBoost-Agent](https://github.com/DAGroup-PKU/ResearchBoost-Agent) makes OpenWAM-α fine-tuning 2.4–3.1× faster.
+
+- **[2026/11/05]** 🚀 Thanks to [ResearchBoost-Agent (RBA)](https://github.com/DAGroup-PKU/ResearchBoost-Agent) for accelerating OpenWAM-α training! The [original LIBERO experiments](https://github.com/OpenWAM-Official/OpenWAM/pull/58) report **2.41–3.13× training speedups**, with **99.05–99.40% success** versus **99.20%** for the released model. See [training acceleration](#training-acceleration) for the current configuration.
 - **[2026/10/25]** 🤗 We release all cleaned robot datasets used for OpenWAM pretraining: [AgiBotWorld-Beta](https://huggingface.co/datasets/OpenWAM/AgiBotWorld-Beta), [RoboCOIN](https://huggingface.co/datasets/wayrise/RoboCOIN), [InternData-A1](https://huggingface.co/datasets/OpenWAM/InternData-A1), and [DROID](https://huggingface.co/datasets/OpenWAM/Droid).
 - **[2026/10/10]** 🌟 OpenWAM reaches **1K GitHub stars**! Thank you for your support!
 - **[2026/09/09]** 📄 OpenWAM [Paper](https://arxiv.org/pdf/2609.07398) is released on arXiv.
@@ -126,7 +127,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-We recommend using PyTorch 2.7.1 with CUDA 12.8 (others may also work):
+OpenWAM requires **PyTorch >= 2.7.1 and < 3**. We recommend PyTorch 2.7.1 with CUDA 12.8:
 
 ```bash
 pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
@@ -420,6 +421,7 @@ entry points for using and extending the repository:
 
 | Guide | Use it when you want to… |
 |---|---|
+| [Training acceleration](#training-acceleration) | use the default RBA speed preset and configure gradient checkpointing or text-encoder offload |
 | [Docker and offline deployment](assets/openwam_usage_docs/docker.md) | build an image, run a first policy, train, develop with Compose, or deploy to an offline GPU host |
 | [Training and deployment](assets/openwam_usage_docs/train-and-deploy.md) | choose a model/dataloader, prepare assets, train, fine-tune, resume, or deploy a policy |
 | [Architecture extension](assets/openwam_usage_docs/architecture-extension.md) | extend a video, visual, VLM, action backbone, or WAM architecture |
@@ -433,9 +435,52 @@ Installation and Assets Preparation above cover environment setup and model or
 dataset downloads. Benchmark-specific environment and evaluation details remain
 in the benchmarks directory.
 
+### Training acceleration
+
+Existing `bash scripts/train.sh ...` commands, including the OpenWAM-α fine-tuning
+example above, load [`presets/fast.env`](presets/fast.env) by default through
+`training.speed_preset`. The optimizations are included in OpenWAM; no separate
+RBA package or environment-variable prefix is needed.
+
+Configure the preset and memory options in [`configs/train.yaml`](configs/train.yaml)
+or override them on the command line:
+
+```yaml
+training:
+  speed_preset: presets/fast.env
+  use_gradient_checkpointing: true
+  gradient_checkpointing_layers: null
+  text_encoder_offload: false
+```
+
+- `gradient_checkpointing_layers`: `null` recomputes all layers; a non-negative
+  integer recomputes the first N layers, capped at the model depth (`0`: none).
+  This layer limit applies when `use_gradient_checkpointing=true` to dual-system
+  `joint_self_attn` and IDM's standard joint-loop fallback. IDM teacher-forcing,
+  single-system, and tri-system paths retain their existing checkpointing policies.
+- `text_encoder_offload`: defaults to `false`. Set it to `true` to keep frozen,
+  eval-mode Wan text-encoder weights on the CPU between text-cache misses.
+  This requires the text cache enabled by `fast.env` and is independent of gradient
+  checkpointing. Cache misses add CPU-to-GPU weight transfers. The separate
+  `use_gradient_checkpointing_offload` option controls activation offload.
+
+To skip preset loading, add `training.speed_preset=null` to your training command;
+manually exported optimization switches remain in effect. Explicit YAML/CLI preset
+selection takes precedence over the legacy `OPENWAM_PRESET` selector, and loaded
+preset values override matching environment variables.
+
+Choose batch size and memory options for your hardware. Initial iterations include
+compilation warmup. The speedups in News were measured with the original PR's
+LIBERO recipes (4 GPUs, batch size 32 per GPU), whose checkpointing and offload
+settings differ from the current defaults above.
+
 ## Projects Based on OpenWAM
 
+Community projects and integrations that extend, deploy, or help optimize OpenWAM:
+
 - **[LD4WAM](https://github.com/stubborn111/LD4WAM)** — *LD4WAM: Learning Latent Dynamics from Human Videos for World Action Models* ([arXiv:2608.22403](https://arxiv.org/abs/2608.22403)). Learns a Latent Dynamics Model (LDM) from human videos and uses it to build a World Dynamics Action Model (WDAM) — a Wan2.2 video DiT coupled with a latent-dynamics expert and an action expert — on top of the OpenWAM framework, evaluated on RoboTwin 2.0.
+- **[ResearchBoost-Agent (RBA)](https://github.com/DAGroup-PKU/ResearchBoost-Agent)** — An autonomous agent that profiles, optimizes, and validates AI training code. RBA supported the development of [OpenWAM-α training acceleration](https://github.com/OpenWAM-Official/OpenWAM/pull/58).
+- **[ManiMux](https://github.com/SII-LiuLab/manimux)** — A real-robot inference, deployment, and experiment-management framework that integrates OpenWAM through XPolicyLab, connecting policy servers to robot hardware with a shared configuration workflow and the RoboGUI operator interface.
 
 If you build on OpenWAM, feel free to open a PR to add your project here.
 
