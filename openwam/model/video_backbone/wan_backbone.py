@@ -50,9 +50,10 @@ logger = logging.getLogger(__name__)
 def _truncate_padded_context(context: Tensor, max_len: Optional[int]) -> Tensor:
     """Drop trailing all-padding text positions (``OPENWAM_CONTEXT_TRUNC=1``).
 
-    Positions ``>= seq_len`` of every sample are zero rows that every consumer masks
-    out (``context_mask = positions < seq_lens``; the cross-attentions carry no
-    positional encoding on keys), so keeping the first ``L`` positions with
+    Callers must ensure that every consumer masks positions ``>= seq_len``
+    (``context_mask = positions < seq_lens``). VACE's unmasked hint blocks do
+    not satisfy this contract. For masked consumers, the cross-attentions carry
+    no positional encoding on keys, so keeping the first ``L`` positions with
     ``L >= max(seq_lens)`` leaves the function unchanged while the per-token text
     embedding, K/V projections and norms stop running on hundreds of padding rows.
     ``L`` is rounded so that ``L + 1`` (with the appended proprio token) is a
@@ -877,7 +878,9 @@ class WanBase(VideoBackbone):
             ctx, sl = wan_encode.encode_text(
                 text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device, cache=text_cache
             )
-            return _truncate_padded_context(ctx, text_cache.last_max_len), sl
+            if self._variant.supports_context_truncation:
+                ctx = _truncate_padded_context(ctx, text_cache.last_max_len)
+            return ctx, sl
 
         # OPENWAM_VAE_FIRST=1: queue the VAE encode before the text encode. The two are independent (no random
         # draws, no shared state), so only the launch order changes: the host-side tokenization / cache lookup then

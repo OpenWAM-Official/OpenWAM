@@ -24,6 +24,7 @@ import os
 
 import torch
 import torch.nn.functional as F
+from torch.nn.modules import module as module_hooks
 
 _ENABLED = os.environ.get("OPENWAM_COMPILE_BLOCKS", "0") == "1"
 _COMPILED: dict = {}
@@ -48,6 +49,101 @@ def _rms(x, w, eps: float):
     dtype = x.dtype
     xf = x.float()
     return (xf * torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + eps)).to(dtype) * w
+
+
+def _global_hooks_present() -> bool:
+    # Global hooks live outside each module's hook dictionaries, but functional
+    # inlining bypasses them too. Check once per support query, not per leaf.
+    return bool(
+        module_hooks._global_forward_pre_hooks
+        or module_hooks._global_forward_hooks
+        or module_hooks._global_backward_pre_hooks
+        or module_hooks._global_backward_hooks
+    )
+
+
+def _standard_forward(module, expected_type) -> bool:
+    """Only inline the shipped forward, preserving wrappers and module hooks.
+
+    ``requires_grad_(False)`` still permits gradients to inputs, and ``eval()``
+    does not disable autograd. Neither is a reason to reject fusion. In contrast,
+    ``freeze_modules`` wraps every descendant's forward in no_grad; reading its
+    weights directly would bypass that boundary. Check live metadata so freezing
+    or replacing a submodule after a previous fast call cannot leave a stale yes.
+    """
+    attrs = module.__dict__
+    return (
+        type(module) is expected_type
+        and not attrs.get("_openwam_no_grad_wrapped", False)
+        and "forward" not in attrs
+        and not module._forward_pre_hooks
+        and not module._forward_hooks
+        and not module._backward_pre_hooks
+        and not module._backward_hooks
+    )
+
+
+def _attention_forward_supported(attn, expected_type, rms_type, attention_type=None) -> bool:
+    # Fixed list of inlined operations: no recursive walk through the model.
+    return (
+        _standard_forward(attn, expected_type)
+        and all(_standard_forward(getattr(attn, name), torch.nn.Linear) for name in ("q", "k", "v", "o"))
+        and _standard_forward(attn.norm_q, rms_type)
+        and _standard_forward(attn.norm_k, rms_type)
+        and (attention_type is None or _standard_forward(attn.attn, attention_type))
+    )
+
+
+def _ffn_forward_supported(ffn) -> bool:
+    return (
+        _standard_forward(ffn, torch.nn.Sequential)
+        and len(ffn) == 3
+        and _standard_forward(ffn[0], torch.nn.Linear)
+        and _standard_forward(ffn[1], torch.nn.GELU)
+        and _standard_forward(ffn[2], torch.nn.Linear)
+    )
+
+
+def _wan_forward_supported(block) -> bool:
+    from openwam.model.video_backbone.wan.models.dit import (
+        AttentionModule,
+        CrossAttention,
+        DiTBlock,
+        GateModule,
+        RMSNorm,
+        SelfAttention,
+    )
+
+    return (
+        _standard_forward(block, DiTBlock)
+        and all(_standard_forward(getattr(block, name), torch.nn.LayerNorm) for name in ("norm1", "norm2", "norm3"))
+        and _attention_forward_supported(block.self_attn, SelfAttention, RMSNorm, AttentionModule)
+        and _attention_forward_supported(block.cross_attn, CrossAttention, RMSNorm, AttentionModule)
+        and _ffn_forward_supported(block.ffn)
+        and _standard_forward(block.gate, GateModule)
+    )
+
+
+def _act_forward_supported(block) -> bool:
+    # Lazy import: the action backbone imports this module.
+    from openwam.model.action_backbone.components import RMSNorm
+    from openwam.model.action_backbone.separate_action_dit import (
+        ActionSelfAttention,
+        BridgeCrossAttention,
+        SelfAttnActionDiTBlock,
+    )
+
+    return (
+        _standard_forward(block, SelfAttnActionDiTBlock)
+        and "gate" not in block.__dict__
+        and all(
+            _standard_forward(getattr(block, name), torch.nn.LayerNorm)
+            for name in ("self_attn_norm", "ffn_norm", "context_attn_norm")
+        )
+        and _attention_forward_supported(block.self_attn, ActionSelfAttention, RMSNorm)
+        and _attention_forward_supported(block.cross_attn, BridgeCrossAttention, RMSNorm)
+        and _ffn_forward_supported(block.ffn)
+    )
 
 
 # ---------------------------------------------------------------- video (Wan DiT block)
@@ -79,6 +175,8 @@ def wan_block_supported(block, time_mod) -> bool:
     return (
         _ENABLED
         and not torch.are_deterministic_algorithms_enabled()
+        and not _global_hooks_present()
+        and _wan_forward_supported(block)
         and time_mod.dim() == 4
         and not getattr(ca, "has_image_input", False)
         and block.norm1.weight is None
@@ -163,6 +261,8 @@ def act_block_supported(block, t_mod) -> bool:
     return (
         _ENABLED
         and not torch.are_deterministic_algorithms_enabled()
+        and not _global_hooks_present()
+        and _act_forward_supported(block)
         and t_mod.dim() == 3
         and block.self_attn_norm.weight is None
         and block.ffn_norm.weight is None

@@ -27,7 +27,7 @@ def encode_text(prompts: list, *, tokenizer, text_encoder, device, cache=None) -
     return _encode_text_uncached(prompts, tokenizer=tokenizer, text_encoder=text_encoder, device=device)
 
 
-def _encode_text_uncached(prompts: list, *, tokenizer, text_encoder, device) -> Tuple[Tensor, Tensor]:
+def _encode_text_uncached(prompts: list, *, tokenizer, text_encoder, device, cache=None) -> Tuple[Tensor, Tensor]:
     ids, mask = tokenizer(
         prompts,
         return_mask=True,
@@ -39,7 +39,7 @@ def _encode_text_uncached(prompts: list, *, tokenizer, text_encoder, device) -> 
     ids = ids.to(device)
     mask = mask.to(device)
     seq_lens = mask.gt(0).sum(dim=1).long()
-    context = text_encoder(ids, mask)
+    context = _run_encoder(text_encoder, ids, mask, device=device, cache=cache)
     for i, v in enumerate(seq_lens):
         context[i, v:] = 0
     return context, seq_lens
@@ -79,6 +79,10 @@ class TrainTextEmbedCache:
         while len(self.rows) > self.max_entries:
             self.rows.popitem(last=False)
 
+    def clear(self) -> None:
+        self.rows.clear()
+        self.last_max_len = None
+
 
 class TextEncoderOffload:
     """Frozen umT5 weights in pinned host memory between text-cache misses (``OPENWAM_TEXT_ENCODER_OFFLOAD=1``,
@@ -100,6 +104,11 @@ class TextEncoderOffload:
         self.slots = []  # (tensor, dtype, offset, numel, shape)
         self.on_gpu = True  # the first miss runs with the weights where they were loaded
         self.loads = 0
+        self.enabled = True
+        self.cache = None
+        # Inference and uncached entry points do not receive the training cache.
+        # Keep the weight lifecycle discoverable from the encoder itself.
+        module._openwam_text_offload = self
 
     def _tensors(self):
         seen = set()
@@ -137,15 +146,39 @@ class TextEncoderOffload:
             t.data = self.host[dt][off : off + n].view(shape)
         self.on_gpu = False
 
+    def disable(self, device):
+        """Leave live weights on the compute device once the encoder can change.
 
-def _run_encoder(text_encoder, ids, mask, *, device, cache):
-    offload = getattr(cache, "offload", None)
+        Restoring the old frozen host snapshot after an optimizer step would
+        discard updates. Also, moving parameters during a differentiable
+        forward would invalidate backward's saved tensors.
+        """
+        self.acquire(device)
+        self.enabled = False
+        self.host = None
+        self.slots.clear()
+        if self.cache is not None:
+            self.cache.clear()
+
+
+def _run_encoder(text_encoder, ids, mask, *, device, cache=None):
+    offload = getattr(text_encoder, "_openwam_text_offload", None)
+    if offload is None:
+        offload = getattr(cache, "offload", None)
     if offload is None:
         return text_encoder(ids, mask)
+    if isinstance(cache, TrainTextEmbedCache):
+        offload.cache = cache
+    if not _encoder_is_frozen_eval(text_encoder):
+        offload.disable(device)
+        return text_encoder(ids, mask)
+    if not offload.enabled:
+        return text_encoder(ids, mask)
     offload.acquire(device)
-    out = text_encoder(ids, mask)
-    offload.release()
-    return out
+    try:
+        return text_encoder(ids, mask)
+    finally:
+        offload.release()
 
 
 def _to_device(t: Tensor, device) -> Tensor:
@@ -172,7 +205,11 @@ def encode_text_cached(prompts: list, *, tokenizer, text_encoder, device, cache)
     per-sample slice assignment of ``encode_text``, without its per-sample host syncs).
     """
     if cache is None or not _encoder_is_frozen_eval(text_encoder):
-        return _encode_text_uncached(prompts, tokenizer=tokenizer, text_encoder=text_encoder, device=device)
+        if cache is not None:
+            cache.clear()
+        return _encode_text_uncached(
+            prompts, tokenizer=tokenizer, text_encoder=text_encoder, device=device, cache=cache
+        )
     ids, mask = tokenizer(
         prompts,
         return_mask=True,

@@ -15,6 +15,10 @@ class VACEVariant(WanVariant):
 
     reads_frame_pixels = True
 
+    # VACE hint blocks attend to padding without a context mask. Removing those
+    # keys changes attention normalization, even when their input rows are zero.
+    supports_context_truncation = False
+
     def build_train_conditioning(
         self, bb, *, ref_images, vace_videos, stacked_inputs, B, num_frames, height, width, **kw
     ) -> dict:

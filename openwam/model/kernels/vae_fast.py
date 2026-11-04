@@ -3,8 +3,10 @@
 ``VideoVAE38_.encode`` runs the causal encoder chunk by chunk (the first
 frame, then 4-frame chunks), carrying the last frames of every causal conv's input
 in ``feat_cache`` and concatenating them in front of the next chunk. For a clip of
-``1 + 4k`` frames that is the same function as running every layer once on the whole
-clip:
+``1 + 4k`` frames (``k >= 1``) that is the same function as running every layer
+once on the whole clip. A single frame stays on the original chunked encoder:
+its temporal downsamplers pass that frame through without running ``time_conv``.
+For multi-frame clips:
 
 - ``CausalConv3d`` (temporal kernel 3): chunk ``i`` sees ``[cache (last 2 input
   frames, or 1 after the 1-frame first chunk, zero-padded to 2), chunk]``, i.e. each
@@ -179,6 +181,7 @@ def supported(model, x) -> bool:
         and isinstance(model, VideoVAE38_)
         and isinstance(model.encoder, Encoder3d_38)
         and x.dim() == 5
+        and x.shape[2] > 1
         and (x.shape[2] - 1) % 4 == 0
         and not torch.is_grad_enabled()
     )

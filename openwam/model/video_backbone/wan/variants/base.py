@@ -23,6 +23,10 @@ class WanVariant:
     # tensors of ``openwam.dataloader.collate`` (``OPENWAM_FAST_INPUT=1``).
     reads_frame_pixels: bool = False
 
+    # Truncation is equivalent only when every consumer masks padded text keys.
+    # Variants with an unmasked text-attention branch must keep the full context.
+    supports_context_truncation: bool = True
+
     def build_train_conditioning(
         self,
         bb,
