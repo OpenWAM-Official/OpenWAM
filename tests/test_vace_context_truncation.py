@@ -58,7 +58,6 @@ def _isolate_optimization_switches(monkeypatch):
         "OPENWAM_TEXT_CACHE_MAX_ENTRIES": "8",
         "OPENWAM_TEXT_MISS_FAST": "0",
         "OPENWAM_CONTEXT_TRUNC": "0",
-        "OPENWAM_TEXT_ENCODER_OFFLOAD": "0",
         "OPENWAM_VAE_FIRST": "0",
     }.items():
         monkeypatch.setenv(name, value)

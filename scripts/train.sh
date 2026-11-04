@@ -19,7 +19,7 @@
 #
 # ── Speed preset (loaded by train.py before training imports) ──
 # Defaults to presets/fast.env; explicit Hydra selection overrides OPENWAM_PRESET.
-#   bash scripts/train.sh training.speed_preset=presets/fast_80gb.env training.batch_size=32
+#   bash scripts/train.sh training.text_encoder_offload=true
 #   bash scripts/train.sh training.speed_preset=null
 # ───────────────────────���──────────────────────────────────────
 set -euo pipefail

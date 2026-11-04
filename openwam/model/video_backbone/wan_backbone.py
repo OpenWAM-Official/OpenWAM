@@ -32,7 +32,7 @@ from openwam.model.compile_options import (
 )
 from openwam.model.kernels import fused_blocks
 from openwam.model.kernels.rope_triton import rope_apply_auto
-from openwam.model.video_backbone.base import BlockLoopState, VideoBackbone
+from openwam.model.video_backbone.base import BlockLoopState, VideoBackbone, validate_text_encoder_offload
 from openwam.model.video_backbone.wan import action_tokens as wan_action_tokens
 from openwam.model.video_backbone.wan import conditioning as wan_conditioning
 from openwam.model.video_backbone.wan import dit_forward as wan_dit_forward
@@ -136,6 +136,7 @@ class WanBase(VideoBackbone):
         self._wan_blocks_compile_enabled = False
         self._wan_blocks_compile_kwargs: dict | None = None
         self._compiled_wan_blocks: dict[int, Callable[..., Tensor]] = {}
+        self._text_encoder_offload = False
 
     # ================================================================
     # Internal properties
@@ -826,6 +827,27 @@ class WanBase(VideoBackbone):
     # ABC: Unified preprocessing (1)
     # ================================================================
 
+    def set_text_encoder_offload(self, enabled: bool = False) -> None:
+        """Enable frozen umT5 weight offload between training text-cache misses.
+
+        The cache and weight manager are created lazily during preprocessing.
+        Disabling an already-used manager restores live weights to the compute
+        device, including when the same backbone is subsequently used to infer.
+        """
+        enabled = validate_text_encoder_offload(enabled)
+        text_encoder = getattr(self, "text_encoder", None)
+        if enabled and text_encoder is None:
+            raise ValueError("training.text_encoder_offload=true requires a text encoder.")
+        if not enabled:
+            offload = getattr(text_encoder, "_openwam_text_offload", None)
+            if offload is not None:
+                offload.disable(self.device)
+                delattr(text_encoder, "_openwam_text_offload")
+                text_cache = self.__dict__.get("_train_text_cache")
+                if text_cache is not None and hasattr(text_cache, "offload"):
+                    delattr(text_cache, "offload")
+        self._text_encoder_offload = enabled
+
     def preprocess_input_for_train(self, *, frames=None, text=None, **kw) -> dict:
         """Unified train preprocessing: raw data (``frames``/``text``, optional
         ``vace_videos``/``ref_images`` in kw) → the denoising-loop input dict.
@@ -856,17 +878,14 @@ class WanBase(VideoBackbone):
                 max_entries=int(os.environ.get("OPENWAM_TEXT_CACHE_MAX_ENTRIES", "256"))
             )
             self.__dict__["_train_text_cache"] = text_cache
-            if os.environ.get("OPENWAM_TEXT_ENCODER_OFFLOAD", "0") == "1":
-                # umT5 weights in pinned host memory between cache misses (see wan_encode.TextEncoderOffload)
-                text_cache.offload = wan_encode.TextEncoderOffload(self.text_encoder)
-        elif (
-            text_cache is None
-            and os.environ.get("OPENWAM_TEXT_ENCODER_OFFLOAD", "0") == "1"
-            and not self.__dict__.get("_offload_warned")
-        ):
+        if text_cache is not None and self._text_encoder_offload and not hasattr(text_cache, "offload"):
+            # umT5 weights in pinned host memory between cache misses (see wan_encode.TextEncoderOffload)
+            text_cache.offload = wan_encode.TextEncoderOffload(self.text_encoder)
+        elif text_cache is None and self._text_encoder_offload and not self.__dict__.get("_offload_warned"):
             self.__dict__["_offload_warned"] = True
             logger.warning(
-                "OPENWAM_TEXT_ENCODER_OFFLOAD=1 needs OPENWAM_TEXT_CACHE=1 (umT5 runs every iteration without it); ignored"
+                "training.text_encoder_offload=true needs OPENWAM_TEXT_CACHE=1 "
+                "(umT5 runs every iteration without it); ignored"
             )
 
         def _encode_text():

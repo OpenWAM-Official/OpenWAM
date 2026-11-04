@@ -43,6 +43,8 @@ training:
                                          # Only when use_gradient_checkpointing=true; dual joint_self_attn and IDM's
                                          # standard joint-loop fallback only (not IDM teacher-forcing, single or tri).
   use_gradient_checkpointing_offload: false  # Offload checkpointed activations to CPU
+  text_encoder_offload: false            # Offload frozen/eval Wan text-encoder weights to CPU between cache misses
+                                         # Requires OPENWAM_TEXT_CACHE=1 (enabled by presets/fast.env), independent of GC
   initialize_model_on_cpu: false         # Load model on CPU, let DeepSpeed move to GPU
   offload_optimizer_device: none         # DeepSpeed ZeRO optimizer-state offload: none / cpu
 

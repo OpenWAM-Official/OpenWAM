@@ -93,11 +93,13 @@ class OpenWAMTrainer:
         # Build architecture (creates video_backbone internally from config).
         from openwam.model import build_architecture, resolve_architecture_config
         from openwam.model.architectures.base import validate_gradient_checkpointing_layers
+        from openwam.model.video_backbone.base import validate_text_encoder_offload
 
-        # Reject invalid layer limits before loading any model weights.
+        # Reject invalid memory settings before loading any model weights.
         gradient_checkpointing_layers = validate_gradient_checkpointing_layers(
             cfg_get(t, "gradient_checkpointing_layers", None)
         )
+        text_encoder_offload = validate_text_encoder_offload(cfg_get(t, "text_encoder_offload", False))
 
         # Finetune/resume: build from the self-contained checkpoint dir
         # (skeletons from its config.yaml component specs, weights from its
@@ -172,6 +174,7 @@ class OpenWAMTrainer:
             use_gradient_checkpointing=bool(t.use_gradient_checkpointing),
             use_gradient_checkpointing_offload=bool(t.use_gradient_checkpointing_offload),
             gradient_checkpointing_layers=gradient_checkpointing_layers,
+            text_encoder_offload=text_encoder_offload,
             max_timestep_boundary=float(t.max_timestep_boundary),
             min_timestep_boundary=float(t.min_timestep_boundary),
         )

@@ -25,12 +25,8 @@ def test_preset_switches_exist(path):
             assert f'"{key}"' in SOURCES, f"{path.name}: {key} is not read anywhere"
 
 
-def test_80gb_preset_extends_fast():
-    fast = dict(_entries(ROOT / "presets/fast.env"))
-    fast_80gb = dict(_entries(ROOT / "presets/fast_80gb.env"))
-    assert fast_80gb == {**fast, "OPENWAM_TEXT_ENCODER_OFFLOAD": "1"}
-
-
 @pytest.mark.parametrize("path", PRESETS, ids=lambda p: p.name)
-def test_presets_do_not_override_checkpointed_layer_count(path):
-    assert "OPENWAM_CKPT_LAYERS" not in dict(_entries(path))
+def test_presets_do_not_override_yaml_memory_settings(path):
+    settings = dict(_entries(path))
+    assert "OPENWAM_CKPT_LAYERS" not in settings
+    assert "OPENWAM_TEXT_ENCODER_OFFLOAD" not in settings

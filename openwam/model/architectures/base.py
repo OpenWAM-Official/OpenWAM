@@ -91,8 +91,7 @@ def validate_gradient_checkpointing_layers(value: Optional[int]) -> Optional[int
     """Validate the optional first-N layer limit without coercing invalid types."""
     if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
         raise ValueError(
-            "training.gradient_checkpointing_layers must be null (all layers) "
-            f"or a non-negative integer, got {value!r}"
+            f"training.gradient_checkpointing_layers must be null (all layers) or a non-negative integer, got {value!r}"
         )
     return value
 
@@ -887,6 +886,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
         gradient_checkpointing_layers: Optional[int] = None,
+        text_encoder_offload: bool = False,
         max_timestep_boundary: float = 1.0,
         min_timestep_boundary: float = 0.0,
     ) -> None:
@@ -897,8 +897,17 @@ class BaseWAMArchitecture(ABC, nn.Module):
         trainer no longer needs to thread these flags through every loss call.
         The layer limit is consumed directly by dual-system standard joint
         loops; other architecture paths retain their checkpointing policy.
+        Text-encoder weight offload is configured through the backbone contract
+        and is independent of activation checkpointing.
         """
+        from openwam.model.video_backbone.base import validate_text_encoder_offload
+
         gradient_checkpointing_layers = validate_gradient_checkpointing_layers(gradient_checkpointing_layers)
+        text_encoder_offload = validate_text_encoder_offload(text_encoder_offload)
+        if self.video_backbone is not None:
+            self.video_backbone.set_text_encoder_offload(text_encoder_offload)
+        elif text_encoder_offload:
+            raise ValueError("training.text_encoder_offload=true requires a video backbone.")
         self._use_gradient_checkpointing = bool(use_gradient_checkpointing)
         self._use_gradient_checkpointing_offload = bool(use_gradient_checkpointing_offload)
         self._gradient_checkpointing_layers = gradient_checkpointing_layers

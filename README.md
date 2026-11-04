@@ -411,26 +411,6 @@ CSV, exclusion list, or statistics generation step.
    Install and run the LIBERO client according to the
    [LIBERO evaluation guide](benchmarks/libero/README.md).
 
-### Faster Training
-
-Training infra optimization made by [ResearchBoost-Agent](https://github.com/DAGroup-PKU/ResearchBoost-Agent) makes OpenWAM-α fine-tuning 2.4–3.1× faster. To fine-tune with the recipe of the released OpenWAM-Alpha-Sim-LIBERO checkpoint on 8 GPUs, pick the preset that fits your GPU memory:
-
-| Preset | Peak memory per GPU | Speed-up |
-|---|---|---|
-| `presets/fast.env` | 120.4 GiB | 3.1× |
-| `presets/fast_80gb.env` | 69.1 GiB | 2.4× |
-
-~~~bash
-OPENWAM_PRESET=presets/fast_80gb.env bash scripts/train.sh \
-  dataloader=libero \
-  training.finetune_ckpt_path=<foundation_ckpt_dir_path> \
-  training.batch_size=32 \
-  training.num_epochs=10
-~~~
-
-Details of the training optimizations are in [`presets/README.md`](presets/README.md).
-
-
 ## OpenWAM Usage Guidance
 
 OpenWAM is configured through composable Hydra YAML files. Select an architecture,

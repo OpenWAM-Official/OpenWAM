@@ -53,9 +53,9 @@ def _preset_config(path):
     ("environment", "overrides", "expected"),
     [
         (None, (), "presets/fast.env"),
-        ("presets/fast_80gb.env", (), "presets/fast_80gb.env"),
-        ("presets/fast.env", ("training.speed_preset=presets/fast_80gb.env",), "presets/fast_80gb.env"),
-        ("presets/fast_80gb.env", ("training.speed_preset=presets/fast.env",), "presets/fast.env"),
+        ("presets/custom.env", (), "presets/custom.env"),
+        ("presets/fast.env", ("training.speed_preset=presets/custom.env",), "presets/custom.env"),
+        ("presets/custom.env", ("training.speed_preset=presets/fast.env",), "presets/fast.env"),
         ("presets/fast.env", ("training.speed_preset=null",), None),
     ],
 )
@@ -89,10 +89,12 @@ def test_cli_null_does_not_load_legacy_environment_preset(train_module, monkeypa
     assert dict(os.environ) == before
 
 
-def test_legacy_environment_preset_is_applied(train_module, monkeypatch):
-    monkeypatch.setenv("OPENWAM_PRESET", "presets/fast_80gb.env")
+def test_legacy_environment_preset_is_applied(train_module, monkeypatch, tmp_path):
+    preset = tmp_path / "custom.env"
+    preset.write_text("OPENWAM_PRESET_TEST=custom\n", encoding="utf-8")
+    monkeypatch.setenv("OPENWAM_PRESET", str(preset))
     train_module._apply_speed_preset(_compose())
-    assert os.environ["OPENWAM_TEXT_ENCODER_OFFLOAD"] == "1"
+    assert os.environ["OPENWAM_PRESET_TEST"] == "custom"
 
 
 def test_relative_preset_uses_project_root_instead_of_working_directory(train_module, monkeypatch, tmp_path):

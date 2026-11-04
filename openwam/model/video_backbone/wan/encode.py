@@ -85,7 +85,7 @@ class TrainTextEmbedCache:
 
 
 class TextEncoderOffload:
-    """Frozen umT5 weights in pinned host memory between text-cache misses (``OPENWAM_TEXT_ENCODER_OFFLOAD=1``,
+    """Frozen umT5 weights in pinned host memory between text-cache misses (``training.text_encoder_offload=true``,
     with ``OPENWAM_TEXT_CACHE=1``).
 
     With the text cache, umT5 only runs on cache misses (LIBERO: about 40 prompts, so only in the first iterations of
