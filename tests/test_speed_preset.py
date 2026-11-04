@@ -71,13 +71,11 @@ def test_hydra_preset_selection(monkeypatch, environment, overrides, expected):
 
 def test_default_config_loads_fast_preset_without_environment_prefix(train_module, monkeypatch):
     monkeypatch.delenv("OPENWAM_PRESET", raising=False)
-    monkeypatch.delenv("OPENWAM_COMPILE_BLOCKS", raising=False)
-    monkeypatch.setenv("OPENWAM_CKPT_LAYERS", "30")
+    monkeypatch.setenv("OPENWAM_COMPILE_BLOCKS", "0")
 
     train_module._apply_speed_preset(_compose())
 
     assert os.environ["OPENWAM_COMPILE_BLOCKS"] == "1"
-    assert os.environ["OPENWAM_CKPT_LAYERS"] == "0"
     assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
 
 
@@ -94,7 +92,6 @@ def test_cli_null_does_not_load_legacy_environment_preset(train_module, monkeypa
 def test_legacy_environment_preset_is_applied(train_module, monkeypatch):
     monkeypatch.setenv("OPENWAM_PRESET", "presets/fast_80gb.env")
     train_module._apply_speed_preset(_compose())
-    assert os.environ["OPENWAM_CKPT_LAYERS"] == "16"
     assert os.environ["OPENWAM_TEXT_ENCODER_OFFLOAD"] == "1"
 
 

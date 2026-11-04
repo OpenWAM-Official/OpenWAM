@@ -1,21 +1,11 @@
-"""Memory switches: partial activation checkpointing (OPENWAM_CKPT_LAYERS) and umT5 weight offload."""
+"""umT5 weight offload preserves encoder outputs and releases device weights."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from openwam.model.architectures.dual_system.mot_driver import _num_checkpointed_layers
 from openwam.model.video_backbone.wan import encode as wan_encode
-
-
-@pytest.mark.parametrize("value, expected", [(None, 30), ("", 30), ("0", 0), ("16", 16), ("99", 30)])
-def test_checkpointed_layer_count(monkeypatch, value, expected):
-    if value is None:
-        monkeypatch.delenv("OPENWAM_CKPT_LAYERS", raising=False)
-    else:
-        monkeypatch.setenv("OPENWAM_CKPT_LAYERS", value)
-    assert _num_checkpointed_layers(30) == expected
 
 
 class _Encoder(torch.nn.Module):

@@ -20,6 +20,7 @@ import torch
 from einops import rearrange
 from torch import Tensor
 
+from openwam.model.architectures.base import validate_gradient_checkpointing_layers
 from openwam.model.architectures.utils.common import compute_video_tokens_per_frame
 from openwam.model.architectures.utils.mask_modes import (
     ACTION_SEES_VIDEO,
@@ -92,7 +93,7 @@ class DualSystemMoTDriver:
         self.head_dim = vb.head_dim
         self.mot_checkpoint_mixed_attn = bool(mot_checkpoint_mixed_attn)
         # OPENWAM_MIXED_ATTN_CKPT=0/1 overrides mot_checkpoint_mixed_attn (the inner checkpoint of the joint attention
-        # in layers that are not checkpointed as a whole; see OPENWAM_CKPT_LAYERS). Unset: the config value.
+        # in layers not checkpointed as a whole; see training.gradient_checkpointing_layers). Unset: config value.
         mixed_attn_ckpt = os.environ.get("OPENWAM_MIXED_ATTN_CKPT", "").strip()
         if mixed_attn_ckpt in ("0", "1"):
             self.mot_checkpoint_mixed_attn = mixed_attn_ckpt == "1"
@@ -317,6 +318,7 @@ class DualSystemMoTDriver:
         *,
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
+        gradient_checkpointing_layers: Optional[int] = None,
     ) -> Tuple["BlockLoopState", "ActionState"]:
         """Run the full per-layer loop over both modalities.
 
@@ -325,8 +327,12 @@ class DualSystemMoTDriver:
         layer-invariant during one forward). The two ``use_gradient_*``
         flags are forwarded to :meth:`step` so each layer may opt into
         step-level activation checkpointing — see the class docstring of
-        :meth:`step` for memory/compute trade-offs.
+        :meth:`step` for memory/compute trade-offs. ``gradient_checkpointing_layers``
+        limits checkpointing to the first N layers; None means all layers.
+        The limit only takes effect when ``use_gradient_checkpointing`` is true.
         """
+        requested_layers = validate_gradient_checkpointing_layers(gradient_checkpointing_layers)
+        n_ckpt = self.num_layers if requested_layers is None else min(self.num_layers, requested_layers)
         # Resolve sequence shapes from the backbone-populated f/h/w fields.
         # ``vstate.hidden_states.shape[1]`` is identical to ``f*tokens_per_frame`` for
         # backbones that carry a 3D ``(B, S, D)`` state (Wan), but for
@@ -355,7 +361,6 @@ class DualSystemMoTDriver:
         # handles the resulting rectangular mask.
         attn_mask = widen_mask_for_prefix_kv(attn_mask, vstate)
 
-        n_ckpt = _num_checkpointed_layers(self.num_layers)
         for layer_id in range(self.num_layers):
             vstate, astate = self.step(
                 layer_id,
@@ -366,17 +371,6 @@ class DualSystemMoTDriver:
                 use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
             )
         return vstate, astate
-
-
-def _num_checkpointed_layers(num_layers: int) -> int:
-    """How many MoT layers (the first ones) run under activation checkpointing when
-    ``use_gradient_checkpointing`` is on: ``OPENWAM_CKPT_LAYERS`` (unset: all of them).
-    Fewer checkpointed layers trade memory for the backward recompute; the computed
-    values are the same either way."""
-    v = os.environ.get("OPENWAM_CKPT_LAYERS", "").strip()
-    if not v:
-        return num_layers
-    return max(0, min(num_layers, int(v)))
 
 
 __all__ = ["DualSystemMoTDriver"]

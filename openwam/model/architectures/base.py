@@ -87,6 +87,16 @@ def _wrap_forward_in_no_grad(module: nn.Module) -> None:
 logger = logging.getLogger(__name__)
 
 
+def validate_gradient_checkpointing_layers(value: Optional[int]) -> Optional[int]:
+    """Validate the optional first-N layer limit without coercing invalid types."""
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+        raise ValueError(
+            "training.gradient_checkpointing_layers must be null (all layers) "
+            f"or a non-negative integer, got {value!r}"
+        )
+    return value
+
+
 def _fast_input() -> bool:
     return os.environ.get("OPENWAM_FAST_INPUT", "0") == "1"
 
@@ -202,6 +212,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # can read these without the trainer having to thread them through.
         self._use_gradient_checkpointing = False
         self._use_gradient_checkpointing_offload = False
+        self._gradient_checkpointing_layers = None
         self._max_timestep_boundary = 1.0
         self._min_timestep_boundary = 0.0
 
@@ -875,6 +886,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         *,
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
+        gradient_checkpointing_layers: Optional[int] = None,
         max_timestep_boundary: float = 1.0,
         min_timestep_boundary: float = 0.0,
     ) -> None:
@@ -883,9 +895,13 @@ class BaseWAMArchitecture(ABC, nn.Module):
         Trainers call this once during construction. Keeping these on the
         architecture keeps ``prepare_inputs(batch)`` self-contained — the
         trainer no longer needs to thread these flags through every loss call.
+        The layer limit is consumed directly by dual-system standard joint
+        loops; other architecture paths retain their checkpointing policy.
         """
+        gradient_checkpointing_layers = validate_gradient_checkpointing_layers(gradient_checkpointing_layers)
         self._use_gradient_checkpointing = bool(use_gradient_checkpointing)
         self._use_gradient_checkpointing_offload = bool(use_gradient_checkpointing_offload)
+        self._gradient_checkpointing_layers = gradient_checkpointing_layers
         self._max_timestep_boundary = float(max_timestep_boundary)
         self._min_timestep_boundary = float(min_timestep_boundary)
 
