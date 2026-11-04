@@ -89,7 +89,7 @@ All architectures are selected via `configs/model/<framework>.yaml` with `archit
 
 ## News
 
-- **[2026/11/05]** 🚀 Thanks to [ResearchBoost-Agent (RBA)](https://github.com/DAGroup-PKU/ResearchBoost-Agent) for accelerating OpenWAM-α training! The [original LIBERO experiments](https://github.com/OpenWAM-Official/OpenWAM/pull/58) report **2.41–3.13× training speedups**. See [training acceleration](#training-acceleration) for the current configuration.
+- **[2026/11/05]** 🚀 Thanks to [ResearchBoost-Agent (RBA)](https://github.com/DAGroup-PKU/ResearchBoost-Agent) for [accelerating OpenWAM-α training](https://github.com/OpenWAM-Official/OpenWAM/pull/58)! Validation on four H200 GPUs across seven SFT benchmarks shows **2.54–2.77× training speedups** over the original `main`. See [training acceleration](#training-acceleration) for the measurement conditions and current configuration.
 - **[2026/10/25]** 🤗 We release all cleaned robot datasets used for OpenWAM pretraining: [AgiBotWorld-Beta](https://huggingface.co/datasets/OpenWAM/AgiBotWorld-Beta), [RoboCOIN](https://huggingface.co/datasets/wayrise/RoboCOIN), [InternData-A1](https://huggingface.co/datasets/OpenWAM/InternData-A1), and [DROID](https://huggingface.co/datasets/OpenWAM/Droid).
 - **[2026/10/10]** 🌟 OpenWAM reaches **1K GitHub stars**! Thank you for your support!
 - **[2026/09/09]** 📄 OpenWAM [Paper](https://arxiv.org/pdf/2609.07398) is released on arXiv.
@@ -470,9 +470,12 @@ selection takes precedence over the legacy `OPENWAM_PRESET` selector, and loaded
 preset values override matching environment variables.
 
 Choose batch size and memory options for your hardware. Initial iterations include
-compilation warmup. The speedups in News were measured with the original PR's
-LIBERO recipes (4 GPUs, batch size 32 per GPU), whose checkpointing and offload
-settings differ from the current defaults above.
+compilation warmup. The speedups in News come from warmed-up training-throughput
+measurements on four H200 GPUs across seven SFT benchmarks, without an 80 GiB
+memory cap. The original `main` used all-layer checkpointing, while the tested
+optimized configuration used no checkpointing. These speedups include the benefit
+of avoiding recomputation and do not represent measurements of the current
+all-layer-checkpointing defaults above.
 
 ## Projects Based on OpenWAM
 
