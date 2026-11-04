@@ -11,6 +11,7 @@ gradient accumulation/clipping, optimizer offload) from cfg.training
 import faulthandler
 import logging
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -36,6 +37,67 @@ def _force_flush_excepthook(exc_type, exc_value, exc_tb):
 sys.excepthook = _force_flush_excepthook
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _read_speed_preset(path: Path) -> dict[str, str]:
+    """Read literal KEY=VALUE assignments; never execute shell syntax.
+
+    Blank lines and full-line comments are ignored. Values may have matching
+    outer quotes; variable expansion, escapes and inline comments are not
+    interpreted. Validate the complete file before changing the environment.
+    """
+    settings = {}
+    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if "\x00" in raw_line:
+            raise ValueError(f"Invalid speed preset {path}:{line_number}: NUL is not allowed")
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ValueError(
+                f"Invalid speed preset {path}:{line_number}: expected KEY=VALUE "
+                "with a valid environment variable name"
+            )
+        if value[:1] in ("'", '"'):
+            if len(value) < 2 or value[-1] != value[0]:
+                raise ValueError(f"Invalid speed preset {path}:{line_number}: unmatched value quotes")
+            value = value[1:-1]
+        settings[key] = value
+    return settings
+
+
+def _apply_speed_preset(cfg: DictConfig) -> dict[str, str]:
+    """Apply the resolved Hydra preset before importing torch or OpenWAM.
+
+    CLI/YAML selection takes precedence over OPENWAM_PRESET through the config
+    interpolation. Null skips loading without clearing manually set switches.
+    File values overwrite existing environment values, matching the old shell
+    launcher, and paths are relative to the repository rather than Hydra's cwd.
+    """
+    selected = OmegaConf.select(cfg, "training.speed_preset", default=None)
+    is_main_rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")) == "0"
+    if selected is None:
+        if is_main_rank:
+            print("Speed preset: disabled (existing environment settings are retained)", flush=True)
+        return {}
+    if not isinstance(selected, str) or not selected.strip():
+        raise ValueError("training.speed_preset must be a preset file path or null")
+    path = Path(selected)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    path = path.resolve()
+    settings = _read_speed_preset(path)
+    os.environ.update(settings)
+    if is_main_rank:
+        print(f"Speed preset: {path}", flush=True)
+        print(
+            f"Applied {len(settings)} environment settings (preset values override existing values): "
+            + ", ".join(settings),
+            flush=True,
+        )
+    return settings
 
 
 class _StartupNoiseFilter(logging.Filter):
@@ -150,6 +212,9 @@ def _train_openwam(cfg: DictConfig) -> None:
 
 @hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="train")
 def main(cfg: DictConfig) -> None:
+    # Several kernels capture their switches at import time; apply the preset
+    # before any torch, Accelerate or OpenWAM training imports in this worker.
+    _apply_speed_preset(cfg)
     _install_startup_noise_filter()
 
     # Only print on rank 0

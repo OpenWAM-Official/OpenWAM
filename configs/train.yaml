@@ -4,6 +4,10 @@ defaults:
   - _self_
 
 training:
+  # Preset files contain literal KEY=VALUE settings and override matching env vars.
+  # CLI/YAML selection overrides OPENWAM_PRESET; null skips loading (keeps manual env vars).
+  speed_preset: ${oc.env:OPENWAM_PRESET,presets/fast.env}
+
   # --- Debug ---
   debug: false                    # Debug mode: max_steps=20, save@10, constant LR
 
