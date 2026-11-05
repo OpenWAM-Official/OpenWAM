@@ -47,6 +47,8 @@ from openwam.model.action_backbone.components import (
     precompute_freqs_cis_1d,
     rope_apply_1d,
 )
+from openwam.model.kernels import fused_blocks
+from openwam.model.kernels.attention import sdpa
 from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import gradient_checkpoint_forward
 
 if TYPE_CHECKING:
@@ -172,7 +174,7 @@ class BridgeCrossAttention(nn.Module):
         else:
             if ctx_mask.dim() == 3:
                 ctx_mask = ctx_mask.unsqueeze(1)
-            x = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=ctx_mask)
+            x = sdpa(q, k, v, attn_mask=ctx_mask)
         x = rearrange(x, "b n s d -> b s (n d)", n=self.num_heads)
         return self.o(x)
 
@@ -786,19 +788,22 @@ class ActionDiT(ActionDiTBackbone):
         """
         payload: ActionDiTState = astate.payload
         block: SelfAttnActionDiTBlock = self.blocks[layer_id]
-
-        chunks = (block.modulation.to(dtype=payload.t_mod.dtype, device=payload.t_mod.device) + payload.t_mod).chunk(
-            6, dim=1
-        )
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunks
-
         residual_x = payload.x_action
-        attn_input = block.self_attn_norm(residual_x) * (1 + scale_msa) + shift_msa
 
-        sa = block.self_attn
-        q = sa.norm_q(sa.q(attn_input))
-        k = sa.norm_k(sa.k(attn_input))
-        v = sa.v(attn_input)
+        if fused_blocks.act_block_supported(block, payload.t_mod):
+            q, k, v, gate_msa, shift_mlp, scale_mlp, gate_mlp = fused_blocks.act_pre(block, residual_x, payload.t_mod)
+        else:
+            chunks = (
+                block.modulation.to(dtype=payload.t_mod.dtype, device=payload.t_mod.device) + payload.t_mod
+            ).chunk(6, dim=1)
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunks
+
+            attn_input = block.self_attn_norm(residual_x) * (1 + scale_msa) + shift_msa
+
+            sa = block.self_attn
+            q = sa.norm_q(sa.q(attn_input))
+            k = sa.norm_k(sa.k(attn_input))
+            v = sa.v(attn_input)
 
         # Apply RoPE in head-split layout to match flash_attn / Wan rope_apply.
         q = rearrange(q, "b s (n d) -> b n s d", n=self._num_heads)
@@ -851,6 +856,30 @@ class ActionDiT(ActionDiTBackbone):
         payload: ActionDiTState = astate.payload
         block: SelfAttnActionDiTBlock = self.blocks[layer_id]
         residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp = post_state
+
+        if payload.context is not None and fused_blocks.act_block_supported(block, payload.t_mod):
+            text_mask = payload.context_mask
+            if text_mask is not None:
+                if text_mask.dim() == 2:
+                    text_mask = text_mask.unsqueeze(1).expand(-1, residual_x.shape[1], -1)
+                elif text_mask.dim() not in (3, 4):
+                    raise ValueError(
+                        "ActionDiTState.context_mask must be [B, L], [B, T_action, L], "
+                        f"or broadcastable [B, heads, T_action, L], got {tuple(text_mask.shape)}"
+                    )
+            payload.x_action = fused_blocks.act_post(
+                block,
+                residual_x,
+                gate_msa,
+                shift_mlp,
+                scale_mlp,
+                gate_mlp,
+                attn_out,
+                payload.context,
+                text_mask,
+                fused_blocks.masked_mha,
+            )
+            return astate
 
         x = block.gate(residual_x, gate_msa, block.self_attn.o(attn_out))
         if payload.context is not None:

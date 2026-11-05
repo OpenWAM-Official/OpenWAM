@@ -4,6 +4,10 @@ defaults:
   - _self_
 
 training:
+  # Preset files contain literal KEY=VALUE settings and override matching env vars.
+  # CLI/YAML selection overrides OPENWAM_PRESET; null skips loading (keeps manual env vars).
+  speed_preset: ${oc.env:OPENWAM_PRESET,presets/fast.env}
+
   # --- Debug ---
   debug: false                    # Debug mode: max_steps=20, save@10, constant LR
 
@@ -35,7 +39,12 @@ training:
   # --- Memory optimization ---
   use_gradient_checkpointing: true       # Recompute activations in backward instead of storing them: saves memory
                                          # costs ~1 extra forward (standard term; cf. PyTorch/HF)
+  gradient_checkpointing_layers: null    # null: all layers; non-negative integer: first N (0: none), capped at total
+                                         # Only when use_gradient_checkpointing=true; dual joint_self_attn and IDM's
+                                         # standard joint-loop fallback only (not IDM teacher-forcing, single or tri).
   use_gradient_checkpointing_offload: false  # Offload checkpointed activations to CPU
+  text_encoder_offload: false            # Offload frozen/eval Wan text-encoder weights to CPU between cache misses
+                                         # Requires OPENWAM_TEXT_CACHE=1 (enabled by presets/fast.env), independent of GC
   initialize_model_on_cpu: false         # Load model on CPU, let DeepSpeed move to GPU
   offload_optimizer_device: none         # DeepSpeed ZeRO optimizer-state offload: none / cpu
 

@@ -638,6 +638,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             astate,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            gradient_checkpointing_layers=self._gradient_checkpointing_layers,
         )
         return vb.finalize(vstate), ab.extract_prediction(astate)
 

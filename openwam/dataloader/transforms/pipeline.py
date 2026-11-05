@@ -33,7 +33,10 @@ class FirstFrameConditioningTransform(ModalityTransform):
             data["vace_video"] = None
 
         if "first_frame_image" not in data:
-            if self.use_first_frame_as_reference and "video" in data and data["video"]:
+            video = data.get("video")
+            # ``len`` instead of truthiness: same for frame lists, and also valid for
+            # the uint8 (T, H, W, 3) clip tensors of openwam.dataloader.collate.
+            if self.use_first_frame_as_reference and video is not None and len(video) > 0:
                 data["first_frame_image"] = [data["video"][0]]
             else:
                 data["first_frame_image"] = None

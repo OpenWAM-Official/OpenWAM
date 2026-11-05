@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,6 +15,23 @@ def check_is_instance(model, module_class):
     if hasattr(model, "module") and isinstance(model.module, module_class):
         return True
     return False
+
+
+def _scale_on_device(owner, scale, dtype, device):
+    """``[s.to(dtype=dtype, device=device) for s in scale]`` for the VAE's constant
+    latent mean / inverse std (plain CPU tensors). With ``OPENWAM_FAST_INPUT=1``
+    memoized per dtype and device: the same converted values, without a blocking
+    host-to-device copy (which synchronizes the stream, i.e. waits for the whole
+    encode) on every call."""
+    if os.environ.get("OPENWAM_FAST_INPUT", "0") != "1":
+        return [s.to(dtype=dtype, device=device) for s in scale]
+    cache = owner.__dict__.setdefault("_scale_device_cache", {})
+    key = (tuple(id(s) for s in scale), dtype, str(device))
+    hit = cache.get(key)
+    if hit is None:
+        # keep the source tensors alive so that their ids stay unique
+        hit = cache[key] = ([s.to(dtype=dtype, device=device) for s in scale], list(scale))
+    return hit[0]
 
 
 class CausalConv3d(nn.Conv3d):
@@ -881,7 +900,7 @@ class VideoVAE_(nn.Module):
                 out = torch.cat([out, out_], 2)
         mu, log_var = self.conv1(out).chunk(2, dim=1)
         if isinstance(scale[0], torch.Tensor):
-            scale = [s.to(dtype=mu.dtype, device=mu.device) for s in scale]
+            scale = _scale_on_device(self, scale, mu.dtype, mu.device)
             mu = (mu - scale[0].view(1, self.z_dim, 1, 1, 1)) * scale[1].view(1, self.z_dim, 1, 1, 1)
         else:
             scale = scale.to(dtype=mu.dtype, device=mu.device)
@@ -1149,6 +1168,10 @@ class WanVideoVAE(nn.Module):
         """
         videos = videos.to(device)
         with torch.no_grad():
+            from openwam.model.kernels import vae_fast
+
+            if vae_fast.supported(self.model, videos):
+                return vae_fast.encode(self.model, videos, self.scale)
             return self.model.encode(videos, self.scale)
 
     def single_encode(self, video, device):
@@ -1242,7 +1265,7 @@ class VideoVAE38_(VideoVAE_):
                 out = torch.cat([out, out_], 2)
         mu, log_var = self.conv1(out).chunk(2, dim=1)
         if isinstance(scale[0], torch.Tensor):
-            scale = [s.to(dtype=mu.dtype, device=mu.device) for s in scale]
+            scale = _scale_on_device(self, scale, mu.dtype, mu.device)
             mu = (mu - scale[0].view(1, self.z_dim, 1, 1, 1)) * scale[1].view(1, self.z_dim, 1, 1, 1)
         else:
             scale = scale.to(dtype=mu.dtype, device=mu.device)

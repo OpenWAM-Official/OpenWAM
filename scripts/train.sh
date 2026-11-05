@@ -16,6 +16,11 @@
 # ── Multi-node (env vars set by cloud scheduler) ──
 #   NNODES=2 NODE_RANK=0 MASTER_ADDR=192.0.2.1 bash scripts/train.sh
 #   NNODES=2 NODE_RANK=1 MASTER_ADDR=192.0.2.1 bash scripts/train.sh
+#
+# ── Speed preset (loaded by train.py before training imports) ──
+# Defaults to presets/fast.env; explicit Hydra selection overrides OPENWAM_PRESET.
+#   bash scripts/train.sh training.text_encoder_offload=true
+#   bash scripts/train.sh training.speed_preset=null
 # ───────────────────────���──────────────────────────────────────
 set -euo pipefail
 cd "$(dirname "$0")/.."

@@ -15,6 +15,13 @@ import torch.nn as nn
 from torch import Tensor
 
 
+def validate_text_encoder_offload(value: bool) -> bool:
+    """Validate the training switch without treating strings such as 'false' as true."""
+    if not isinstance(value, bool):
+        raise ValueError(f"training.text_encoder_offload must be a boolean, got {value!r}")
+    return value
+
+
 @dataclass
 class BlockLoopState:
     """Mutable state flowing through prepare → run_block → finalize.
@@ -219,6 +226,15 @@ class VideoBackbone(ABC, nn.Module):
     def apply_compile_optimizations(self, compile_cfg) -> None:
         """Optional deploy-time compile hook; backbones default to eager execution."""
         return None
+
+    def set_text_encoder_offload(self, enabled: bool = False) -> None:
+        """Configure optional frozen text-encoder weight offload during training.
+
+        Backbones opt in explicitly; requesting unsupported offload must not
+        silently imply that weights will be moved out of GPU memory.
+        """
+        if validate_text_encoder_offload(enabled):
+            raise NotImplementedError(f"{type(self).__name__} does not support training.text_encoder_offload=true.")
 
     # ================================================================
     # Optional: joint self-attention split (default raise)

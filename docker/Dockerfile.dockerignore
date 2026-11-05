@@ -8,6 +8,7 @@
 !compose.yaml
 !openwam/**
 !configs/**
+!presets/**
 !scripts/**
 !benchmarks/**
 !tests/**

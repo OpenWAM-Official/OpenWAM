@@ -13,13 +13,14 @@ The driver owns no parameters — a plain Python class, absent from ``state_dict
 from __future__ import annotations
 
 import copy
+import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
+from openwam.model.architectures.base import validate_gradient_checkpointing_layers
 from openwam.model.architectures.utils.common import compute_video_tokens_per_frame
 from openwam.model.architectures.utils.mask_modes import (
     ACTION_SEES_VIDEO,
@@ -28,6 +29,8 @@ from openwam.model.architectures.utils.mask_modes import (
     validate_attention_mask_mode,
     widen_mask_for_prefix_kv,
 )
+from openwam.model.kernels import joint_cat
+from openwam.model.kernels.attention import sdpa
 
 if TYPE_CHECKING:
     from openwam.model.action_backbone.base import ActionDiTBackbone
@@ -89,6 +92,11 @@ class DualSystemMoTDriver:
         self.num_heads = vb.num_heads
         self.head_dim = vb.head_dim
         self.mot_checkpoint_mixed_attn = bool(mot_checkpoint_mixed_attn)
+        # OPENWAM_MIXED_ATTN_CKPT=0/1 overrides mot_checkpoint_mixed_attn (the inner checkpoint of the joint attention
+        # in layers not checkpointed as a whole; see training.gradient_checkpointing_layers). Unset: config value.
+        mixed_attn_ckpt = os.environ.get("OPENWAM_MIXED_ATTN_CKPT", "").strip()
+        if mixed_attn_ckpt in ("0", "1"):
+            self.mot_checkpoint_mixed_attn = mixed_attn_ckpt == "1"
         self.attention_mask_mode = attention_mask_mode
 
         # Allow the architecture / config to override the video v↔v sub-mode.
@@ -139,7 +147,7 @@ class DualSystemMoTDriver:
         q = rearrange(q_cat, "b s (n d) -> b n s d", n=n)
         k = rearrange(k_cat, "b s (n d) -> b n s d", n=n)
         v = rearrange(v_cat, "b s (n d) -> b n s d", n=n)
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        out = sdpa(q, k, v, attn_mask=attn_mask)
         return rearrange(out, "b n s d -> b s (n d)", n=n)
 
     # ------------------------------------------------------------------
@@ -229,10 +237,10 @@ class DualSystemMoTDriver:
             )
 
         s_video = q_v.shape[1]
-        s_action = q_a.shape[1]
-        q_cat = torch.cat([q_v, q_a], dim=1)
-        k_cat = torch.cat([k_v, k_a], dim=1)
-        v_cat = torch.cat([v_v, v_a], dim=1)
+        # torch.cat([x_v, x_a], dim=1); one Triton copy pass with OPENWAM_FAST_CAT=1
+        q_cat = joint_cat.cat_seq(q_v, q_a)
+        k_cat = joint_cat.cat_seq(k_v, k_a)
+        v_cat = joint_cat.cat_seq(v_v, v_a)
         # Contract: `run_joint_loop` pre-builds ``attn_mask`` once per forward and
         # passes it in for every layer. _step_impl does NOT rebuild the mask
         # itself; any direct caller must pass the same pre-built mask.
@@ -244,9 +252,9 @@ class DualSystemMoTDriver:
         else:
             mixed = self._mixed_attention(q_cat, k_cat, v_cat, attn_mask)
 
-        attn_v, attn_a = mixed.split([s_video, s_action], dim=1)
-        vstate = vb.post_attn_at_layer(layer_id, vstate, attn_v.contiguous(), vpost)
-        astate = ab.post_attn_at_layer(layer_id, astate, attn_a.contiguous(), apost)
+        attn_v, attn_a = joint_cat.split_seq(mixed, s_video)  # split along dim 1, both parts contiguous
+        vstate = vb.post_attn_at_layer(layer_id, vstate, attn_v, vpost)
+        astate = ab.post_attn_at_layer(layer_id, astate, attn_a, apost)
         return vstate, astate
 
     def _step_checkpointed(
@@ -310,6 +318,7 @@ class DualSystemMoTDriver:
         *,
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
+        gradient_checkpointing_layers: Optional[int] = None,
     ) -> Tuple["BlockLoopState", "ActionState"]:
         """Run the full per-layer loop over both modalities.
 
@@ -318,8 +327,12 @@ class DualSystemMoTDriver:
         layer-invariant during one forward). The two ``use_gradient_*``
         flags are forwarded to :meth:`step` so each layer may opt into
         step-level activation checkpointing — see the class docstring of
-        :meth:`step` for memory/compute trade-offs.
+        :meth:`step` for memory/compute trade-offs. ``gradient_checkpointing_layers``
+        limits checkpointing to the first N layers; None means all layers.
+        The limit only takes effect when ``use_gradient_checkpointing`` is true.
         """
+        requested_layers = validate_gradient_checkpointing_layers(gradient_checkpointing_layers)
+        n_ckpt = self.num_layers if requested_layers is None else min(self.num_layers, requested_layers)
         # Resolve sequence shapes from the backbone-populated f/h/w fields.
         # ``vstate.hidden_states.shape[1]`` is identical to ``f*tokens_per_frame`` for
         # backbones that carry a 3D ``(B, S, D)`` state (Wan), but for
@@ -354,7 +367,7 @@ class DualSystemMoTDriver:
                 vstate,
                 astate,
                 attn_mask=attn_mask,
-                use_gradient_checkpointing=use_gradient_checkpointing,
+                use_gradient_checkpointing=use_gradient_checkpointing and layer_id < n_ckpt,
                 use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
             )
         return vstate, astate
