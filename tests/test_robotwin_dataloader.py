@@ -28,7 +28,7 @@ def _encode_jpeg(height=16, width=16, seed=0):
 def _create_mock_episode(path, T=20, action_dim=14, seed=0):
     """Create a mock RoboTwin HDF5 episode with both joint and endpose keys."""
     rng = np.random.default_rng(seed)
-    quats = Rotation.random(T, random_state=seed).as_quat()  # (T, 4) xyzw
+    quats = Rotation.random(T, random_state=seed).as_quat()[:, [3, 0, 1, 2]]  # native wxyz
 
     # Pre-encode JPEG frames
     jpeg_frames = [_encode_jpeg(16, 16, seed=seed + i) for i in range(T)]
@@ -861,7 +861,7 @@ def test_multitask_action_stats_can_resume_from_partial_checkpoint():
             checkpoint_path=checkpoint_path,
         )
         assert partial_stats["num_timesteps"] > 0
-        assert os.path.isdir(f"{checkpoint_path}.partial/shards_v1")
+        assert os.path.isdir(f"{checkpoint_path}.partial/shards_wxyz_v2")
 
         resumed_stats = compute_multitask_robotwin_stats(
             dataset_dir=tmpdir,
@@ -904,7 +904,7 @@ def test_resume_does_not_recompute_already_checkpointed_shards():
             checkpoint_path=checkpoint_path,
         )
 
-        shards_dir = f"{checkpoint_path}.partial/shards_v1"
+        shards_dir = f"{checkpoint_path}.partial/shards_wxyz_v2"
         shards_before = {name: os.stat(os.path.join(shards_dir, name)).st_mtime_ns for name in os.listdir(shards_dir)}
         assert len(shards_before) == 1
 
