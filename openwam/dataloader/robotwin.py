@@ -34,7 +34,7 @@ from openwam.dataloader.transforms.normalize import (
     Normalizer,
     load_mode_stats,
 )
-from openwam.dataloader.transforms.rotation import quat_xyzw_to_rotation_6d
+from openwam.dataloader.transforms.rotation import RotationType, convert_rotation
 from openwam.dataloader.transforms.video import VideoColorJitter, color_jitter_enabled
 from openwam.dataloader.utils.unify_action import (
     UNIFY_DIM,
@@ -713,7 +713,7 @@ class RoboTwinDataset(BaseDataset):
                  right_xyz(3), right_rot6d(6), right_grip(1)]
         Gripper values are raw continuous values from HDF5 (1=open, 0=closed).
         """
-        left_ep = f["endpose/left_endpose"][start:end]  # (T, 7): xyz + quat_xyzw
+        left_ep = f["endpose/left_endpose"][start:end]  # (T, 7): xyz + quat_wxyz
         right_ep = f["endpose/right_endpose"][start:end]
         left_grip = f["endpose/left_gripper"][start:end].astype(np.float64)
         right_grip = f["endpose/right_gripper"][start:end].astype(np.float64)
@@ -721,7 +721,7 @@ class RoboTwinDataset(BaseDataset):
         left = np.concatenate(
             [
                 left_ep[:, :3],
-                quat_xyzw_to_rotation_6d(left_ep[:, 3:]),
+                convert_rotation(left_ep[:, 3:], RotationType.QUATERNION, RotationType.ROTATION_6D),
                 left_grip[:, None] if left_grip.ndim == 1 else left_grip,
             ],
             axis=-1,
@@ -730,7 +730,7 @@ class RoboTwinDataset(BaseDataset):
         right = np.concatenate(
             [
                 right_ep[:, :3],
-                quat_xyzw_to_rotation_6d(right_ep[:, 3:]),
+                convert_rotation(right_ep[:, 3:], RotationType.QUATERNION, RotationType.ROTATION_6D),
                 right_grip[:, None] if right_grip.ndim == 1 else right_grip,
             ],
             axis=-1,

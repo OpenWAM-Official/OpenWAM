@@ -5,10 +5,9 @@ The OpenWAM policy server returns 20-dim EEF actions when trained with
 
     [l_xyz(3), l_rot6d(6), l_grip(1), r_xyz(3), r_rot6d(6), r_grip(1)]
 
-Many robot benchmarks (RoboTwin, SimplerEnv, etc.) consume 16-dim end-effector
-actions with quaternion rotations::
+RoboTwin consumes 16-dim end-effector actions with wxyz quaternion rotations::
 
-    [l_xyz(3), l_quat_xyzw(4), l_grip(1), r_xyz(3), r_quat_xyzw(4), r_grip(1)]
+    [l_xyz(3), l_quat_wxyz(4), l_grip(1), r_xyz(3), r_quat_wxyz(4), r_grip(1)]
 
 These helpers are pure numpy and have no dependency on the ``openwam`` package,
 so they can run in any benchmark client's Python environment.
@@ -26,7 +25,7 @@ import numpy as np
 
 
 def quat_xyzw_to_rot6d(quat: np.ndarray) -> np.ndarray:
-    """Convert xyzw quaternion(s) to 6D rotation, matching RoboTwinDataset."""
+    """Convert xyzw quaternion(s) to 6D rotation (first two matrix columns)."""
     q = np.asarray(quat, dtype=np.float64)
     if q.shape[-1] != 4:
         raise ValueError(f"quat must end with dimension 4, got shape {q.shape}")
@@ -104,12 +103,13 @@ def eef20d_to_ee16d(action: np.ndarray) -> np.ndarray:
     """Convert 20D EEF action (xyz+rot6d+grip)×2 to 16D ee action (xyz+quat+grip)×2.
 
     OpenWAM EEF (20D): ``[l_xyz(3), l_rot6d(6), l_grip(1), r_xyz(3), r_rot6d(6), r_grip(1)]``
-    RoboTwin ee (16D): ``[l_xyz(3), l_quat_xyzw(4), l_grip(1), r_xyz(3), r_quat_xyzw(4), r_grip(1)]``
+    RoboTwin ee (16D): ``[l_xyz(3), l_quat_wxyz(4), l_grip(1), r_xyz(3), r_quat_wxyz(4), r_grip(1)]``
     """
     l_xyz, l_r6d, l_grip = action[0:3], action[3:9], action[9:10]
     r_xyz, r_r6d, r_grip = action[10:13], action[13:19], action[19:20]
-    l_quat = rot6d_to_quat_xyzw(l_r6d)
-    r_quat = rot6d_to_quat_xyzw(r_r6d)
+    # RoboTwin consumes scalar-first wxyz; the shared decoder returns xyzw.
+    l_quat = rot6d_to_quat_xyzw(l_r6d)[[3, 0, 1, 2]]
+    r_quat = rot6d_to_quat_xyzw(r_r6d)[[3, 0, 1, 2]]
     return np.concatenate([l_xyz, l_quat, l_grip, r_xyz, r_quat, r_grip]).astype(np.float32)
 
 
@@ -278,13 +278,13 @@ def robotwin_endpose_to_eef20d(
 
     This mirrors ``RoboTwinDataset._read_eef_actions``:
     ``[left_xyz, left_rot6d, left_grip, right_xyz, right_rot6d, right_grip]``.
-    RoboTwin endpose quaternions are xyzw.
+    RoboTwin endpose quaternions are wxyz.
     """
     left_ep = np.asarray(left_endpose, dtype=np.float32).reshape(-1)
     right_ep = np.asarray(right_endpose, dtype=np.float32).reshape(-1)
     if left_ep.shape[0] != 7 or right_ep.shape[0] != 7:
         raise ValueError(
-            f"RoboTwin endpose fields must be 7D xyz+quat_xyzw; got left={left_ep.shape}, right={right_ep.shape}"
+            f"RoboTwin endpose fields must be 7D xyz+quat_wxyz; got left={left_ep.shape}, right={right_ep.shape}"
         )
 
     left_grip = np.asarray(left_gripper, dtype=np.float32).reshape(-1)
@@ -292,8 +292,11 @@ def robotwin_endpose_to_eef20d(
     if left_grip.size < 1 or right_grip.size < 1:
         raise ValueError("RoboTwin gripper fields must contain at least one scalar value.")
 
-    left = np.concatenate([left_ep[:3], quat_xyzw_to_rot6d(left_ep[3:]), left_grip[:1]], axis=-1)
-    right = np.concatenate([right_ep[:3], quat_xyzw_to_rot6d(right_ep[3:]), right_grip[:1]], axis=-1)
+    # Reorder native xyz+wxyz poses for the shared scalar-last encoder.
+    left_quat_xyzw = left_ep[[4, 5, 6, 3]]
+    right_quat_xyzw = right_ep[[4, 5, 6, 3]]
+    left = np.concatenate([left_ep[:3], quat_xyzw_to_rot6d(left_quat_xyzw), left_grip[:1]], axis=-1)
+    right = np.concatenate([right_ep[:3], quat_xyzw_to_rot6d(right_quat_xyzw), right_grip[:1]], axis=-1)
     return np.concatenate([left, right], axis=-1).astype(np.float32)
 
 
