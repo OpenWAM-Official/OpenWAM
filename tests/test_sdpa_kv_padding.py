@@ -94,16 +94,16 @@ def test_key_broadcast_mask_is_materialized_before_padding():
     assert not pmask[1].any()
 
 
-def _low_lse_inputs(sq, skv, *, device="cuda", dtype=torch.bfloat16, bshd=False):
+def _low_lse_inputs(sq, skv, *, device="cuda", dtype=torch.bfloat16, bshd=False, head_dim=128, row=5):
     """Keys sharing a large component and one query row anti-aligned with it: that row's logits are all about
     -136, so its logsumexp is far below -88.7 - the condition that turns the out-of-range key columns of the last
     cuDNN tile into exp(0 - lse) = inf in the backward pass."""
     torch.manual_seed(0)
-    common = torch.ones(128, device=device, dtype=dtype)
-    q = torch.randn(2, 4, sq, 128, device=device, dtype=dtype)
-    q[:, :, 5] = -12.0 * common
-    k = torch.randn(2, 4, skv, 128, device=device, dtype=dtype) * 0.5 + common
-    v = torch.randn(2, 4, skv, 128, device=device, dtype=dtype)
+    common = torch.ones(head_dim, device=device, dtype=dtype)
+    q = torch.randn(2, 4, sq, head_dim, device=device, dtype=dtype)
+    q[:, :, row] = -(136.0 / head_dim**0.5) * common
+    k = torch.randn(2, 4, skv, head_dim, device=device, dtype=dtype) * 0.5 + common
+    v = torch.randn(2, 4, skv, head_dim, device=device, dtype=dtype)
     if bshd:  # the callers pass BSHD buffers viewed as BHSD
         q, k, v = (x.transpose(1, 2).contiguous().transpose(1, 2) for x in (q, k, v))
     return q, k, v
@@ -132,6 +132,29 @@ def test_cudnn_low_logsumexp_rows_have_finite_gradients(monkeypatch, kind, sq, s
     out, grads = _grads(wrapper, qkv, mask, upstream)
     ref, ref_grads = _grads(reference, qkv, mask, upstream)
     assert torch.isfinite(out).all()
+    assert all(torch.isfinite(g).all() for g in grads)
+    torch.testing.assert_close(out, ref, rtol=0.02, atol=0.02)
+    for got, want in zip(grads, ref_grads):
+        torch.testing.assert_close(got.float(), want.float(), rtol=0.05, atol=0.05 * want.float().abs().max().item())
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA/cuDNN")
+@pytest.mark.parametrize("head_dim", [64, 128])
+@pytest.mark.parametrize("sq,skv", [(392, 392), (100, 77)])
+def test_cudnn_low_logsumexp_row_in_last_query_tile(monkeypatch, head_dim, sq, skv):
+    """Same regression with the low row in the last, partial query tile and 64-wide heads (Cosmos bridges)."""
+    monkeypatch.setattr(attention, "_PREFER_CUDNN", True)
+    monkeypatch.setattr(attention, "_order", lambda: [SDPBackend.CUDNN_ATTENTION])
+    qkv = _low_lse_inputs(sq, skv, head_dim=head_dim, row=sq - 1)
+    mask = _mask("bool", sq, skv, device="cuda")
+    upstream = torch.randn(2, 4, sq, head_dim, device="cuda", dtype=torch.bfloat16)
+
+    def reference(q, k, v, m):
+        return _math(q.float(), k.float(), v.float(), m).to(q.dtype)
+
+    out, grads = _grads(lambda q, k, v, m: attention.sdpa(q, k, v, attn_mask=m), qkv, mask, upstream)
+    ref, ref_grads = _grads(reference, qkv, mask, upstream)
     assert all(torch.isfinite(g).all() for g in grads)
     torch.testing.assert_close(out, ref, rtol=0.02, atol=0.02)
     for got, want in zip(grads, ref_grads):
