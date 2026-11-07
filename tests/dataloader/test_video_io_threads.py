@@ -60,7 +60,7 @@ def test_default_and_override_thread_count(monkeypatch):
     assert video_io._decode_thread_count() == 0
 
 
-@pytest.mark.parametrize("bad", ["-1", "two", "1.5"])
+@pytest.mark.parametrize("bad", ["-1", "two", "1.5", "\u00b2", "999"])
 def test_invalid_thread_count_raises(monkeypatch, bad):
     monkeypatch.setenv(ENV, bad)
     with pytest.raises(ValueError, match=ENV):
@@ -91,8 +91,10 @@ def test_only_libdav1d_streams_are_capped(monkeypatch):
 def test_decode_applies_the_limit_to_the_opened_stream(tmp_path, monkeypatch, codec, expected):
     try:
         av.codec.Codec(codec, "w")
-    except Exception:  # encoder not built into this PyAV/FFmpeg
-        pytest.skip(f"encoder {codec} not available")
+        if codec == "libsvtav1":
+            av.codec.Codec("libdav1d", "r")  # the cap targets libdav1d; other AV1 decoders keep defaults
+    except Exception:  # encoder/decoder not built into this PyAV/FFmpeg
+        pytest.skip(f"{codec} encoding or libdav1d decoding not available")
     path = tmp_path / f"clip_{codec}.mp4"
     _write_clip(path, codec)
     seen = []
@@ -106,3 +108,39 @@ def test_decode_applies_the_limit_to_the_opened_stream(tmp_path, monkeypatch, co
     monkeypatch.delenv(ENV, raising=False)
     video_io.decode_video_frames(str(path), [27, 31], 16, 16)
     assert seen == [expected]  # AV1 is decoded by libdav1d and capped; MPEG-4 keeps PyAV's default
+
+
+class _SeekFailsOnce:
+    """Container proxy whose first seek raises a PyAV error, like a broken index or an unseekable input."""
+
+    def __init__(self, container):
+        self._container = container
+        self.seeks = 0
+
+    def __getattr__(self, name):
+        return getattr(self._container, name)
+
+    def seek(self, *args, **kwargs):
+        self.seeks += 1
+        if self.seeks == 1:
+            raise av.error.PermissionError(1, "forced seek failure")
+        return self._container.seek(*args, **kwargs)
+
+
+def test_seek_error_falls_back_to_sequential_decode(tmp_path, monkeypatch):
+    path = tmp_path / "clip.mp4"
+    _write_clip(path, "mpeg4")
+    indices = [27, 31]
+    expected = [np.asarray(im) for im in video_io.decode_video_frames(str(path), indices, 16, 16)]
+    proxies = []
+    real_open = av.open
+
+    def open_with_failing_seek(*args, **kwargs):
+        proxies.append(_SeekFailsOnce(real_open(*args, **kwargs)))
+        return proxies[-1]
+
+    monkeypatch.setattr(av, "open", open_with_failing_seek)
+    frames = [np.asarray(im) for im in video_io.decode_video_frames(str(path), indices, 16, 16)]
+    assert proxies[0].seeks == 1  # the seek raised and the reader decoded sequentially from the start
+    for got, want in zip(frames, expected):
+        np.testing.assert_array_equal(got, want)

@@ -38,6 +38,7 @@ except Exception:
 # left at PyAV's defaults.
 _DECODE_THREADS_ENV = "OPENWAM_VIDEO_DECODE_THREADS"
 _DEFAULT_DECODE_THREADS = 2
+_MAX_DECODE_THREADS = 256  # libdav1d's DAV1D_MAX_THREADS
 
 
 def _decode_thread_count() -> int:
@@ -45,9 +46,9 @@ def _decode_thread_count() -> int:
     raw = os.environ.get(_DECODE_THREADS_ENV, "").strip()
     if not raw:
         return _DEFAULT_DECODE_THREADS
-    count = int(raw) if raw.isdigit() else -1
-    if count < 0:
-        raise ValueError(f"{_DECODE_THREADS_ENV} must be a non-negative integer, got {raw!r}")
+    count = int(raw) if raw.isascii() and raw.isdigit() else -1
+    if not 0 <= count <= _MAX_DECODE_THREADS:
+        raise ValueError(f"{_DECODE_THREADS_ENV} must be an integer in [0, {_MAX_DECODE_THREADS}], got {raw!r}")
     return count
 
 
@@ -123,7 +124,7 @@ def decode_video_frames(video_path: str, frame_indices: List[int], height: int, 
                     any_frame=False,
                 )
                 seeked = True
-            except av.AVError as e:
+            except av.FFmpegError as e:  # av.AVError was removed in PyAV 14
                 seek_err = e
 
         idx_map: Dict[int, Image.Image] = {}
