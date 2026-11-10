@@ -12,6 +12,7 @@ reader can import it without triggering heavy module side-effects or import cycl
 from __future__ import annotations
 
 import logging
+import os
 from typing import Dict, List, Optional
 
 from PIL import Image
@@ -27,6 +28,35 @@ try:
     _av.logging.set_level(_av.logging.FATAL)
 except Exception:
     pass
+
+
+# libdav1d (FFmpeg's AV1 decoder, used for the AV1 clips of LeRobot v3 datasets) starts a thread pool sized to the
+# host for every clip PyAV opens: FFmpeg passes its automatic thread count (about one thread per CPU core). With
+# DataLoader workers x ranks decoding concurrently, these pools oversubscribe the host and the GPUs wait for data
+# (LIBERO on 7x H200: load ~150 on 160 cores). A pool of 2 decodes identical frames with about half the CPU time.
+# OPENWAM_VIDEO_DECODE_THREADS sets the pool size; 0 keeps FFmpeg's default. Other decoders (H.264, HEVC, ...) are
+# left at PyAV's defaults.
+_DECODE_THREADS_ENV = "OPENWAM_VIDEO_DECODE_THREADS"
+_DEFAULT_DECODE_THREADS = 2
+_MAX_DECODE_THREADS = 256  # libdav1d's DAV1D_MAX_THREADS
+
+
+def _decode_thread_count() -> int:
+    """libdav1d threads per opened clip from ``OPENWAM_VIDEO_DECODE_THREADS`` (default 2; 0 = FFmpeg default)."""
+    raw = os.environ.get(_DECODE_THREADS_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_DECODE_THREADS
+    count = int(raw) if raw.isascii() and raw.isdigit() else -1
+    if not 0 <= count <= _MAX_DECODE_THREADS:
+        raise ValueError(f"{_DECODE_THREADS_ENV} must be an integer in [0, {_MAX_DECODE_THREADS}], got {raw!r}")
+    return count
+
+
+def _limit_decoder_threads(stream) -> None:
+    """Cap the libdav1d thread pool of an opened AV1 stream; no-op for other decoders or a count of 0."""
+    count = _decode_thread_count()
+    if count and stream.codec_context.name == "libdav1d":
+        stream.thread_count = count
 
 
 _seek_fallback_count = 0
@@ -77,6 +107,7 @@ def decode_video_frames(video_path: str, frame_indices: List[int], height: int, 
     container = av.open(video_path, options={"hwaccel": "none"})
     try:
         stream = container.streams.video[0]
+        _limit_decoder_threads(stream)
 
         pts_per_frame = None
         if stream.frames and stream.duration and stream.frames > 0:
@@ -93,7 +124,7 @@ def decode_video_frames(video_path: str, frame_indices: List[int], height: int, 
                     any_frame=False,
                 )
                 seeked = True
-            except av.AVError as e:
+            except av.FFmpegError as e:  # av.AVError was removed in PyAV 14
                 seek_err = e
 
         idx_map: Dict[int, Image.Image] = {}

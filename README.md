@@ -463,6 +463,11 @@ training:
   This requires the text cache enabled by `fast.env` and is independent of gradient
   checkpointing. Cache misses add CPU-to-GPU weight transfers. The separate
   `use_gradient_checkpointing_offload` option controls activation offload.
+- `OPENWAM_VIDEO_DECODE_THREADS` (environment variable): libdav1d threads per AV1
+  clip opened by the shared PyAV reader (`openwam/dataloader/utils/video_io.py`).
+  The default is `2`; `0` keeps FFmpeg's automatic per-core thread pool, which
+  oversubscribes the host when many DataLoader workers decode AV1 clips at once.
+  Decoded frames are identical for every setting; other codecs keep PyAV's defaults.
 
 To skip preset loading, add `training.speed_preset=null` to your training command;
 manually exported optimization switches remain in effect. Explicit YAML/CLI preset
