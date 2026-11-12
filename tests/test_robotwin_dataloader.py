@@ -112,6 +112,7 @@ def test_joint_mode_basic():
             width=32,
             action_mode="joint",
             video_stride=1,
+            filter_static_segments=False,
         )
         assert ds.action_dim == 14
         assert ds.action_mode == "joint"
@@ -150,6 +151,7 @@ def test_short_episode_pads_and_masks():
             height=32,
             width=32,
             action_mode="joint",
+            filter_static_segments=False,
             normalize_mode=None,
         )
 
@@ -193,6 +195,7 @@ def test_long_episode_tail_windows_are_included_and_padded():
             height=32,
             width=32,
             action_mode="joint",
+            filter_static_segments=False,
             normalize_mode=None,
         )
 
@@ -277,6 +280,7 @@ def test_build_sample_rejects_window_without_valid_action_label():
             height=32,
             width=32,
             action_mode="joint",
+            filter_static_segments=False,
             normalize_mode=None,
         )
 
@@ -305,6 +309,7 @@ def test_tail_masks_flow_through_prepare_inputs_and_loss():
             height=32,
             width=32,
             action_mode="joint",
+            filter_static_segments=False,
             normalize_mode=None,
         )
         arch = _make_tiny_arch()
@@ -395,6 +400,7 @@ def test_video_stride_does_not_affect_action_length():
             height=32,
             width=32,
             action_mode="joint",
+            filter_static_segments=False,
             normalize_mode=None,
         )
 
@@ -426,6 +432,7 @@ def test_joint_mode_minmax_normalization():
             action_mode="joint",
             normalization_stats_path=stats_path,
             video_stride=1,
+            filter_static_segments=False,
         )
 
         sample = ds[0]
@@ -457,6 +464,7 @@ def test_joint_mode_gripper_continuous():
             action_mode="joint",
             normalization_stats_path=stats_path,
             video_stride=1,  # num_video_frames=5 → (5-1)%4=0 ✓
+            filter_static_segments=False,
         )
 
         sample = ds[0]
@@ -491,6 +499,7 @@ def test_joint_mode_denormalize_roundtrip():
             action_mode="joint",
             normalization_stats_path=stats_path,
             video_stride=1,
+            filter_static_segments=False,
         )
 
         # normalized = -1 → raw = min = 0 under min-max
@@ -519,6 +528,7 @@ def test_eef_mode_basic():
             width=32,
             action_mode="eef",
             video_stride=1,
+            filter_static_segments=False,
             normalize_mode=None,  # raw values for this test
         )
         assert ds.action_dim == 20
@@ -549,6 +559,7 @@ def test_eef_mode_minmax_normalization():
             normalization_stats_path=stats_path,
             normalize_mode="min-max",
             video_stride=1,
+            filter_static_segments=False,
         )
         assert ds.normalization_stats is not None and "min" in ds.normalization_stats
 
@@ -587,6 +598,7 @@ def test_eef_mode_zscore_normalization():
             normalization_stats_path=stats_path,
             normalize_mode="z-score",
             video_stride=1,
+            filter_static_segments=False,
         )
         sample = ds[0]
         actions = sample["action"].numpy()
@@ -619,6 +631,7 @@ def test_eef_roundtrip_denormalize():
                 normalization_stats_path=stats_path,
                 normalize_mode=mode,
                 video_stride=1,
+                filter_static_segments=False,
             )
             raw = np.random.RandomState(0).uniform(-1, 1, size=(7, 20)).astype(np.float32)
             normed = ds._normalizer.normalize(raw)
@@ -644,6 +657,7 @@ def test_eef_gripper_raw_values():
             width=32,
             action_mode="eef",
             video_stride=2,  # (9-1)%2==0 and (5-1)%4==0 for VAE ✓
+            filter_static_segments=False,
             normalize_mode=None,  # keep raw gripper values for this assertion
         )
 
@@ -679,6 +693,7 @@ def test_eef_denormalize_passthrough():
             width=32,
             action_mode="eef",
             video_stride=1,
+            filter_static_segments=False,
             normalize_mode=None,
         )
 
@@ -715,6 +730,7 @@ def test_multi_variant_discovery():
             width=32,
             action_mode="joint",
             video_stride=1,
+            filter_static_segments=False,
         )
 
         # Should have 4 sub-datasets (2 tasks × 2 variants)
@@ -742,6 +758,7 @@ def test_multi_variant_single_variant_compat():
             width=32,
             action_mode="joint",
             video_stride=1,
+            filter_static_segments=False,
         )
 
         assert len(ds._sub_datasets) == 1
@@ -1068,6 +1085,7 @@ def test_multitask_peer_rank_waits_for_shared_stats(monkeypatch, tmp_path):
             height=32,
             width=32,
             video_stride=1,
+            filter_static_segments=False,
         )
     finally:
         worker.join(timeout=1)
@@ -1181,3 +1199,235 @@ def test_from_config_via_registry():
     assert "tasks" not in captured
     assert "task_name" not in captured
     assert captured["action_mode"] == "eef"
+
+
+# ---------------------------------------------------------------------------
+# Static-segment filtering
+# ---------------------------------------------------------------------------
+
+
+def _create_static_head_episode(path, T=20, static_frames=8, seed=0):
+    """Mock episode whose first ``static_frames`` frames repeat frame 0 (robot not moving yet)."""
+    _create_mock_episode(path, T=T, seed=seed)
+    with h5py.File(path, "r+") as f:
+        for key in ("joint_action/vector", "endpose/left_endpose", "endpose/right_endpose"):
+            values = f[key][...]
+            values[:static_frames] = values[0]
+            f[key][...] = values
+
+
+def _static_test_dataset(data_root, **kwargs):
+    from openwam.dataloader.robotwin import RoboTwinDataset
+
+    params = dict(
+        data_root=data_root,
+        num_frames=5,
+        height=32,
+        width=32,
+        action_mode="joint",
+        video_stride=1,
+        normalize_mode=None,
+    )
+    params.update(kwargs)
+    return RoboTwinDataset(**params)
+
+
+def _randint_must_not_be_called(a, b):
+    raise AssertionError("static-segment resampling must not run here")
+
+
+def test_static_flag_marks_windows_whose_first_step_does_not_move():
+    """_is_static is set iff action[0] (frame start+1) equals the proprio (frame start)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_static_head_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, static_frames=8)
+        ds = _static_test_dataset(tmpdir, filter_static_segments=False)
+
+        starts = [start for _, start in ds._window_index]
+        assert starts == list(range(19))
+        flags = [ds._build_sample(0, start)["_is_static"] for start in starts]
+        assert flags == [start + 1 < 8 for start in starts]
+
+
+def test_static_flag_works_on_unified_eef_actions():
+    """Unmapped 80-D slots are zero in both proprio and action, so they never break the check."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_static_head_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, static_frames=8)
+        ds = _static_test_dataset(
+            tmpdir,
+            action_mode="eef",
+            unify_action=True,
+            unify_action_map=["0-9", "34-43"],
+            filter_static_segments=False,
+        )
+
+        sample = ds._build_sample(0, 0)
+        assert sample["action"].shape[-1] == 80
+        assert sample["_is_static"] is True
+        assert ds._build_sample(0, 7)["_is_static"] is False
+
+
+def test_static_threshold_applies_to_max_abs_first_step_delta():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "episode0.hdf5")
+        _create_static_head_episode(path, T=20, static_frames=8)
+        with h5py.File(path, "r+") as f:
+            joint = f["joint_action/vector"][...]
+            joint[1, 0] += 5e-4
+            f["joint_action/vector"][...] = joint
+
+        assert _static_test_dataset(tmpdir, static_segment_threshold=1e-3)._build_sample(0, 0)["_is_static"] is True
+        assert _static_test_dataset(tmpdir, static_segment_threshold=1e-4)._build_sample(0, 0)["_is_static"] is False
+
+
+def test_static_threshold_is_measured_after_normalization():
+    """The check runs in the normalized space the model sees, not on raw values."""
+    with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as statsdir:
+        path = os.path.join(tmpdir, "episode0.hdf5")
+        _create_static_head_episode(path, T=20, static_frames=8)
+        with h5py.File(path, "r+") as f:
+            joint = f["joint_action/vector"][...]
+            joint[1, 0] = joint[0, 0] + 5e-5  # raw first-step delta 5e-5 > threshold 1e-5
+            f["joint_action/vector"][...] = joint
+        stats_path = os.path.join(statsdir, "stats.npy")
+        # min-max over [-50, 50] scales by ~1/50, so the normalized delta is ~1e-6 < 1e-5
+        np.save(
+            stats_path, {"joint": _flat_stats(14, low=-50.0, high=50.0), "eef": _flat_stats(20), "num_timesteps": 1000}
+        )
+
+        normalized = _static_test_dataset(tmpdir, normalize_mode="min-max", normalization_stats_path=stats_path)
+        assert normalized._normalizer is not None
+        assert normalized._build_sample(0, 0)["_is_static"] is True
+        assert _static_test_dataset(tmpdir)._build_sample(0, 0)["_is_static"] is False
+
+
+def test_train_getitem_resamples_static_windows(monkeypatch):
+    """The filter is on by default for train: a static window is replaced by a moving one."""
+    import openwam.dataloader.robotwin as robotwin_mod
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_static_head_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, static_frames=8)
+        ds = _static_test_dataset(tmpdir)
+        assert ds._filter_static_segments is True
+
+        moving_idx = ds._window_index.index((0, 10))
+        monkeypatch.setattr(robotwin_mod.random, "randint", lambda a, b: moving_idx)
+        sample = ds[ds._window_index.index((0, 0))]
+        assert sample["start_frame"] == 10
+        assert "_is_static" not in sample
+
+        monkeypatch.setattr(robotwin_mod.random, "randint", _randint_must_not_be_called)
+        moving = ds[ds._window_index.index((0, 12))]
+        assert moving["start_frame"] == 12
+        assert "_is_static" not in moving
+
+
+def test_static_resampling_keeps_original_window_after_max_retries(monkeypatch):
+    import openwam.dataloader.robotwin as robotwin_mod
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_static_head_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, static_frames=8)
+        ds = _static_test_dataset(tmpdir, max_static_retry=3)
+
+        calls = []
+        other_static_idx = ds._window_index.index((0, 3))
+
+        def fake_randint(a, b):
+            calls.append((a, b))
+            return other_static_idx
+
+        monkeypatch.setattr(robotwin_mod.random, "randint", fake_randint)
+        sample = ds[ds._window_index.index((0, 1))]
+        assert sample["start_frame"] == 1
+        assert calls == [(0, len(ds) - 1)] * 3
+        assert "_is_static" not in sample
+
+
+def test_val_split_and_disabled_filter_never_resample(monkeypatch):
+    import openwam.dataloader.robotwin as robotwin_mod
+
+    monkeypatch.setattr(robotwin_mod.random, "randint", _randint_must_not_be_called)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_static_head_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, static_frames=8)
+
+        val = _static_test_dataset(tmpdir, split="val")
+        sample = val[val._window_index.index((0, 0))]
+        assert sample["start_frame"] == 0
+        assert "_is_static" not in sample
+
+        off = _static_test_dataset(tmpdir, filter_static_segments=False)
+        sample = off[off._window_index.index((0, 0))]
+        assert sample["start_frame"] == 0
+        assert "_is_static" not in sample
+
+
+def test_from_config_forwards_static_segment_settings():
+    from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
+
+    class _SkipInit(Exception):
+        pass
+
+    def capture(config):
+        captured = {}
+
+        def mock_init(self, **kwargs):
+            captured.update(kwargs)
+            raise _SkipInit()
+
+        original_init = MultiTaskRoboTwinDataset.__init__
+        MultiTaskRoboTwinDataset.__init__ = mock_init
+        try:
+            MultiTaskRoboTwinDataset.from_config(config, split="train")
+        except _SkipInit:
+            pass
+        finally:
+            MultiTaskRoboTwinDataset.__init__ = original_init
+        return captured
+
+    base = {"type": "robotwin", "dataset_dir": "/dummy", "embodiment": "aloha-agilex", "variant": "clean_50"}
+    defaults = capture(base)
+    assert defaults["filter_static_segments"] is True
+    assert defaults["static_segment_threshold"] == 1e-5
+    assert defaults["max_static_retry"] == 3
+
+    custom = capture({**base, "filter_static_segments": False, "static_segment_threshold": 2e-5, "max_static_retry": 5})
+    assert custom["filter_static_segments"] is False
+    assert custom["static_segment_threshold"] == 2e-5
+    assert custom["max_static_retry"] == 5
+
+
+def test_multitask_sub_datasets_receive_static_segment_settings():
+    from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data_dir = os.path.join(tmpdir, "task_a", "test-robot_clean_50", "data")
+        os.makedirs(data_dir)
+        _create_static_head_episode(os.path.join(data_dir, "episode0.hdf5"), T=20, static_frames=8)
+
+        ds = MultiTaskRoboTwinDataset(
+            dataset_dir=tmpdir,
+            embodiment="test-robot",
+            variant="clean_50",
+            tasks=["task_a"],
+            num_frames=5,
+            height=32,
+            width=32,
+            action_mode="joint",
+            video_stride=1,
+            normalize_mode=None,
+            static_segment_threshold=2e-5,
+            max_static_retry=5,
+        )
+        (sub,) = ds._sub_datasets
+        assert sub._filter_static_segments is True
+        assert sub._static_segment_threshold == 2e-5
+        assert sub._max_static_retry == 5
+
+
+def test_robotwin_yaml_enables_static_segment_filter():
+    from omegaconf import OmegaConf
+
+    cfg_path = os.path.join(os.path.dirname(__file__), "..", "configs", "dataloader", "robotwin.yaml")
+    cfg = OmegaConf.load(cfg_path)
+    assert cfg.filter_static_segments is True
+    assert cfg.static_segment_threshold == 1e-5
+    assert cfg.max_static_retry == 3
