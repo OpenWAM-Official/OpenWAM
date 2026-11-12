@@ -153,11 +153,10 @@ def convert_rotation(
 
 
 # ---------------------------------------------------------------------------
-# Convenience helpers for RoboTwin HDF5 xyzw quaternion ↔ 6D rotation
+# Convenience helpers for xyzw quaternion ↔ 6D rotation
 #
-# RoboTwin HDF5 stores quaternions as xyzw (scipy default) while
-# OpenWAM's convert_rotation() uses wxyz.  These thin wrappers handle
-# the convention swap so callers don't have to think about it.
+# scipy uses xyzw while convert_rotation() uses wxyz. Native RoboTwin
+# endpose fields already use wxyz and should call convert_rotation() directly.
 # ---------------------------------------------------------------------------
 
 
@@ -165,7 +164,7 @@ def quat_xyzw_to_rotation_6d(q: np.ndarray) -> np.ndarray:
     """Convert xyzw quaternion to 6D rotation representation.
 
     Args:
-        q: (..., 4) quaternion in xyzw format (scipy / RoboTwin convention).
+        q: (..., 4) quaternion in xyzw format (scipy convention).
 
     Returns:
         (..., 6) 6D rotation (first two columns of the rotation matrix).
@@ -181,7 +180,7 @@ def rotation_6d_to_quat_xyzw(r6d: np.ndarray) -> np.ndarray:
         r6d: (..., 6) 6D rotation representation.
 
     Returns:
-        (..., 4) quaternion in xyzw format (scipy / RoboTwin convention).
+        (..., 4) quaternion in xyzw format (scipy convention).
     """
     wxyz = convert_rotation(r6d, RotationType.ROTATION_6D, RotationType.QUATERNION)
     return np.concatenate([wxyz[..., 1:], wxyz[..., :1]], axis=-1)

@@ -25,7 +25,7 @@ request_timeout: 300      # WebSocket timeout in seconds
 # Must match the action_mode used at training time.
 #
 #   ee   — End-effector: the server returns 20D (xyz+rot6d+grip)×2, which is
-#           automatically converted to 16D (xyz+quat_xyzw+grip)×2 before calling
+#           automatically converted to 16D (xyz+quat_wxyz+grip)×2 before calling
 #           take_action(action_type='ee'). Use with EEF-mode training (action_mode: eef). Default.
 #
 #   qpos — 14D joint angles: [l_joints(6), l_grip(1), r_joints(6), r_grip(1)]

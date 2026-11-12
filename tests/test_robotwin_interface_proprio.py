@@ -5,7 +5,6 @@ import pytest
 
 from benchmarks.robotwin import openwam2robotwin_interface as iface
 from benchmarks.utils import action_conversion
-from openwam.dataloader.transforms.rotation import quat_xyzw_to_rotation_6d
 
 
 class _Model:
@@ -15,17 +14,17 @@ class _Model:
 
 
 def test_robotwin_endpose_conversion_matches_dataset_eef_layout():
-    left = np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
-    right = np.array([0.4, 0.5, 0.6, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+    left = np.array([0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    right = np.array([0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
     eef = action_conversion.robotwin_endpose_to_eef20d(left, right, 0.25, 0.75)
     expected = np.concatenate(
         [
             left[:3],
-            quat_xyzw_to_rotation_6d(left[3:]),
+            np.array([1, 0, 0, 0, 1, 0], dtype=np.float32),
             np.array([0.25], dtype=np.float32),
             right[:3],
-            quat_xyzw_to_rotation_6d(right[3:]),
+            np.array([1, 0, 0, 0, 1, 0], dtype=np.float32),
             np.array([0.75], dtype=np.float32),
         ]
     ).astype(np.float32)
@@ -37,8 +36,8 @@ def test_robotwin_endpose_conversion_matches_dataset_eef_layout():
 def test_ee_action_type_sends_20d_eef_proprio():
     observation = {
         "endpose": {
-            "left_endpose": np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0], dtype=np.float32),
-            "right_endpose": np.array([0.4, 0.5, 0.6, 0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+            "left_endpose": np.array([0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            "right_endpose": np.array([0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0], dtype=np.float32),
             "left_gripper": np.array(0.25, dtype=np.float32),
             "right_gripper": np.array(0.75, dtype=np.float32),
         },
