@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 import yaml
-from openwam2robocasa_gr1_interface import OpenWAMRoboCasaGR1Policy, zero_action
+from openwam2robocasa_gr1_interface import DEFAULT_HEAD_CAMERA_KEY, OpenWAMRoboCasaGR1Policy, zero_action
 
 
 def _repo_root() -> Path:
@@ -67,7 +67,7 @@ def run_eval(cfg: dict) -> int:
         host=cfg.get("host", "127.0.0.1"),
         port=int(cfg.get("port", 8848)),
         request_timeout=int(cfg.get("request_timeout", 300)),
-        head_camera_key=cfg.get("head_camera_key", "video.ego_view_pad_res256_freq20"),
+        head_camera_key=cfg.get("head_camera_key", DEFAULT_HEAD_CAMERA_KEY),
         left_wrist_camera_key=cfg.get("left_wrist_camera_key"),
         right_wrist_camera_key=cfg.get("right_wrist_camera_key"),
         prompt_key=cfg.get("prompt_key", "annotation.human.coarse_action"),
@@ -78,7 +78,7 @@ def run_eval(cfg: dict) -> int:
         debug_dir=cfg.get("debug_dir", "./debug_robocasa_gr1"),
     )
 
-    num_episodes = int(cfg.get("num_episodes", 1))
+    num_episodes = int(cfg.get("num_episodes", 10))
     max_steps = int(cfg.get("max_steps", 720))
     settle_steps = int(cfg.get("settle_steps", 0))
     fail_on_incomplete = _require_bool(cfg.get("fail_on_incomplete", False), "fail_on_incomplete")
