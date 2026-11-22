@@ -18,7 +18,6 @@ import numpy as np  # noqa: E402
 from benchmarks.utils import WSPolicyClient, client, resize_for_lshape_slot, transport  # noqa: E402
 from openwam.dataloader.utils.gr1_kinematics import EEF33_DIM, GR1Kinematics  # noqa: E402
 
-
 DEFAULT_HEAD_CAMERA_KEY = "video.ego_view_bg_crop_pad_res256_freq20"
 
 
