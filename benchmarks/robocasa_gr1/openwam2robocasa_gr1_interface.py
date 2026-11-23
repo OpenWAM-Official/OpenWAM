@@ -18,6 +18,8 @@ import numpy as np  # noqa: E402
 from benchmarks.utils import WSPolicyClient, client, resize_for_lshape_slot, transport  # noqa: E402
 from openwam.dataloader.utils.gr1_kinematics import EEF33_DIM, GR1Kinematics  # noqa: E402
 
+DEFAULT_HEAD_CAMERA_KEY = "video.ego_view_bg_crop_pad_res256_freq20"
+
 
 def _as_vector(value) -> np.ndarray:
     return np.asarray(value, dtype=np.float32).reshape(-1)
@@ -45,7 +47,7 @@ class OpenWAMRoboCasaGR1Policy:
         host: str = "127.0.0.1",
         port: int = 8848,
         request_timeout: int = 300,
-        head_camera_key: str = "video.ego_view_pad_res256_freq20",
+        head_camera_key: str = DEFAULT_HEAD_CAMERA_KEY,
         left_wrist_camera_key: str | None = None,
         right_wrist_camera_key: str | None = None,
         prompt_key: str = "annotation.human.coarse_action",

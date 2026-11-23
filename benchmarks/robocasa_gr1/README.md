@@ -28,7 +28,7 @@ export ROBOCASA_GR1_PYTHON=/path/to/miniconda3/envs/robocasa-gr1/bin/python
 ROBOCASA_GR1_ENABLE_RENDER=1 bash benchmarks/robocasa_gr1/run_smoke.sh env   # also: import | task
 ```
 
-Success prints `env_smoke=ok` with `video.ego_view_pad_res256_freq20` among the observation keys.
+With rendering enabled, check for `env_smoke=ok` and `video.ego_view_bg_crop_pad_res256_freq20` among the observation keys. The background-cropped (`bg_crop_pad`) stream matches OpenWAM training and the official GR00T evaluation. The older default (`video.ego_view_pad_res256_freq20`) uses a different crop and does not match the checkpoint's training input. Update `head_camera_key` in any copied config that still uses the old default.
 
 <details>
 <summary><b>Constraints & troubleshooting (details)</b></summary>
@@ -50,10 +50,12 @@ python scripts/download_assets/download_openwam_checkpoints.py
 Run from the repo root — the checkpoint lands in `assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-RoboCasa-GR1` (or use a checkpoint you trained yourself). Then:
 
 ```bash
-bash scripts/deploy.sh assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-RoboCasa-GR1
+bash scripts/deploy.sh assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-RoboCasa-GR1 \
+    --inference-mode sync --inference-horizon 16 --denoise-mode sync \
+    optimization.dit_cache.enabled=false
 ```
 
-WebSocket port 8848 by default (`--port` to change). Keep it running.
+This runs synchronous inference and denoising, executes 16 actions per generated chunk, and disables the DiT cache. These are server-side options, not client YAML settings. WebSocket port 8848 is the default (`--port` to change). Keep the server running.
 
 ## 3. Run the Evaluation
 
@@ -66,20 +68,28 @@ ROBOCASA_GR1_GPU=0 \
 bash benchmarks/robocasa_gr1/single_eval.sh gr1_unified/PnPCupToDrawerClose_GR1ArmsAndWaistFourierHands_Env 8848 127.0.0.1
 ```
 
-For a full sweep, invoke it once per `gr1_unified/*` env id (24 official tasks, named `gr1_unified/<Task>_GR1ArmsAndWaistFourierHands_Env`); one server handles them sequentially.
+The client defaults follow the official RoboCasa GR1 rollout protocol: 10 episodes per task, capped at 720 steps per episode. A full sweep covers the [24 official tasks](official_24_tasks.txt) for 240 episodes total. With `ROBOCASA_GR1_PATH` and `ROBOCASA_GR1_PYTHON` exported as above, run them sequentially against one server from the OpenWAM repo root:
+
+```bash
+while IFS= read -r env_id; do
+    bash benchmarks/robocasa_gr1/single_eval.sh "$env_id" 8848 127.0.0.1 </dev/null || break
+done < benchmarks/robocasa_gr1/official_24_tasks.txt
+```
 
 <details>
 <summary><b>Notes & troubleshooting</b></summary>
 
 - The checkpoint must be the EEF33 GR1 one: the client sends 33-dim state and requires a 33-dim action back, otherwise it raises.
 - `env_id` is validated against `gr1_unified/*`; host/port must match the running server.
-- Other knobs (`num_episodes`, `max_steps` (720), `seed`, `fail_on_incomplete`, …): copy `benchmarks/robocasa_gr1/policy_config.yml`, edit, pass `POLICY_CONFIG_PATH=/path/to/custom.yml`.
+- To change rollout settings (`num_episodes`, `max_steps`, `seed`, `fail_on_incomplete`, …), copy `benchmarks/robocasa_gr1/policy_config.yml`, edit it, and pass `POLICY_CONFIG_PATH=/path/to/custom.yml`.
 - `ROBOCASA_GR1_GPU` feeds `CUDA_VISIBLE_DEVICES` + `MUJOCO_EGL_DEVICE_ID`.
 - Results print to stdout: per-episode `[RESULT]` lines and `Success rate: n/N => x%`. Exit code stays 0 below 100% unless `fail_on_incomplete: true`.
 
 </details>
 
 ## 4. Results
+
+In an OpenWAM-α evaluation with the aligned camera and horizon 16, 152 of 240 episodes succeeded (63.3%). On the same benchmark, using the old `pad` camera yielded about 11.7%, and using `bg_crop_pad` with horizon 8 yielded about 52.1%. These are validation runs, separate from the paper results below.
 
 Scores from the OpenWAM paper. **Bold** = best, <u>underline</u> = second best; Type distinguishes WAM vs VLA.
 

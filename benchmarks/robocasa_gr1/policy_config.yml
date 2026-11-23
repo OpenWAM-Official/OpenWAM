@@ -15,7 +15,10 @@ request_timeout: 300
 # Official RoboCasa GR1 tabletop gym id. The repository registers all 24 tasks
 # under gr1_unified/* for GR1ArmsAndWaistFourierHands.
 env_id: "gr1_unified/PnPCupToDrawerClose_GR1ArmsAndWaistFourierHands_Env"
-num_episodes: 1
+# Official evaluation protocol: 10 episodes per task, at most 720 steps each.
+# For OpenWAM, deploy with --inference-mode sync --inference-horizon 16
+# --denoise-mode sync optimization.dit_cache.enabled=false (server options).
+num_episodes: 10
 max_steps: 720
 settle_steps: 0
 seed: 0
@@ -25,9 +28,9 @@ fail_on_incomplete: false
 # RGB observations and already handles the RoboCasa image orientation.
 enable_render: true
 
-# Observation mapping to OpenWAM's fixed camera contract. The official GR1
-# tabletop dataset has one ego-view video stream by default.
-head_camera_key: video.ego_view_pad_res256_freq20
+# Use the background-cropped ego view used for OpenWAM training and official
+# GR00T evaluation, not the uncropped ego_view_pad stream.
+head_camera_key: video.ego_view_bg_crop_pad_res256_freq20
 left_wrist_camera_key: null
 right_wrist_camera_key: null
 prompt_key: annotation.human.coarse_action
