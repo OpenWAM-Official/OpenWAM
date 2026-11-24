@@ -62,6 +62,7 @@ def load_from_checkpoint_dir(
     ckpt_dir: str,
     device: str = "cuda",
     ckpt_name: Optional[str] = None,
+    text_encoder_device: Optional[str] = None,
 ) -> Tuple[DictConfig, BaseWAMArchitecture]:
     """Load full model from a self-contained checkpoint directory.
 
@@ -74,6 +75,8 @@ def load_from_checkpoint_dir(
         device: Target device (e.g. ``"cuda"`` or ``"cuda:0"``).
         ckpt_name: Specific checkpoint filename.  If *None*, the latest
             (highest step number) checkpoint is used.
+        text_encoder_device: Optional device for the frozen video-backbone
+            text encoder (e.g. ``"cpu"``). *None* keeps it on ``device``.
 
     Returns:
         ``(cfg, architecture)`` — the resolved config and architecture
@@ -211,7 +214,17 @@ def load_from_checkpoint_dir(
     model_dtype = _DTYPE_MAP.get(str(_mp).strip().lower(), torch.bfloat16)
     logger.info("Loading all models with dtype=%s (mixed_precision=%s)", model_dtype, _mp)
 
+    video_backbone = getattr(architecture, "video_backbone", None)
+    text_encoder = getattr(video_backbone, "text_encoder", None) if text_encoder_device is not None else None
+    if not isinstance(text_encoder, torch.nn.Module):
+        text_encoder = None
+    if text_encoder is not None:
+        # Detach it so set_dtype_device does not copy its weights to ``device`` first.
+        del video_backbone.text_encoder
     architecture.set_dtype_device(model_dtype, torch.device(device))
+    if text_encoder is not None:
+        video_backbone.text_encoder = text_encoder.to(dtype=model_dtype, device=torch.device(text_encoder_device))
+        logger.info("Text encoder placed on %s", text_encoder_device)
     architecture.eval()
 
     # 6. Attach the action normalizer built from saved normalization_stats.npy + config.

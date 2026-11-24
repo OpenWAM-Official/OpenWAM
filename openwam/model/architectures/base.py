@@ -1517,8 +1517,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
         )
 
         if profile:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            if torch.accelerator.is_available():
+                torch.accelerator.synchronize()
             logger.info("[WAM_PROFILE] pipeline_prep: %.3fs", time.time() - t0)
 
         if input_video_latents is not None:
@@ -1638,8 +1638,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
                     action_latents[..., inactive_action_dims] = inactive_action_noise * float(sigma_a_next)
 
         if profile:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            if torch.accelerator.is_available():
+                torch.accelerator.synchronize()
             logger.info("[WAM_PROFILE] denoising_loop: %.3fs", time.time() - t_loop)
 
         # VAE decode. Fail-fast when the backbone is wired to an irreversible

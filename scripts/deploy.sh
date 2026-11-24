@@ -16,6 +16,7 @@
 #   NUM_GPUS         Number of GPUs / servers to launch (default: 1)
 #   PORT_BASE        Base WebSocket port; GPU i -> PORT_BASE + i (default: 8848)
 #   GPU_START        First GPU index (default: 0)
+#   DEVICE_TYPE      Device type of the GPUs, cuda or xpu (default: cuda)
 #   LOG_DIR          Log directory (default: ./logs), files deploy_gpu${i}.log
 set -euo pipefail
 
@@ -38,6 +39,7 @@ fi
 
 # ── Multi server: one process per GPU, incrementing ports, log files ─────────
 PORT_BASE="${PORT_BASE:-8848}"
+DEVICE_TYPE="${DEVICE_TYPE:-cuda}"
 GPU_START="${GPU_START:-0}"
 LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs}"
 
@@ -94,7 +96,7 @@ for ((i = 0; i < NUM_GPUS; i++)); do
 
     python "$SCRIPT_DIR/deploy.py" \
         "${ckpt_args[@]}" \
-        --device "cuda:${gpu}" \
+        --device "${DEVICE_TYPE}:${gpu}" \
         --port "$port" \
         "$@" \
         >"$log_file" 2>&1 &

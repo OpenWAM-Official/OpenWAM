@@ -358,7 +358,13 @@ def build_server_from_config(
     deploy_cfg = cfg if cfg is not None else OmegaConf.create({})
     _validate_inference_config(deploy_cfg)
     _normalize_compile_enabled_in_cfg(deploy_cfg)
-    training_cfg, architecture = load_from_checkpoint_dir(ckpt_dir, device=device, ckpt_name=ckpt_name)
+    text_encoder_device = OmegaConf.select(deploy_cfg, "text_encoder_device", default=None)
+    training_cfg, architecture = load_from_checkpoint_dir(
+        ckpt_dir,
+        device=device,
+        ckpt_name=ckpt_name,
+        text_encoder_device=None if text_encoder_device is None else str(text_encoder_device),
+    )
     merged = merge_deploy_cfg(training_cfg, deploy_cfg)
     engine = JointInferenceEngine(cfg=merged, architecture=architecture)
     return PolicyServer(engine=engine, cfg=merged, readiness_token=readiness_token)

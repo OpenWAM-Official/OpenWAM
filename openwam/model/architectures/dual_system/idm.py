@@ -994,8 +994,8 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         )
 
         if profile:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            if torch.accelerator.is_available():
+                torch.accelerator.synchronize()
             logger.info("[IDM_PROFILE] pipeline_prep: %.3fs", time.time() - t0)
 
         if input_video_latents is not None:
@@ -1076,8 +1076,8 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             inputs_shared_with_proprio["latents"] = new_latents
 
         if profile:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            if torch.accelerator.is_available():
+                torch.accelerator.synchronize()
             logger.info("[IDM_PROFILE] stage1_video: %.3fs", time.time() - t_stage1)
 
         # ---- Stage 2: Denoise action with frozen video ----
@@ -1227,8 +1227,8 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
                     action_latents[..., inactive_action_dims] = inactive_action_noise * float(sigma_a_next)
 
         if profile:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            if torch.accelerator.is_available():
+                torch.accelerator.synchronize()
             logger.info("[IDM_PROFILE] stage2_action: %.3fs", time.time() - t_stage2)
 
         # VAE decode

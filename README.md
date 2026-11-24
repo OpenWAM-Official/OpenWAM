@@ -155,6 +155,34 @@ The script installs the upstream cosmos packages into the active environment and
 
 </details>
 
+### Run on Intel GPU (XPU)
+
+Inference (the policy server) also runs on Intel GPUs, such as the Arc Pro B60, through PyTorch's XPU backend.
+Install the XPU build of PyTorch first, then OpenWAM:
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/xpu
+pip install -e .
+```
+
+Deploy with `--device xpu:0`:
+
+```bash
+bash scripts/deploy.sh <ckpt_dir_path> --device xpu:0
+```
+
+If the whole checkpoint does not fit on the card (an OpenWAM-α checkpoint on one Arc Pro B60, for example),
+keep the frozen umT5 text encoder on the CPU. Each prompt is encoded once and then cached:
+
+```bash
+bash scripts/deploy.sh <ckpt_dir_path> --device xpu:0 text_encoder_device=cpu
+```
+
+With several cards, `NUM_GPUS=2 DEVICE_TYPE=xpu bash scripts/deploy.sh <ckpt_dir_path> text_encoder_device=cpu`
+starts one server per card. This covers inference only. The optional flash-attn, SageAttention and xformers
+backends and the Triton kernels in `openwam/model/kernels/` stay CUDA-only; on XPU, attention runs through
+PyTorch SDPA and the kernels fall back to their PyTorch paths.
+
 ## Assets Preparation
 
 The downloaders are interactive by default; every menu step also has a flag (`--name`, `--source`, `--root`, `--yes`, see `--help`) so they can run unattended, and the default storage location is resolved relative to the repository regardless of the working directory. Component downloaders store assets under
