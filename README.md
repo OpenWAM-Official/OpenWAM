@@ -157,7 +157,7 @@ The script installs the upstream cosmos packages into the active environment and
 
 ### Run on Intel GPU (XPU)
 
-Inference (the policy server) also runs on Intel GPUs, such as the Arc Pro B60, through PyTorch's XPU backend.
+Inference (the policy server) also runs on Intel GPUs through PyTorch's XPU backend; it was tested on an Intel Arc Pro B60.
 Install the XPU build of PyTorch first, then OpenWAM:
 
 ```bash
@@ -179,7 +179,9 @@ bash scripts/deploy.sh <ckpt_dir_path> --device xpu:0 text_encoder_device=cpu
 ```
 
 With several cards, `NUM_GPUS=2 DEVICE_TYPE=xpu bash scripts/deploy.sh <ckpt_dir_path> text_encoder_device=cpu`
-starts one server per card. This covers inference only. The optional flash-attn, SageAttention and xformers
+starts one server per card. This covers inference only, and was tested with the released dual-system checkpoints
+(joint self-attention and IDM, with the Wan2.2-TI2V-5B and Wan2.1-VACE-1.3B video backbones); the other architectures
+and video backbones were not run on XPU. The optional flash-attn, SageAttention and xformers
 backends and the Triton kernels in `openwam/model/kernels/` stay CUDA-only; on XPU, attention runs through
 PyTorch SDPA and the kernels fall back to their PyTorch paths.
 
