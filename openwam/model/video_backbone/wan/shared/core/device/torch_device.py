@@ -3,11 +3,16 @@ from typing import Any
 import torch
 
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
+IS_XPU_AVAILABLE = hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
 def get_device_type() -> str:
-    """Get device type based on current machine, currently only support CPU, CUDA."""
-    return "cuda" if IS_CUDA_AVAILABLE else "cpu"
+    """Get device type based on current machine: CUDA, then Intel XPU, then CPU."""
+    if IS_CUDA_AVAILABLE:
+        return "cuda"
+    if IS_XPU_AVAILABLE:
+        return "xpu"
+    return "cpu"
 
 
 def get_torch_device() -> Any:
@@ -35,6 +40,8 @@ def parse_device_type(device):
     if isinstance(device, str):
         if device.startswith("cuda"):
             return "cuda"
+        elif device.startswith("xpu"):
+            return "xpu"
         else:
             return "cpu"
     elif isinstance(device, torch.device):

@@ -290,7 +290,11 @@ def encode_text_for_inference(
         return vace_cache["context"], vace_cache["seq_lens"]
     if prompt_embed_cache is not None and prompt in prompt_embed_cache:
         return prompt_embed_cache[prompt]
-    context, seq_lens = encode_text([prompt], tokenizer=tokenizer, text_encoder=text_encoder, device=device)
+    # The text encoder may sit on another device than the model (deploy ``text_encoder_device``).
+    param = next(text_encoder.parameters(), None) if isinstance(text_encoder, torch.nn.Module) else None
+    encoder_device = device if param is None else param.device
+    context, seq_lens = encode_text([prompt], tokenizer=tokenizer, text_encoder=text_encoder, device=encoder_device)
+    context, seq_lens = context.to(device), seq_lens.to(device)
     if prompt_embed_cache is not None:
         prompt_embed_cache[prompt] = (context, seq_lens)
     return context, seq_lens

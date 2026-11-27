@@ -1,6 +1,7 @@
 # --- Base deploy settings ---
 checkpoint_path: null          # Default checkpoint dir; --ckpt-dir overrides
 device: cuda:0
+text_encoder_device: null      # null = same as device; e.g. cpu keeps the frozen Wan umT5 text encoder off the GPU
 server:
   host: "0.0.0.0"
   port: 8848                   # WebSocket port
