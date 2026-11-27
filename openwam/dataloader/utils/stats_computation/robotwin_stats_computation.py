@@ -43,7 +43,8 @@ _JOINT_ACTION_DIM = 14  # aloha-agilex qpos vector
 _EEF_ACTION_DIM = 20  # [xyz(3) + rot6d(6) + grip(1)] x 2 arms
 _MODES = ("joint", "eef")
 
-_SHARD_DIR_NAME = "shards_v1"
+# Do not reuse EEF shards computed by interpreting native wxyz as xyzw.
+_SHARD_DIR_NAME = "shards_wxyz_v2"
 
 
 # ---------------------------------------------------------------------------
@@ -107,8 +108,8 @@ def _shard_path_for_root(checkpoint_path: str, data_root: str) -> str:
 
     The absolute ``data_root`` is the whole cache key: expanding/shrinking the
     task list naturally reuses or ignores shards by recomputing this path for
-    the *current* task_roots. ``shards_v1`` is the shard-format namespace; bump
-    it if the NPZ payload schema ever changes.
+    the *current* task_roots. The shard namespace versions both the payload
+    schema and rotation convention, so legacy EEF statistics cannot be reused.
     """
     canonical = os.path.abspath(data_root)
     digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]
@@ -125,7 +126,7 @@ def _read_eef_actions(f) -> Optional[np.ndarray]:
     if "endpose/left_endpose" not in f:
         return None
     # Local import avoids a hard dependency when only joint is needed in tests
-    from openwam.dataloader.transforms.rotation import quat_xyzw_to_rotation_6d
+    from openwam.dataloader.transforms.rotation import RotationType, convert_rotation
 
     left_ep = f["endpose/left_endpose"][()].astype(np.float64)
     right_ep = f["endpose/right_endpose"][()].astype(np.float64)
@@ -135,7 +136,7 @@ def _read_eef_actions(f) -> Optional[np.ndarray]:
     left = np.concatenate(
         [
             left_ep[:, :3],
-            quat_xyzw_to_rotation_6d(left_ep[:, 3:]).astype(np.float64),
+            convert_rotation(left_ep[:, 3:], RotationType.QUATERNION, RotationType.ROTATION_6D).astype(np.float64),
             left_grip[:, None] if left_grip.ndim == 1 else left_grip,
         ],
         axis=-1,
@@ -143,7 +144,7 @@ def _read_eef_actions(f) -> Optional[np.ndarray]:
     right = np.concatenate(
         [
             right_ep[:, :3],
-            quat_xyzw_to_rotation_6d(right_ep[:, 3:]).astype(np.float64),
+            convert_rotation(right_ep[:, 3:], RotationType.QUATERNION, RotationType.ROTATION_6D).astype(np.float64),
             right_grip[:, None] if right_grip.ndim == 1 else right_grip,
         ],
         axis=-1,
@@ -373,7 +374,7 @@ def compute_multitask_robotwin_stats(
         tasks: Optional internal task restriction. Defaults to every task
             discovered on disk.
         checkpoint_path: When set, the function persists a per-task NPZ
-            shard into ``<checkpoint_path>.partial/shards_v1/`` after each
+            shard into ``<checkpoint_path>.partial/shards_wxyz_v2/`` after each
             task-root is processed. A subsequent call recomputes the shard
             path from the current ``data_root`` and skips it when the shard
             already exists.

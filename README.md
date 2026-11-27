@@ -73,6 +73,10 @@ All architectures are selected via `configs/model/<framework>.yaml` with `archit
 
 ### Benchmarks and Evaluation
 
+RoboTwin EEF uses native **wxyz** quaternions. Checkpoints trained with the earlier
+xyzw interpretation require their matching legacy revision; see the
+[quaternion convention and migration note](benchmarks/robotwin/README.md#eef-quaternion-convention-and-checkpoint-compatibility).
+
 | Benchmark | Status | Notes |
 |---|---|---|
 | RoboTwin eval | Supported | All 50 tasks; see `benchmarks/robotwin/` |

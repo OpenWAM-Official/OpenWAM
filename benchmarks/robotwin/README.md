@@ -35,6 +35,22 @@ git clone https://github.com/RoboTwin-Platform/RoboTwin.git /path/to/RoboTwin
 | mplib | 0.2.1 |
 | torch (RoboTwin env) | 2.4.1 (the policy server uses OpenWAM's own env) |
 
+### EEF quaternion convention and checkpoint compatibility
+
+Native RoboTwin `endpose` observations, HDF5 fields, and `ee` actions use
+scalar-first **wxyz** quaternions. The EEF loader, statistics computation, and
+benchmark adapter convert these to/from the first two columns of the physical
+rotation matrix (rot6d).
+
+Earlier revisions interpreted these native tuples as xyzw. This correction
+changes the EEF representation and is **not a drop-in change for checkpoints
+trained with that legacy convention**. Keep those checkpoints with their
+matching legacy training/evaluation revision until they are explicitly migrated
+or retrained. Regenerate normalization statistics from native HDF5 for training
+with the corrected representation; existing final stats files are not migrated
+automatically. The stats script uses a new partial-shard namespace so resumed
+computation does not reuse legacy shards. Joint/qpos mode is unaffected.
+
 ## 2. Start the Policy Server
 
 ```bash
